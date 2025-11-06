@@ -17,6 +17,8 @@
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/mailServer/session/session_base.h"
 
+#include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
+
 namespace mail_system {
 
 enum class ServerState {
@@ -31,8 +33,8 @@ class ServerBase {
 class SessionBase;
 public:
     ServerBase(const ServerConfig& config,
-         std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
-         std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
+         std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
+         std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
          std::shared_ptr<DBPool> dbPool = nullptr); //allowing sharing pool with other servers
     virtual ~ServerBase();
 
@@ -49,6 +51,12 @@ public:
     virtual void accept_connection();
     // 处理新连接
     virtual void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket, const boost::system::error_code& error) = 0;
+    // 转发邮件
+    void start_forward_email(std::shared_ptr<mail> email);
+    // 加载已知域名
+    void load_known_domains(const char* domain_file);
+    // 获取连接
+    boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& get_connection();
 
     // 获取IO上下文
     std::shared_ptr<boost::asio::io_context> get_io_context();
@@ -58,10 +66,12 @@ public:
     std::shared_ptr<boost::asio::ip::tcp::acceptor> get_acceptor();
 
 public:
-    std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
-    std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
+    std::shared_ptr<mail_system::ThreadPoolBase> m_ioThreadPool;
+    std::shared_ptr<mail_system::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
+    std::shared_ptr<ClientFSM> m_client_fsm;
     bool ssl_in_worker;
+    const std::string m_domain = "example.com";
 
 private:
     // 加载SSL证书
@@ -74,6 +84,8 @@ private:
     boost::asio::ssl::context m_sslContext;
     // 接受器
     std::shared_ptr<boost::asio::ip::tcp::acceptor> m_acceptor;
+    // 解析器
+    std::shared_ptr<boost::asio::ip::tcp::resolver> m_resolver;
     // 工作守卫
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> m_workGuard;
     // 是否正在运行
@@ -82,6 +94,8 @@ private:
     std::thread m_listenerThread;
     // 服务器状态
     std::atomic<ServerState> m_state;
+    // 已知域名
+    std::map<std::string, std::string> m_known_domains;     //<domain, ip_address>
 };
 
 } // namespace mail_system

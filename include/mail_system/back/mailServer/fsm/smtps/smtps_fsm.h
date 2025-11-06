@@ -75,12 +75,10 @@ public:
         }
     }
 
-    void save_mail_data(mail* d) {
-        std::unique_ptr<mail> data;
-        data.reset(d);
+    void save_mail_data(std::shared_ptr<mail> data) {
         auto connection = m_dbPool->get_connection();
         if (connection && connection->is_connected()) {
-            std::string sql = "INSERT INTO mails (sender, recipient, subjiect, body) VALUES ('" +
+            std::string sql = "INSERT INTO mails (sender, recipient, subject, body) VALUES ('" +
                               connection->escape_string(data->from) + "', '" +
                               connection->escape_string(data->to) + "', '" +
                               connection->escape_string(data->header) + "', '" +

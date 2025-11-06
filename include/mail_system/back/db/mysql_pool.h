@@ -55,6 +55,8 @@ private:
     void cleanup_idle_connections();
     // 验证连接是否有效
     bool validate_connection(std::shared_ptr<IDBConnection> connection);
+    // 执行SQL脚本
+    void execute_sql_script(const std::string& script_path);
 };
 
 // MySQL连接池工厂实现

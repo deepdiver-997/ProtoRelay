@@ -97,7 +97,7 @@ void SmtpsSession::handle_read(const std::string& data) {
         
         if (current_state_ == SmtpsState::IN_MESSAGE) {
             // 检查是否为数据结束标记
-            if (line == ".") {
+            if (line.find("\r\n.") == line.size() - 3) {
                 // 处理邮件数据结束事件
                 m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::DATA_END, std::string());
                 // self->async_write("250 OK\r\n", [self](const boost::system::error_code& error) {

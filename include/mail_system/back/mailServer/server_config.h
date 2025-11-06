@@ -4,6 +4,7 @@
 #include <thread>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <cstdint>
 #include <nlohmann/json.hpp> // JSON库
@@ -121,6 +122,14 @@ struct ServerConfig {
         
         return true;
     }
+
+    std::string resolve_path(const std::string& config_path, const std::string& relative_path) {
+        if (relative_path.empty()) {
+            return "";
+        }
+        std::filesystem::path config_dir = std::filesystem::path(config_path).parent_path();
+        return (config_dir / relative_path).lexically_normal().string();
+    }
     
     // 从配置文件加载配置
     bool loadFromFile(const std::string& filename) {
@@ -140,16 +149,16 @@ struct ServerConfig {
         address = json_config.value("address", address);
         port = json_config.value("port", port);
         use_ssl = json_config.value("use_ssl", use_ssl);
-        certFile = json_config.value("certFile", certFile);
-        keyFile = json_config.value("keyFile", keyFile);
-        dhFile = json_config.value("dhFile", dhFile);
+        certFile = resolve_path(filename, json_config.value("certFile", certFile));
+        keyFile = resolve_path(filename, json_config.value("keyFile", keyFile));
+        dhFile = resolve_path(filename, json_config.value("dhFile", dhFile));
         maxMessageSize = json_config.value("maxMessageSize", maxMessageSize);
         maxConnections = json_config.value("maxConnections", maxConnections);
         io_thread_count = json_config.value("io_thread_count", io_thread_count);
         worker_thread_count = json_config.value("worker_thread_count", worker_thread_count);
         use_database = json_config.value("use_database", use_database);
         if (use_database) {
-            std::string db_config_file = json_config.value("db_config_file", "");
+            std::string db_config_file = resolve_path(filename, json_config.value("db_config_file", ""));
             db_pool_config.loadFromJson(db_config_file);
         }
         connection_timeout = json_config.value("connection_timeout", connection_timeout);

@@ -35,8 +35,11 @@ try {
         } else {
             m_dbPool = nullptr;
         }
-    
+
+        m_client_fsm = std::make_shared<ClientFSM>();
+
         m_ioContext = std::make_shared<boost::asio::io_context>();
+        m_resolver = std::make_shared<boost::asio::ip::tcp::resolver>(*m_ioContext);
         m_acceptor = std::make_shared<boost::asio::ip::tcp::acceptor>(*m_ioContext);
         m_workGuard = std::make_unique<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(m_ioContext->get_executor());
         // 配置SSL上下文
@@ -202,6 +205,54 @@ void ServerBase::stop(ServerState next_state) {
     }
 }
 
+void ServerBase::start_forward_email(std::shared_ptr<mail> email) {
+    // std::sort(email->to.begin(), email->to.end(), [](const std::string& a, const std::string& b) {
+    //     auto pos_a = a.find('@');
+    //     auto pos_b = b.find('@');
+    //     if (pos_a != std::string::npos && pos_b != std::string::npos) {
+    //         return a.substr(pos_a + 1) < b.substr(pos_b + 1);
+    //     }
+    // });
+    std::map<std::string, std::vector<std::string>> remote_domains;
+    for (const auto& recipient : email->to) {
+        auto pos = recipient.find('@');
+        if (pos != std::string::npos && pos + 1 < recipient.size() && recipient.substr(pos + 1) != m_domain) {
+            remote_domains[recipient.substr(pos + 1)].push_back(recipient);
+        }
+    }
+    if (remote_domains.empty()) {
+        return;
+    }
+    for (const auto& [domain, recipients] : remote_domains) {
+        // 这里可以添加实际的邮件转发代码
+        boost::asio::ip::tcp::endpoint edp;
+        if (m_known_domains.find(domain) == m_known_domains.end()) {
+            edp = *m_resolver->resolve(domain, "smtp").begin();
+        } else {
+            edp = boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address(m_known_domains[domain]), 465);
+        }
+        // 创建新的TCP socket和SSL流
+        auto socket = std::make_unique<boost::asio::ip::tcp::socket>(std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
+        auto ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(*socket), m_sslContext);
+        ssl_socket->lowest_layer().async_connect(edp, [this, ssl_socket = std::move(ssl_socket), recipients, edp, email](const boost::system::error_code& error) mutable {
+            if (!error) {
+                // 连接成功，进行邮件转发
+                m_client_fsm->start(std::dynamic_pointer_cast<mail_system::SessionBase>(std::make_shared<ClientSession>(email, std::move(ssl_socket), this, m_client_fsm, recipients)));
+            } else {
+                std::cerr << "Error connecting to " << edp << ": " << error.message() << std::endl;
+            }
+        });
+    }
+}
+
+void ServerBase::load_known_domains(const char* domain_file) {
+    // 这里可以添加加载已知域名的代码
+}
+
+boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& ServerBase::get_connection() {
+    // return boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(*m_acceptor);
+}
+
 ServerState ServerBase::get_state() const {
     return m_state.load();
 }
@@ -235,11 +286,16 @@ void ServerBase::load_certificates(const std::string& cert_file, const std::stri
         m_sslContext.use_private_key_file(key_file, boost::asio::ssl::context::pem);
         
         // 验证私钥
-        if(dh_file != "") {
-            if (!std::ifstream(dh_file.c_str()).good()) {
-                throw std::runtime_error("DH file not found: " + dh_file);
+        if(!dh_file.empty()) {
+            try {
+                if (!std::ifstream(dh_file.c_str()).good()) {
+                    std::cerr << "Warning: DH file not found: " << dh_file << std::endl;
+                } else {
+                    m_sslContext.use_tmp_dh_file(dh_file);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to load DH file: " << e.what() << std::endl;
             }
-            m_sslContext.use_tmp_dh_file(dh_file);
         }
 
         std::cout << "SSL certificates loaded successfully" << std::endl;

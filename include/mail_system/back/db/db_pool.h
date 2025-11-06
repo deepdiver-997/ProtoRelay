@@ -50,6 +50,7 @@ struct DBPoolConfig {
     std::string user;
     std::string password;
     std::string database;
+    std::string initialize_script;
     unsigned int port;
     size_t initial_pool_size;
     size_t max_pool_size;
@@ -76,6 +77,14 @@ struct DBPoolConfig {
                   << std::endl;
     }
 
+    std::string resolve_path(const std::string& config_path, const std::string& relative_path) {
+        if (relative_path.empty()) {
+            return "";
+        }
+        std::filesystem::path config_dir = std::filesystem::path(config_path).parent_path();
+        return (config_dir / relative_path).lexically_normal().string();
+    }
+
     // 从JSON对象加载配置
     bool loadFromJson(const std::string& filename) {
         std::ifstream config_file(filename.c_str());
@@ -95,6 +104,7 @@ struct DBPoolConfig {
         user = json.value("user", user);
         password = json.value("password", password);
         database = json.value("database", database);
+        initialize_script = resolve_path(filename, json.value("initialize_script", initialize_script));
         port = json.value("port", port);
         initial_pool_size = json.value("initial_pool_size", initial_pool_size);
         max_pool_size = json.value("max_pool_size", max_pool_size);

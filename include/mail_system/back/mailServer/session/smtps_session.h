@@ -1,7 +1,7 @@
 #ifndef SMTPS_SESSION_H
 #define SMTPS_SESSION_H
 
-#include "session_base.h"
+#include <mail_system/back/mailServer/session/session_base.h>
 #include <string>
 #include <memory>
 #include <boost/asio.hpp>
@@ -47,6 +47,7 @@ struct SmtpsContext {
     std::vector<std::string> recipient_addresses;  // 收件人地址列表
     // std::string message_data;        // 邮件内容
     bool is_authenticated;           // 是否已认证
+    const std::string m_domain = "example.com";
     
     // 清理上下文数据
     void clear() {
@@ -56,6 +57,19 @@ struct SmtpsContext {
         recipient_addresses.clear();
         // message_data.clear();
         is_authenticated = false;
+    }
+
+    std::vector<std::string> get_remote_domains() const {
+        std::vector<std::string> domains;
+        for (const auto& addr : recipient_addresses) {
+            auto at_pos = addr.find('@');
+            if (at_pos != std::string::npos && at_pos + 1 < addr.size()) {
+                if (addr.substr(at_pos + 1) != m_domain) {
+                    domains.push_back(addr.substr(at_pos + 1));
+                }
+            }
+        }
+        return domains;
     }
 };
 

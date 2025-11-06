@@ -19,6 +19,47 @@ MySQLPool::~MySQLPool() {
     close();
 }
 
+void MySQLPool::execute_sql_script(const std::string& script_path) {
+    std::ifstream script_file(script_path);
+    if (!script_file.is_open()) {
+        std::cerr << "Failed to open SQL script: " << script_path << std::endl;
+        throw std::runtime_error("Failed to open SQL script");
+    }
+
+    std::stringstream buffer;
+    buffer << script_file.rdbuf();
+    std::string script_content = buffer.str();
+    script_file.close();
+
+    // 分割SQL语句
+    std::vector<std::string> sql_statements;
+    size_t pos = 0;
+    while ((pos = script_content.find(';')) != std::string::npos) {
+        std::string statement = script_content.substr(0, pos);
+        if (!statement.empty()) {
+            sql_statements.push_back(statement);
+        }
+        script_content.erase(0, pos + 1);
+    }
+
+    // 获取一个连接并执行SQL语句
+    auto connection = get_connection();
+    if (!connection) {
+        std::cerr << "Failed to get connection for executing SQL script" << std::endl;
+        return;
+    }
+
+    for (const auto& statement : sql_statements) {
+        try {
+            connection->execute(statement);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to execute SQL statement: " << statement << "\nError: " << e.what() << std::endl;
+        }
+    }
+
+    release_connection(connection);
+}
+
 void MySQLPool::initialize_pool() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -30,6 +71,18 @@ void MySQLPool::initialize_pool() {
             m_connections.push_back(wrapper);
             m_availableConnections.push(wrapper);
         }
+        else {
+            std::cerr << "Failed to create initial connection" << std::endl;
+        }
+    }
+
+    // 执行SQL脚本
+    try {
+        execute_sql_script(m_config.initialize_script);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to execute SQL script: " << e.what() << std::endl;
+        close();
+        std::cerr << "Database pool closed due to initialization failure." << std::endl;
     }
 }
 
