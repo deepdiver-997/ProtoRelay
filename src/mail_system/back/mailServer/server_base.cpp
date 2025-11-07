@@ -30,13 +30,24 @@ try {
         }
 
         if (config.db_pool_config.achieve == "mysql" && m_dbPool == nullptr) {
-            m_dbPool = MySQLPoolFactory::get_instance().create_pool(config.db_pool_config, std::make_shared<MySQLService>());
-            std::cout << "dbPool created in function ServerBase::ServerBase" << std::endl;
+            // initialize DB pool asynchronously with timeout, to avoid blocking server startup
+            // will be improved in future versions and support sync initialization with better error handling
+            auto fut = std::async(std::launch::async, [&]() {
+                return MySQLPoolFactory::get_instance().create_pool(
+                    config.db_pool_config,
+                    std::make_shared<MySQLService>());
+            });
+            m_dbPool = fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready ? fut.get() : nullptr;
+            if (m_dbPool) {
+                std::cout << "Database pool initialized successfully." << std::endl;
+            } else {
+                std::cerr << "Failed to initialize database pool within timeout." << std::endl;
+            }
         } else {
             m_dbPool = nullptr;
         }
 
-        m_client_fsm = std::make_shared<ClientFSM>();
+        // m_client_fsm = std::make_shared<ClientFSM>();
 
         m_ioContext = std::make_shared<boost::asio::io_context>();
         m_resolver = std::make_shared<boost::asio::ip::tcp::resolver>(*m_ioContext);
@@ -237,7 +248,7 @@ void ServerBase::start_forward_email(std::shared_ptr<mail> email) {
         ssl_socket->lowest_layer().async_connect(edp, [this, ssl_socket = std::move(ssl_socket), recipients, edp, email](const boost::system::error_code& error) mutable {
             if (!error) {
                 // 连接成功，进行邮件转发
-                m_client_fsm->start(std::dynamic_pointer_cast<mail_system::SessionBase>(std::make_shared<ClientSession>(email, std::move(ssl_socket), this, m_client_fsm, recipients)));
+                // m_client_fsm->start(std::dynamic_pointer_cast<mail_system::SessionBase>(std::make_shared<ClientSession>(email, std::move(ssl_socket), this, m_client_fsm, recipients)));
             } else {
                 std::cerr << "Error connecting to " << edp << ": " << error.message() << std::endl;
             }

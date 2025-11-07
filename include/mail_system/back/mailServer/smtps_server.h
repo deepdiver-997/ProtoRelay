@@ -18,8 +18,8 @@ namespace mail_system {
 
     protected:
         // 处理新连接
-        void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket,
-             const boost::system::error_code& error);
+       void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket,
+           const boost::system::error_code& error) override;
 
         std::shared_ptr<SmtpsFsm> m_fsm;
     };

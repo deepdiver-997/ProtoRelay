@@ -77,14 +77,15 @@ public:
 
     void save_mail_data(std::shared_ptr<mail> data) {
         auto connection = m_dbPool->get_connection();
-        if (connection && connection->is_connected()) {
-            std::string sql = "INSERT INTO mails (sender, recipient, subject, body) VALUES ('" +
-                              connection->escape_string(data->from) + "', '" +
-                              connection->escape_string(data->to) + "', '" +
-                              connection->escape_string(data->header) + "', '" +
-                              connection->escape_string(data->body) + "')";
-            connection->execute(sql);
-        }
+        for (int i = 0;i < data->to.size(); ++i)
+            if (connection && connection->is_connected()) {
+                std::string sql = "INSERT INTO mails (sender, recipient, subject, body) VALUES ('" +
+                                connection->escape_string(data->from) + "', '" +
+                                connection->escape_string(data->to[i]) + "', '" +
+                                connection->escape_string(data->header) + "', '" +
+                                connection->escape_string(data->body) + "')";
+                connection->execute(sql);
+            }
     }
 };
 

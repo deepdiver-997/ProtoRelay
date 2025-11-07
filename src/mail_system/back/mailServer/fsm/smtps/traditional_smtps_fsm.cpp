@@ -366,7 +366,7 @@ void TraditionalSmtpsFsm::handle_wait_quit_quit(std::weak_ptr<SmtpsSession> sess
             std::cerr << "Session is expired in handle_wait_quit_quit" << std::endl;
             return;
         }
-        auto m = std::make_shared<mail>(s->get_mail());
+        auto m = std::shared_ptr<mail>(s->get_mail());
         s->m_server->start_forward_email(m);
         s->m_server->m_workerThreadPool->post([this, m](){save_mail_data(m);});
         s->context_.clear(); // 清理上下文数据

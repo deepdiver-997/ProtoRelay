@@ -5,7 +5,6 @@
 #include <memory>
 #include <future>
 #include <atomic>
-#include <mail_system/back/mailServer/session/session_base.h>
 
 namespace mail_system {
 

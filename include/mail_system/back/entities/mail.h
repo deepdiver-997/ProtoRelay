@@ -15,6 +15,29 @@ struct mail
     int box_id;                // 邮件所属邮箱ID
     bool is_draft;             // 是否为草稿
     bool is_read;              // 是否已读
+    mail() = default;
+    mail(const mail& other) {
+        id = other.id;
+        from = other.from;
+        to = other.to;
+        header = other.header;
+        body = other.body;
+        send_time = other.send_time;
+        box_id = other.box_id;
+        is_draft = other.is_draft;
+        is_read = other.is_read;
+    }
+    mail(mail&& other) noexcept {
+        id = other.id;
+        from = std::move(other.from);
+        to = std::move(other.to);
+        header = std::move(other.header);
+        body = std::move(other.body);
+        send_time = other.send_time;
+        box_id = other.box_id;
+        is_draft = other.is_draft;
+        is_read = other.is_read;
+    }
 };
 
 struct mailbox

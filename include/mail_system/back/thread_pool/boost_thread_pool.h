@@ -31,63 +31,33 @@ public:
      * 
      * @param thread_count 线程数量，默认为系统硬件并发数
      */
-    explicit BoostThreadPool(size_t thread_count = std::thread::hardware_concurrency())
-        : m_thread_count(thread_count), m_running(false) {
-    }
+    explicit BoostThreadPool(size_t thread_count = std::thread::hardware_concurrency());
 
     /**
      * @brief 析构函数
      * 
      * 确保线程池在销毁前停止
      */
-    ~BoostThreadPool() override {
-        stop(true);
-    }
+    ~BoostThreadPool();
 
     /**
      * @brief 启动线程池
      */
-    void start() override {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (!m_running) {
-            m_running = true;
-            std::cout << "Starting BoostThreadPool..." << std::endl;
-            m_pool = std::make_unique<boost::asio::thread_pool>(m_thread_count);
-        }
-    }
+        void start() override; // Prepare to add override keyword
 
     /**
      * @brief 停止线程池
      * 
      * @param wait_for_tasks 是否等待所有任务完成
      */
-    void stop(bool wait_for_tasks = true) override {
-        std::unique_ptr<boost::asio::thread_pool> pool;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_running) return;
-            m_running = false;
-            pool = std::move(m_pool);
-        }
-
-        if (pool) {
-            if (wait_for_tasks) {
-                pool->wait();
-            }
-            pool->stop();
-            std::cout << "Stopped BoostThreadPool" << std::endl;
-            pool->join();
-        }
-    }
+        void stop(bool wait_for_tasks = true) override; // Prepare to add override keyword
 
     /**
      * @brief 获取线程池中的线程数量
      * 
      * @return size_t 线程数量
      */
-    size_t thread_count() const override {
-        return m_thread_count;
-    }
+        size_t thread_count() const override; // Prepare to add override keyword
 
     /**
      * @brief 检查线程池是否正在运行
@@ -95,9 +65,7 @@ public:
      * @return true 如果线程池正在运行
      * @return false 如果线程池已停止
      */
-    bool is_running() const override {
-        return m_running.load();
-    }
+        bool is_running() const override; // Prepare to add override keyword
 
 protected:
     /**

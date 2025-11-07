@@ -17,7 +17,7 @@
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/mailServer/session/session_base.h"
 
-#include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
+// #include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
 
 namespace mail_system {
 
@@ -69,7 +69,7 @@ public:
     std::shared_ptr<mail_system::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<mail_system::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
-    std::shared_ptr<ClientFSM> m_client_fsm;
+    // std::shared_ptr<ClientFSM> m_client_fsm;
     bool ssl_in_worker;
     const std::string m_domain = "example.com";
 

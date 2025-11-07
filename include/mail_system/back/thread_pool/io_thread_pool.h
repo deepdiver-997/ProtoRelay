@@ -31,100 +31,32 @@ public:
      * 
      * @param thread_count 线程数量，默认为系统硬件并发数
      */
-    explicit IOThreadPool(size_t thread_count = std::thread::hardware_concurrency())
-        : m_thread_count(thread_count), m_io_contexts(thread_count, std::make_shared<boost::asio::io_context>()),
-          m_running(false) {
-    }
-
+    explicit IOThreadPool(size_t thread_count = std::thread::hardware_concurrency());
     /**
      * @brief 析构函数
      * 
      * 确保线程池在销毁前停止
      */
-    ~IOThreadPool() override {
-        stop(true);
-    }
+    ~IOThreadPool() override;
 
     /**
      * @brief 启动线程池
      */
-    void start() override {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_running) return;
-
-        m_running = true;
-        std::cout << "Starting IOThreadPool..." << std::endl;
-
-        // 创建工作守卫，防止io_context在没有更多工作时退出
-        m_work_guards.reserve(m_thread_count);
-        for(int i = 0;i < m_thread_count; ++i)
-        m_work_guards.emplace_back(boost::asio::make_work_guard(
-            m_io_contexts[i]->get_executor()));
-
-        m_threads.reserve(m_thread_count);
-        for (size_t i = 0; i < m_thread_count; ++i) {
-            m_threads.emplace_back([this, i]() {
-                try {
-                    m_io_contexts[i]->run();
-                } catch (const std::exception& e) {
-                    std::cerr << "Exception in IO thread: " << e.what() << std::endl;
-                } catch (...) {
-                    std::cerr << "Unknown exception in IO thread" << std::endl;
-                }
-            });
-        }
-    }
+    void start() override;
 
     /**
      * @brief 停止线程池
      * 
      * @param wait_for_tasks 是否等待所有任务完成
      */
-    void stop(bool wait_for_tasks = true) override {
-        std::unique_lock<std::mutex> lock(m_mutex);
-        if (!m_running) return;
-
-        m_running = false;
-        std::cout << "Stopping IOThreadPool..." << std::endl;
-
-        // 移除工作守卫，允许io_context在没有更多工作时退出
-        for(auto& m_work_guard : m_work_guards) {
-            if (m_work_guard.owns_work()) {
-                m_work_guard.reset();
-            }
-        }
-
-        // 如果不等待任务完成，则停止io_context
-        if (!wait_for_tasks) {
-            for(auto& ctx : m_io_contexts)
-                ctx->stop();
-        }
-
-        // 复制线程列表，以便在解锁后等待它们
-        auto threads = std::move(m_threads);
-        lock.unlock();
-
-        // 等待所有线程完成
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-
-        // 重置io_context以便重新使用
-        lock.lock();
-        for(auto& ctx : m_io_contexts)
-        ctx->restart();
-    }
+    void stop(bool wait_for_tasks = true) override;
 
     /**
      * @brief 获取线程池中的线程数量
      * 
      * @return size_t 线程数量
      */
-    size_t thread_count() const override {
-        return m_thread_count;
-    }
+    size_t thread_count() const override;
 
     /**
      * @brief 检查线程池是否正在运行
@@ -132,9 +64,7 @@ public:
      * @return true 如果线程池正在运行
      * @return false 如果线程池已停止
      */
-    bool is_running() const override {
-        return m_running.load();
-    }
+    bool is_running() const override;
 
     /**
      * @brief 获取io_context

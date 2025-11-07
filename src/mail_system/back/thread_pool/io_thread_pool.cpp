@@ -68,7 +68,7 @@ size_t IOThreadPool::thread_count() const {
 }
 
 bool IOThreadPool::is_running() const {
-    return m_running;
+    return m_running.load();
 }
 
 }
