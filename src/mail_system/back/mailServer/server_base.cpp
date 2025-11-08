@@ -95,9 +95,11 @@ void ServerBase::accept_connection() {
     // 创建新的TCP socket和SSL流
     auto socket = std::make_unique<boost::asio::ip::tcp::socket>(std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
     auto ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(*socket), m_sslContext);
+    // 获取底层socket   避免某些平台先进行lambda捕获再进行参数求值引起的段错误
+    auto &lowest_socket = ssl_socket->next_layer();
     // 接受连接
     m_acceptor->async_accept(
-        ssl_socket->next_layer(),
+        lowest_socket,
         [this, ssl_socket = std::move(ssl_socket)](const boost::system::error_code& ec) mutable {
             if (!ec) {
                 std::cout << "New connection accepted" << std::endl;
@@ -166,7 +168,10 @@ void ServerBase::start() {
                 m_listenerThread.detach();
             }
             else {
-                accept_connection();
+                boost::asio::post(*m_ioContext, [this]() {
+                    // 异步接受连接
+                    accept_connection();
+                });
             }
             std::cout << "Server started" << std::endl;
         }
@@ -260,9 +265,9 @@ void ServerBase::load_known_domains(const char* domain_file) {
     // 这里可以添加加载已知域名的代码
 }
 
-boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& ServerBase::get_connection() {
-    // return boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(*m_acceptor);
-}
+// boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& ServerBase::get_connection() {
+//     return boost::asio::ssl::stream<boost::asio::ip::tcp::socket>(*m_acceptor);
+// }
 
 ServerState ServerBase::get_state() const {
     return m_state.load();

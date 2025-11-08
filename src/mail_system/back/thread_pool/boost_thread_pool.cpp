@@ -31,7 +31,7 @@ void BoostThreadPool::stop(bool wait_for_tasks) {
 
     if (pool) {
         if (wait_for_tasks) {
-            pool->wait();
+            pool->join();
         }
         pool->stop();
         std::cout << "Stopped BoostThreadPool" << std::endl;

@@ -1,9 +1,9 @@
 {
   "achieve": "mysql",
   "host": "localhost",
-  "user": "mail_test",
-  "password": "abjskKA09qjf",
-  "database": "mail",
+  "user": "",
+  "password": "",
+  "database": "",
   "initialize_script": "sql/create_tables.sql",
   "port": 3306,
   "initial_pool_size": 5,

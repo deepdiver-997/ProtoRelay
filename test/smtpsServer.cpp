@@ -2,14 +2,29 @@
 #include <limits>
 #include <signal.h>
 using namespace mail_system;
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        std::cout << "Usage: " << argv[0] << " <config_file>" << std::endl;
+        return 1;
+    }
     signal(SIGPIPE, SIG_IGN); // 忽略SIGPIPE信号，防止写入关闭的socket时程序崩溃
-    signal(SIGINT, SIG_IGN);  // 忽略Ctrl+C中断信号，防止程序意外退出
+    signal(SIGINT, [](int){
+        std::cout << "SIGINT received, do you want to quit? (y/n)" << std::endl;
+        char response;
+        sleep(2); // wait for user input
+        std::cin.readsome(&response, 1);
+        if (response == 'y' || response == 'Y') {
+            std::cout << "Quitting..." << std::endl;
+            exit(0);
+        } else {
+            std::cout << "Continuing..." << std::endl;
+        }
+    });  // 忽略Ctrl+C中断信号，防止程序意外退出
     std::cin.tie(nullptr);
     try
     {
         ServerConfig config;
-        if(!config.loadFromFile("../config/smtpsConfig.json")) {
+        if(!config.loadFromFile(argv[1])) {
             std::cerr << "Failed to load config from file." << std::endl;
             return 1;
         }

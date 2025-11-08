@@ -56,7 +56,7 @@ public:
     // 加载已知域名
     void load_known_domains(const char* domain_file);
     // 获取连接
-    boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& get_connection();
+    // boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& get_connection();
 
     // 获取IO上下文
     std::shared_ptr<boost::asio::io_context> get_io_context();
