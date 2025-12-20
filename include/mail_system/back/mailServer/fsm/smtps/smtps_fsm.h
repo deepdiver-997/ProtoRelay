@@ -13,7 +13,9 @@
 namespace mail_system {
 
 // 状态处理函数类型定义
-using StateHandler = std::function<void(std::weak_ptr<SmtpsSession>, const std::string&)>;
+using StateHandler = std::function<void(std::unique_ptr<SessionBase>, const std::string&)>;
+// 会话处理器类型定义（用于unique_ptr）
+using SessionHandler = std::function<void(std::unique_ptr<SessionBase>, const std::string&)>;
 
 // SMTPS状态机接口
 class SmtpsFsm {
@@ -31,7 +33,7 @@ public:
     virtual ~SmtpsFsm() = default;
 
     // 处理事件
-    virtual void process_event(std::weak_ptr<SmtpsSession> session, SmtpsEvent event, const std::string& args) = 0;
+    virtual void process_event(std::unique_ptr<SessionBase> session, SmtpsEvent event, const std::string& args) = 0;
 
     // 获取状态名称
     static std::string get_state_name(SmtpsState state);
@@ -41,10 +43,21 @@ public:
 
     // 数据库操作
 
-    bool auth_user(std::weak_ptr<SmtpsSession> session, const std::string& username, const std::string& password) {
-        auto s = session.lock();
-        if (!s) {
-            std::cerr << "Session is expired in auth_user" << std::endl;
+    bool auth_user(std::unique_ptr<SessionBase> session, const std::string& username, const std::string& password) {
+        auto connection = m_dbPool->get_connection();
+        if (connection && connection->is_connected()) {
+            std::string sql = "SELECT * FROM users WHERE username = '" +
+                              connection->escape_string(username) + "' AND password = '" +
+                              connection->escape_string(password) + "'";
+            auto result = connection->query(sql);
+            return result->get_row_count();
+        }
+        return false;
+    }
+    
+    bool auth_user(SessionBase* session, const std::string& username, const std::string& password) {
+        if (!session) {
+            std::cerr << "Session is null in auth_user" << std::endl;
             return false;
         }
         auto connection = m_dbPool->get_connection();
@@ -58,23 +71,35 @@ public:
         return false;
     }
 
-    void get_mail_data(std::weak_ptr<SmtpsSession> session, std::string& mail_data) {
-        auto s = session.lock();
-        if (!s) {
-            std::cerr << "Session is expired in get_mail_data" << std::endl;
-            return;
-        }
-        auto connection = m_dbPool->get_connection();
-        if (connection && connection->is_connected()) {
-            std::string sql = "SELECT mail_data FROM mails WHERE sender_address = '" +
-                              connection->escape_string(s->context_.sender_address) + "'";
-            auto result = connection->query(sql);
-            if (!result->get_row_count()) {
-                mail_data = result->get_value(0, "mail_data");
-            }
-        }
+    void get_mail_data(std::unique_ptr<SessionBase> session, std::string& mail_data) {
+        // auto connection = m_dbPool->get_connection();
+        // if (connection && connection->is_connected()) {
+        //     std::string sql = "SELECT mail_data FROM mails WHERE sender_address = '" +
+        //                       connection->escape_string(session->context_.sender_address) + "'";
+        //     auto result = connection->query(sql);
+        //     if (!result->get_row_count()) {
+        //         mail_data = result->get_value(0, "mail_data");
+        //     }
+        // }
+    }
+    
+    void get_mail_data(SessionBase* session, std::string& mail_data) {
+        // if (!session) {
+        //     std::cerr << "Session is null in get_mail_data" << std::endl;
+        //     return;
+        // }
+        // auto connection = m_dbPool->get_connection();
+        // if (connection && connection->is_connected()) {
+        //     std::string sql = "SELECT mail_data FROM mails WHERE sender_address = '" +
+        //                       connection->escape_string(session->context_.sender_address) + "'";
+        //     auto result = connection->query(sql);
+        //     if (!result->get_row_count()) {
+        //         mail_data = result->get_value(0, "mail_data");
+        //     }
+        // }
     }
 
+    //to do: 添加完成回调
     void save_mail_data(std::shared_ptr<mail> data) {
         auto connection = m_dbPool->get_connection();
         for (int i = 0;i < data->to.size(); ++i)

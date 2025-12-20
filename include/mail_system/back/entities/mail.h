@@ -13,8 +13,7 @@ struct mail
     std::string body;           // 邮件正文
     time_t send_time;          // 发送时间
     int box_id;                // 邮件所属邮箱ID
-    bool is_draft;             // 是否为草稿
-    bool is_read;              // 是否已读
+    int status;                // 邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除
     mail() = default;
     mail(const mail& other) {
         id = other.id;
@@ -24,8 +23,7 @@ struct mail
         body = other.body;
         send_time = other.send_time;
         box_id = other.box_id;
-        is_draft = other.is_draft;
-        is_read = other.is_read;
+        status = other.status;
     }
     mail(mail&& other) noexcept {
         id = other.id;
@@ -35,8 +33,7 @@ struct mail
         body = std::move(other.body);
         send_time = other.send_time;
         box_id = other.box_id;
-        is_draft = other.is_draft;
-        is_read = other.is_read;
+        status = other.status;
     }
 };
 
@@ -46,7 +43,7 @@ struct mailbox
     size_t user_id;            // 所属用户ID
     std::string name;          // 邮箱名称
     bool is_system;            // 是否为系统默认邮箱（收件箱、发件箱、垃圾箱等）
-    int box_type;              // 系统邮箱类型：1收件箱，2发件箱，3垃圾箱，4已删除
+    int box_type;              // 系统邮箱类型：1收件箱，2发件箱，3垃圾箱，4草稿箱，5已删除
     time_t create_time;        // 创建时间
 };
 

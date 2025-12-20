@@ -6,7 +6,7 @@
 namespace mail_system {
 
 SmtpsSession::SmtpsSession(ServerBase* server, std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> &&socket, std::shared_ptr<SmtpsFsm> fsm)
-    : SessionBase(std::move(socket), server), current_state_(SmtpsState::INIT), m_fsm(fsm), m_receivingData(false), stay_times(0) {
+    : SessionBase(std::move(socket), server), current_state_(SmtpsState::INIT), m_fsm(fsm), m_receivingData(false) {
     if (!m_fsm) {
         throw std::invalid_argument("SmtpsSession: FSM cannot be null");
     }
@@ -17,72 +17,34 @@ SmtpsSession::~SmtpsSession() {
     close();
 }
 
-void SmtpsSession::start() {
+void SmtpsSession::start(std::unique_ptr<SmtpsSession> self) {
     // std::this_thread::sleep_for(std::chrono::milliseconds(3000));
     std::cout << "SMTPS Session started" << std::endl;
-    if(m_socket == nullptr) {
+    if(self->m_socket == nullptr) {
         std::cerr << "SMTPS Session socket is null in start." << std::endl;
         return; // 确保socket已初始化
     }
-    if(!m_socket->lowest_layer().is_open()) {
+    if(!self->m_socket->lowest_layer().is_open()) {
         std::cerr << "SMTPS Session socket is not open in start." << std::endl;
         return; // 确保socket已打开
     }
-    if(closed_) {
+    if(self->closed_) {
         std::cout << "Session already closed in SmtpsSession::start." << std::endl;
         return; // 已经关闭
     }
     std::cout << "ready to call process event\n";
-    m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::CONNECT, std::string());
+    self->next_event_ = SmtpsEvent::CONNECT;
+    auto fsm = self->m_fsm;
+    fsm->process_event(std::move(self), SmtpsEvent::CONNECT, std::string());
     std::cout << "start event CONNECT called in SmtpsSession::start" << std::endl;
     return;
-    // auto self = shared_from_this();
-    // // 执行SSL握手
-    // if(m_server->ssl_in_worker) {
-    //     m_server->m_workerThreadPool->post([self, this](){
-    //         m_socket->handshake(boost::asio::ssl::stream_base::server, [self](const boost::system::error_code& error){
-    //             if(error) {
-    //                 std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
-    //                 std::dynamic_pointer_cast<SmtpsSession>(self)->m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::ERROR, error.message());
-    //             }
-    //         });
-    //             self->async_write("220 SMTPS Server\r\n", [self](const boost::system::error_code& error) {
-    //             if (error) {
-    //                 std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
-    //                 return;
-    //             }
-    //             std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_EHLO);
-    //         });
-    //     });
-    // }
-    // else
-    // do_handshake([self](std::weak_ptr<SessionBase> session, const boost::system::error_code& error) {
-    //     if(error)
-    //         return;
-    //     // if (auto s = std::dynamic_pointer_cast<SmtpsSession>(session.lock())) {
-    //     //     s->m_fsm->process_event(s, SmtpsEvent::CONNECT, std::string());
-    //     // }
-    //     self->async_write("220 SMTPS Server\r\n", [self](const boost::system::error_code& error) {
-    //         if (error) {
-    //             std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
-    //             return;
-    //         }
-    //         std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_EHLO);
-    //     });
-    // });
 }
 
-void SmtpsSession::handle_read(const std::string& data) {
+void SmtpsSession::handle_read() {
     try {
         // 对象有效性检查
         if (this == nullptr) {
             std::cerr << "CRITICAL: Invalid this pointer in handle_read" << std::endl;
-            return;
-        }
-        try {
-            auto self = shared_from_this(); // 验证shared_ptr有效性
-        } catch (const std::bad_weak_ptr& e) {
-            std::cerr << "CRITICAL: Invalid shared_from_this(): " << e.what() << std::endl;
             return;
         }
         if (!m_fsm) {
@@ -90,25 +52,24 @@ void SmtpsSession::handle_read(const std::string& data) {
             return;
         }
         std::cout << "enter handle_read in SmtpsSession" << std::endl;
-        auto self = shared_from_this();
-        // 去除行尾的\r\n
+        // 使用最近一次实际读取的字节数构造数据，避免读取到填充的\0
+        std::string data = get_last_read_data(last_bytes_transferred_);
+        
+        // 检查空数据，如果是空数据则忽略并继续等待
+        if (data.empty() || (data.find_first_not_of("\r\n") == std::string::npos)) {
+            std::cout << "Ignoring empty data, continuing to wait for commands" << std::endl;
+            return; // 不设置任何事件，继续等待实际数据
+        }
+        
+        // 去除行首/行尾空白与行尾的 CRLF
         std::string line = data;
-        boost::algorithm::trim_right_if(line, boost::algorithm::is_any_of("\r\n"));
+        boost::algorithm::trim(line);
         
         if (current_state_ == SmtpsState::IN_MESSAGE) {
-            // 检查是否为数据结束标记
-            if (line.find("\r\n.") == line.size() - 3) {
+            // 检查是否为数据结束标记（单行只有一个点）
+            if (line == ".") {
                 // 处理邮件数据结束事件
-                m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::DATA_END, std::string());
-                // self->async_write("250 OK\r\n", [self](const boost::system::error_code& error) {
-                //     if (error) {
-                //         std::cerr << "Error: " << error.message() << std::endl;
-                //         return;
-                //     }
-                //     std::cout << "process data end up" << std::endl;
-                //     std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_QUIT);
-                //     self->async_read();
-                // });
+                next_event_ = SmtpsEvent::DATA_END;
                 return;
             }
             else {
@@ -128,9 +89,7 @@ void SmtpsSession::handle_read(const std::string& data) {
                 // std::cout << "[DEBUG] FSM vtable: " << typeid(*m_fsm).name() << std::endl;
                 // // 调用栈回溯
                 // std::cout << "[DEBUG] Call stack trace: " << std::endl;
-                // 实际调用
-                m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::DATA, std::string());
-                // self->async_read();
+                next_event_ = SmtpsEvent::DATA;
             }
         }
         else {
@@ -140,8 +99,7 @@ void SmtpsSession::handle_read(const std::string& data) {
     }
     catch (const std::exception& e) {
         std::cerr << "Error handling SMTPS data: " << e.what() << std::endl;
-        m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::ERROR, e.what());
-        // handle_error(boost::system::error_code(boost::system::errc::io_error, boost::system::generic_category()));
+        next_event_ = SmtpsEvent::ERROR;
     }
 }
 
@@ -163,8 +121,19 @@ void SmtpsSession::process_command(const std::string& command) {
             args = "";
         }
 
+        // 保存参数供FSM使用
+        last_command_args_ = args;
+        
+        std::cout << "DEBUG: cmd='" << cmd << "', args='" << args << "'" << std::endl;
+
+        // 检查空命令，如果是空命令则不处理
+        if (cmd.empty()) {
+            std::cout << "Ignoring empty command, not setting any event" << std::endl;
+            return;
+        }
+
         if(current_state_ == SmtpsState::WAIT_AUTH_USERNAME || current_state_ == SmtpsState::WAIT_AUTH_PASSWORD) {
-            m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::AUTH, cmd);
+            next_event_ = SmtpsEvent::AUTH;
             return;
         }
         
@@ -172,35 +141,26 @@ void SmtpsSession::process_command(const std::string& command) {
         boost::algorithm::to_upper(cmd);
         
         // 将命令映射到事件
-        SmtpsEvent event;
         if (cmd == "EHLO" || cmd == "HELO") {
-            event = SmtpsEvent::EHLO;
+            next_event_ = SmtpsEvent::EHLO;
         }
         else if (cmd == "AUTH") {
-            event = SmtpsEvent::AUTH;
+            next_event_ = SmtpsEvent::AUTH;
         } else if (cmd == "MAIL") {
-            event = SmtpsEvent::MAIL_FROM;
+            next_event_ = SmtpsEvent::MAIL_FROM;
         } else if (cmd == "RCPT") {
-            event = SmtpsEvent::RCPT_TO;
+            next_event_ = SmtpsEvent::RCPT_TO;
         } else if (cmd == "DATA") {
-            event = SmtpsEvent::DATA;
+            next_event_ = SmtpsEvent::DATA;
         } else if (cmd == "QUIT") {
-            event = SmtpsEvent::QUIT;
-            // 强制关闭会话
-            async_write("221 Bye\r\n", [this](const boost::system::error_code& error) {
-                if (!error) {
-                    close();
-                }
-            });
-            return;
+            next_event_ = SmtpsEvent::QUIT;
         } else {
             // 未知命令
-            event = SmtpsEvent::ERROR;
+            next_event_ = SmtpsEvent::ERROR;
             args = "Unknown command: " + cmd;
+            std::cout << args << std::endl;
         }
-        
-        // 处理事件
-        m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), event, args);
+        std::cout << "DEBUG: event=" << m_fsm->get_event_name(next_event_) << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Error processing SMTPS command: " << e.what() << std::endl;

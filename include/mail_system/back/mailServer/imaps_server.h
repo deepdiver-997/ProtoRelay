@@ -21,6 +21,13 @@ namespace mail_system {
         void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket,
              const boost::system::error_code& error);
 
+        // 处理新连接（unique_ptr版本）
+        void handle_accept_unique(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
+             const boost::system::error_code& error);
+
+        // 创建会话（unique_ptr版本）
+        void create_session_unique(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket);
+
         std::shared_ptr<ImapsFsm> m_fsm;
     };
 

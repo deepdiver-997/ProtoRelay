@@ -19,6 +19,9 @@ struct ServerConfig {
     uint16_t port;                    // 监听端口
 
     bool use_ssl;                     // 是否使用SSL/TLS
+    bool allow_insecure;              // 是否允许非SSL连接（用于内网通信）
+    uint16_t insecure_port;           // 非SSL连接端口（如果与SSL端口不同）
+    
     std::string certFile;             // SSL证书文件路径
     std::string keyFile;              // SSL私钥文件路径
     std::string dhFile;               // Diffie-Hellman参数文件路径（可选）
@@ -51,7 +54,9 @@ struct ServerConfig {
     ServerConfig()
         : address("0.0.0.0")
         , port(0)
-        , use_ssl(false)
+        , use_ssl(true)
+        , allow_insecure(false)
+        , insecure_port(0)
         , maxMessageSize(1024 * 1024)  // 1MB
         , maxConnections(1000)
         , io_thread_count(std::thread::hardware_concurrency())
@@ -71,18 +76,25 @@ struct ServerConfig {
                   << "\naddress = " << address
                   << "\nport = " << port
                   << "\nuse_ssl = " << (use_ssl ? "true" : "false")
-                  << "\ncertFile = " << certFile
+                  << "\nallow_insecure = " << (allow_insecure ? "true" : "false")
+                  << "\ninsecure_port = " << insecure_port;
+        
+#ifdef USE_SSL
+        std::cout << "\ncertFile = " << certFile
                   << "\nkeyFile = " << keyFile
-                  << "\ndhFile = " << dhFile
-                  << "\nmaxMessageSize = " << maxMessageSize
+                  << "\ndhFile = " << dhFile;
+#endif
+        
+        std::cout << "\nmaxMessageSize = " << maxMessageSize
                   << "\nmaxConnections = " << maxConnections
                   << "\nio_thread_count = " << io_thread_count
                   << "\nworker_thread_count = " << worker_thread_count
-                  << "\nuse_database = " << (use_database ? "true" : "false")
-                  << std::endl;
+                  << "\nuse_database = " << (use_database ? "true" : "false");
+        
         if (use_database) {
             db_pool_config.show();
         }
+        
         std::cout << "\nconnection_timeout = " << connection_timeout
                   << "\nread_timeout = " << read_timeout
                   << "\nwrite_timeout = " << write_timeout
@@ -100,10 +112,17 @@ struct ServerConfig {
             return false;
         }
         
+        // 如果允许非SSL连接但没有指定非SSL端口，使用SSL端口
+        if (allow_insecure && insecure_port == 0) {
+            // 这里不直接返回false，因为可以在运行时设置默认值
+        }
+        
+#ifdef USE_SSL
         // SSL配置验证
         if (use_ssl && (certFile.empty() || keyFile.empty())) {
             return false;
         }
+#endif
         
         // // 数据库配置验证
         // if (use_database && db_connection_string.empty()) {
@@ -149,9 +168,15 @@ struct ServerConfig {
         address = json_config.value("address", address);
         port = json_config.value("port", port);
         use_ssl = json_config.value("use_ssl", use_ssl);
+        allow_insecure = json_config.value("allow_insecure", allow_insecure);
+        insecure_port = json_config.value("insecure_port", insecure_port);
+        
+#ifdef USE_SSL
         certFile = resolve_path(filename, json_config.value("certFile", certFile));
         keyFile = resolve_path(filename, json_config.value("keyFile", keyFile));
         dhFile = resolve_path(filename, json_config.value("dhFile", dhFile));
+#endif
+        
         maxMessageSize = json_config.value("maxMessageSize", maxMessageSize);
         maxConnections = json_config.value("maxConnections", maxConnections);
         io_thread_count = json_config.value("io_thread_count", io_thread_count);

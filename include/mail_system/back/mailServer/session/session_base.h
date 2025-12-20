@@ -21,11 +21,13 @@ public:
     // 构造函数
     SessionBase(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> &&, ServerBase*);
 
+    SessionBase(SessionBase&&);
+
     // 虚析构函数
     virtual ~SessionBase();
 
     // 启动会话
-    virtual void start() = 0;
+    // virtual void start(std::unique_ptr<SessionBase> self) = 0;
 
     // 关闭会话
     virtual void close();
@@ -36,28 +38,52 @@ public:
     boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& get_ssl_socket();
 
     mail* get_mail();
+
+    std::unique_ptr<mail> get_mail_ptr() {
+        auto m = std::move(mail_);
+        mail_ = nullptr;
+        return std::move(m);
+    }
     
     // 设置服务器引用
     void set_server(ServerBase* server);
 
     // 执行SSL握手
-    void do_handshake(std::function<void(std::weak_ptr<SessionBase> session, const boost::system::error_code&)> callback);
+    static void do_handshake(std::unique_ptr<SessionBase> self, std::function<void(std::unique_ptr<SessionBase> s, const boost::system::error_code&)> callback = nullptr);
 
 
-    // 异步读取数据
-    void async_read(std::function<void(const boost::system::error_code&, std::size_t)> callback = nullptr);
+    // 异步读取数据 如果存在回调函数则把self转移交给回调函数处理，否则直接退出
+    static void async_read(std::unique_ptr<SessionBase> self, std::function<void(std::unique_ptr<SessionBase> s, const boost::system::error_code&, std::size_t)> callback = nullptr);
 
-    // 异步写入数据
-    void async_write(const std::string& data, std::function<void(const boost::system::error_code&)> callback = nullptr);
+    // 异步写入数据 如果存在回调函数则把self转移交给回调函数处理，否则继续读取
+    static void async_write(std::unique_ptr<SessionBase> self, const std::string& data, std::function<void(std::unique_ptr<SessionBase> s, const boost::system::error_code&)> callback = nullptr);
 
     // 处理接收到的数据（由派生类实现）
-    virtual void handle_read(const std::string& data) = 0;
+    virtual void handle_read() = 0;
+
+    virtual void set_current_state(int) = 0;
+
+    virtual void set_next_event(int) = 0;
+
+    virtual void* get_fsm() const = 0;
+
+    virtual int get_next_event() const = 0;
+
+    virtual int get_current_state() const = 0;
+
+    virtual void* get_context() = 0;
 
     // 处理错误
     virtual void handle_error(const boost::system::error_code& error);
 
     // 会话是否已关闭
     bool is_closed() const;
+    
+    // 获取最后读取的数据（用于状态机回调）
+    std::string get_last_read_data(size_t bytes_transferred);
+
+    // 最近一次异步读取传输的字节数
+    size_t last_bytes_transferred_ = 0;
 
 protected:
 
@@ -82,7 +108,10 @@ protected:
 
     // 会话是否已关闭
     bool closed_;
+
     public:
+    int stay_times;
+    int timeout_times;
     // 指向服务器的指针，用于访问IO线程池
     ServerBase* m_server;
 };

@@ -1,3 +1,9 @@
+-- 创建数据库
+CREATE DATABASE IF NOT EXISTS mail;
+
+-- 使用数据库
+USE mail;
+
 -- 创建用户表
 CREATE TABLE IF NOT EXISTS users (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -17,8 +23,7 @@ CREATE TABLE IF NOT EXISTS mails (
     subject VARCHAR(255) NOT NULL COMMENT '邮件主题',
     body TEXT COMMENT '邮件正文',
     send_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
-    is_draft BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否为草稿',
-    is_read BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否已读',
+    status INT NOT NULL DEFAULT 0 COMMENT '邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除',
     INDEX idx_sender (sender),
     INDEX idx_recipient (recipient),
     INDEX idx_send_time (send_time)
@@ -43,7 +48,7 @@ CREATE TABLE IF NOT EXISTS mailboxes (
     user_id BIGINT NOT NULL COMMENT '所属用户ID',
     name VARCHAR(100) NOT NULL COMMENT '邮箱名称',
     is_system BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否为系统默认邮箱',
-    box_type INT COMMENT '系统邮箱类型：1收件箱，2发件箱，3垃圾箱，4已删除',
+    box_type INT COMMENT '系统邮箱类型：1收件箱，2发件箱，3垃圾箱，4草稿箱，5已删除',
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     UNIQUE KEY uk_user_box (user_id, name),

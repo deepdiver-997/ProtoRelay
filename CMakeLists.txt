@@ -6,6 +6,9 @@ if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
 endif()
 
+# 添加编译选项
+option(USE_SSL "Enable SSL/TLS support" ON)
+
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,14 +16,30 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 编译选项（与原 Makefile 对齐）
 add_compile_options(-Wall -g)
 
+# 根据SSL选项设置编译定义
+if(USE_SSL)
+    add_compile_definitions(USE_SSL)
+    message(STATUS "Building with SSL/TLS support")
+else()
+    message(STATUS "Building without SSL/TLS support")
+endif()
+
 # -----------------------------
 # 依赖查找（尽量自动化、跨平台）
 # -----------------------------
 find_package(Boost REQUIRED COMPONENTS system thread)
-find_package(OpenSSL QUIET)
+
+if(USE_SSL)
+    find_package(OpenSSL REQUIRED)
+else()
+    # 如果禁用SSL，不查找OpenSSL但仍然定义相关变量以避免CMake错误
+    set(OPENSSL_FOUND FALSE)
+    set(OPENSSL_INCLUDE_DIR "")
+    set(OPENSSL_LIBRARIES "")
+endif()
 
 # If OpenSSL not found, on macOS try common Homebrew prefix and re-run find
-if(NOT OpenSSL_FOUND AND APPLE)
+if(USE_SSL AND NOT OpenSSL_FOUND AND APPLE)
     message(STATUS "OpenSSL not found by CMake; attempting Homebrew prefix /opt/homebrew")
     set(OPENSSL_ROOT_DIR /opt/homebrew CACHE PATH "OpenSSL root (Homebrew fallback)")
     find_package(OpenSSL REQUIRED)
@@ -183,8 +202,15 @@ if(NOT MYSQL_LIBRARIES)
     endif()
 endif()
 
-target_link_libraries(smtpsServer PRIVATE ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${MYSQL_LIBRARIES})
-target_link_libraries(imapsServer PRIVATE ${Boost_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${MYSQL_LIBRARIES})
+# 根据SSL选项链接不同的库
+set(LINK_LIBRARIES ${Boost_LIBRARIES} Threads::Threads ${MYSQL_LIBRARIES})
+
+if(USE_SSL)
+    list(APPEND LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+target_link_libraries(smtpsServer PRIVATE ${LINK_LIBRARIES})
+target_link_libraries(imapsServer PRIVATE ${LINK_LIBRARIES})
 
 # 目标编译选项
 target_compile_features(smtpsServer PRIVATE cxx_std_17)

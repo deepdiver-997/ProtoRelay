@@ -16,7 +16,8 @@ public:
     ~TraditionalSmtpsFsm() override = default;
 
     // 处理事件
-    void process_event(std::weak_ptr<SmtpsSession> session, SmtpsEvent event, const std::string& args) override;
+    void process_event(std::unique_ptr<SessionBase> session, SmtpsEvent event, const std::string& args) override;
+
 
 
 private:
@@ -37,23 +38,24 @@ private:
     void init_state_handlers();
 
     // 状态处理函数 handle_[state]_[event]
-    void handle_init_connect(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_greeting_ehlo(std::weak_ptr<SmtpsSession> session, const std::string& args);
+    void handle_init_connect(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_greeting_ehlo(std::unique_ptr<SessionBase> session, const std::string& args);
 
-    void handle_wait_auth_auth(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_wait_auth_username(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_wait_auth_password(std::weak_ptr<SmtpsSession> session, const std::string& args);
+    void handle_wait_auth_auth(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_wait_auth_username(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_wait_auth_password(std::unique_ptr<SessionBase> session, const std::string& args);
 
-    void handle_wait_auth_mail_from(std::weak_ptr<SmtpsSession> session, const std::string& args);
+    void handle_wait_auth_mail_from(std::unique_ptr<SessionBase> session, const std::string& args);
 
-    void handle_wait_mail_from_mail_from(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_wait_rcpt_to_rcpt_to(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_wait_data_data(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_in_message_data(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_in_message_data_end(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_wait_quit_quit(std::weak_ptr<SmtpsSession> session, const std::string& args);
-    void handle_error(std::weak_ptr<SmtpsSession> session, const std::string& args);
+    void handle_wait_mail_from_mail_from(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_wait_rcpt_to_rcpt_to(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_wait_data_data(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_in_message_data(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_in_message_data_end(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_wait_quit_quit(std::unique_ptr<SessionBase> session, const std::string& args);
+    void handle_error(std::unique_ptr<SessionBase> session, const std::string& args);
 };
+void template_func(std::unique_ptr<SessionBase> session);
 
 } // namespace mail_system
 

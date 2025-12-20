@@ -51,8 +51,16 @@ public:
     virtual void accept_connection();
     // 处理新连接
     virtual void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket, const boost::system::error_code& error) = 0;
+    // 异步连接到指定服务器
+    void async_ssl_connect(
+        const std::string& host, 
+        int port, 
+        std::function<void(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&&, const boost::system::error_code&)> handler
+    );
     // 转发邮件
     void start_forward_email(std::shared_ptr<mail> email);
+    // 转发邮件（unique_ptr版本）
+    void start_forward_email(mail* email);
     // 加载已知域名
     void load_known_domains(const char* domain_file);
     // 获取连接
@@ -73,7 +81,7 @@ public:
     bool ssl_in_worker;
     const std::string m_domain = "example.com";
 
-private:
+protected:
     // 加载SSL证书
     void load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file = "");
 

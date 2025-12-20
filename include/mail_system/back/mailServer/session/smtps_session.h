@@ -43,6 +43,7 @@ enum class SmtpsEvent {
 struct SmtpsContext {
     std::string client_hostname;     // 客户端主机名
     std::string client_username;     // 客户端用户名
+    std::string password;            // 客户端密码
     std::string sender_address;      // 发件人地址
     std::vector<std::string> recipient_addresses;  // 收件人地址列表
     // std::string message_data;        // 邮件内容
@@ -82,32 +83,52 @@ public:
     ~SmtpsSession() override;
 
     // 启动会话
-    void start() override;
+    static void start(std::unique_ptr<SmtpsSession> self);
 
-    SmtpsState get_current_state() const {
-        return current_state_;
+    int get_current_state() const override {
+        return static_cast<int>(current_state_);
+    }
+    
+    int get_next_event() const override{
+        return int(next_event_);
     }
 
-    void set_current_state(SmtpsState state) {
-        current_state_ = state;
+    std::string get_last_command_args() const {
+        return last_command_args_;
+    }
+
+    void set_current_state(int state) override {
+        current_state_ = static_cast<SmtpsState>(state);
         stay_times = 0;
+    }
+
+    void set_next_event(int event) override {
+        next_event_ = static_cast<SmtpsEvent>(event);
+    }
+
+    void* get_fsm() const override {
+        return m_fsm.get();
+    }
+
+    void* get_context() override {
+        return &context_;
     }
 
 protected:
     // 处理接收到的数据
-    void handle_read(const std::string& data) override;
+    void handle_read() override;
     
     void process_command(const std::string& command);
 
 public:
     SmtpsContext context_;           // 会话上下文
 
-    int stay_times;
-    int timeout_times;
 private:
     std::shared_ptr<SmtpsFsm> m_fsm;  // 状态机
     SmtpsState current_state_;      // 当前状态
+    SmtpsEvent next_event_;
     bool m_receivingData;            // 是否在接收数据模式
+    std::string last_command_args_;  // 最后一个命令的参数
 };
 
 } // namespace mail_system

@@ -6,9 +6,9 @@
 #include <boost/uuid/uuid_io.hpp>
 
 namespace mail_system {
-
+std::atomic<int> counter{0};
 SessionBase::SessionBase(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> &&socket, ServerBase* server)
-    : m_socket(std::move(socket)), mail_(nullptr), usr_(nullptr), m_server(server), closed_(false), read_buffer_(4096) {
+    : m_socket(std::move(socket)), mail_(nullptr), usr_(nullptr), m_server(server), closed_(false), read_buffer_(4096), stay_times(0), timeout_times(0) {
     // // 生成唯一的会话ID
     // boost::uuids::random_generator generator;
     // m_sessionId = to_string(generator());
@@ -16,6 +16,17 @@ SessionBase::SessionBase(std::unique_ptr<boost::asio::ssl::stream<boost::asio::i
     // // 初始化客户端IP为未知
     // m_clientIp = "unknown";
 }
+
+SessionBase::SessionBase(SessionBase &&s) {
+    m_socket = std::move(s.m_socket);
+    mail_ = std::move(s.mail_);
+    usr_ = std::move(s.usr_);
+    m_server = s.m_server;
+    closed_ = s.closed_;
+    read_buffer_ = std::move(s.read_buffer_);
+    use_buffer_ = std::move(s.use_buffer_);
+}
+
 SessionBase::~SessionBase() {
     if(!closed_) {
         close();
@@ -23,25 +34,20 @@ SessionBase::~SessionBase() {
     std::cout << "SessionBase destructor called." << std::endl;
 }
 
-void SessionBase::do_handshake(std::function<void(std::weak_ptr<SessionBase> session, const boost::system::error_code&)> callback) {
-    if(closed_) {
+void SessionBase::do_handshake(std::unique_ptr<SessionBase> self, std::function<void(std::unique_ptr<SessionBase> s, const boost::system::error_code&)> callback) {
+    if(self->is_closed()) {
         return; // 已经关闭
     }
-    auto self = shared_from_this(); // 确保在回调中可以安全地使用this
-    int count = self.use_count();
-    std::cout << "shared number in handshake: " << count << std::endl;
-    if(closed_) {
-        std::cout << "Session socket already closed in do_handshake." << std::endl;
-        return; // 已经关闭
-    }
-    m_socket->async_handshake(boost::asio::ssl::stream_base::server,
-        [self, callback](const boost::system::error_code& error) {
+    auto &sock = self->get_ssl_socket();
+    sock.async_handshake(boost::asio::ssl::stream_base::server,
+        [self = std::move(self), callback](const boost::system::error_code& error) mutable {
             if (self->closed_) {
                 return; // 已经关闭
             }
             if (!error) {
                 std::cout << "SSL handshake successful with " << self->get_client_ip() << std::endl;
-                callback(self, error); // 调用回调函数
+                if (callback)
+                    callback(std::move(self), error); // 调用回调函数
             } else {
                 std::cerr << "SSL handshake failed: " << error.message() << std::endl;
                 self->close();
@@ -49,27 +55,36 @@ void SessionBase::do_handshake(std::function<void(std::weak_ptr<SessionBase> ses
         });
 }
 
-void SessionBase::async_read(std::function<void(const boost::system::error_code&, std::size_t)> callback) {
-    if(closed_) {
+void SessionBase::async_read(std::unique_ptr<SessionBase> self, std::function<void(std::unique_ptr<SessionBase> s, const boost::system::error_code&, std::size_t)> callback) {
+    if(self->is_closed()) {
         return; // 已经关闭
     }
-    auto self = shared_from_this(); // 确保在回调中可以安全地使用this
     // 读取数据
-    m_socket->async_read_some(boost::asio::buffer(read_buffer_),
-        [self, callback](const boost::system::error_code& error, size_t bytes_transferred) {
+    auto &sock = self->get_ssl_socket();
+    auto &rdbuf = self->read_buffer_;
+    sock.async_read_some(boost::asio::buffer(rdbuf),
+        [self = std::move(self), callback](const boost::system::error_code& error, size_t bytes_transferred) mutable {
             if (!error) {
                 if (self->closed_) {
                     return; // 已经关闭
                 }
+                // 记录本次读取的字节数，供 handle_read 使用
+                self->last_bytes_transferred_ = bytes_transferred;
+
+                // 0 字节：忽略并继续等待
+                if (bytes_transferred == 0) {
+                    std::cout << "No data read, continue waiting..." << std::endl;
+                    SessionBase::async_read(std::move(self), callback);
+                    return;
+                }
+                
                 if (callback) {
-                    callback(error, bytes_transferred); // 调用回调函数
+                    callback(std::move(self), error, bytes_transferred); // 调用回调函数
                     std::cout << "async reading " << bytes_transferred << " bytes with callback.\n";
                 }
-                else {
-                    std::cout << "async reading " << bytes_transferred << " bytes without callback.\n";
-                }
-                // 处理读取的数据
-                self->handle_read(std::string(self->read_buffer_.data(), bytes_transferred));
+                // else {
+                //     self->handle_read();
+                // }
             } else {
                 std::cerr << "Error reading data: " << error.message() << std::endl;
                 self->handle_error(error);
@@ -77,27 +92,26 @@ void SessionBase::async_read(std::function<void(const boost::system::error_code&
         });
 }
 
-void SessionBase::async_write(const std::string& data, std::function<void(const boost::system::error_code&)> callback) {
-    if(closed_) {
+void SessionBase::async_write(std::unique_ptr<SessionBase> self, const std::string& data, std::function<void(std::unique_ptr<SessionBase> s, const boost::system::error_code&)> callback) {
+    if(self->is_closed()) {
         return; // 已经关闭
     }
-    auto self = shared_from_this(); // 确保在回调中可以安全地使用this
     // 写入数据
-    boost::asio::async_write(*m_socket, boost::asio::buffer(data),
-        [self, callback, data](const boost::system::error_code& error, size_t bytes_transferred) {
+    auto &ssl_socket = self->get_ssl_socket();
+    boost::asio::async_write(ssl_socket, boost::asio::buffer(data),
+        [self = std::move(self), callback, data](const boost::system::error_code& error, size_t bytes_transferred) mutable {
             if (self->closed_) {
                 return; // 已经关闭
             }
             if (!error) {
                 if(callback) {
-                    callback(error); // 调用回调函数
+                    callback(std::move(self), error); // 调用回调函数
                     std::cout << "async writing " << data << " with callback.\n";
                 }
                 else {
                     std::cout << "async writing " << data << " without callback.\n";
+                    SessionBase::async_read(std::move(self));
                 }
-                // 写入成功，继续读取
-                self->async_read();
             } else {
                 std::cerr << "Error writing data: " << error.message() << std::endl;
                 self->handle_error(error);
@@ -179,6 +193,12 @@ void SessionBase::close() {
 
 bool SessionBase::is_closed() const {
     return closed_;
+}
+
+std::string SessionBase::get_last_read_data(size_t bytes_transferred) {
+    auto s = std::string(read_buffer_.data(), bytes_transferred);
+    std::fill(read_buffer_.begin(), read_buffer_.end(), 0);
+    return s;
 }
 
 } // namespace mail_system

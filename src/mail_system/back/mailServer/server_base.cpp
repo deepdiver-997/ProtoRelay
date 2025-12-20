@@ -221,6 +221,21 @@ void ServerBase::stop(ServerState next_state) {
     }
 }
 
+void ServerBase::start_forward_email(mail* email) {
+    if (!email) {
+        std::cerr << "Error: null mail pointer in start_forward_email" << std::endl;
+        return;
+    }
+    
+    // 创建临时shared_ptr，但注意这里email的生命周期由调用者管理
+    // 这是一个临时解决方案，更好的方法是重构整个架构
+    auto email_shared = std::shared_ptr<mail>(email, [](mail*) {
+        // 空删除器，因为email的生命周期由外部管理
+    });
+    
+    start_forward_email(email_shared);
+}
+
 void ServerBase::start_forward_email(std::shared_ptr<mail> email) {
     // std::sort(email->to.begin(), email->to.end(), [](const std::string& a, const std::string& b) {
     //     auto pos_a = a.find('@');
