@@ -1,0 +1,36 @@
+{
+  "address": "0.0.0.0",
+  
+  "enable_ssl": true,
+  "ssl_port": 465,
+  
+  "enable_tcp": true,
+  "tcp_port": 25,
+  
+  "allow_insecure": true,
+  "insecure_port": 25,
+  
+  "certFile": "certs/server.crt",
+  "keyFile": "certs/server.key",
+  "dhFile": "certs/dh.pem",
+  
+  "maxMessageSize": 1048576,
+  "maxConnections": 1000,
+  
+  "io_thread_count": 4,
+  "worker_thread_count": 8,
+  "ssl_in_worker": false,
+  
+  "use_database": true,
+  "db_config_file": "config/db_config.json",
+  
+  "connection_timeout": 300,
+  "read_timeout": 60,
+  "write_timeout": 60,
+  
+  "require_auth": true,
+  "max_auth_attempts": 3,
+  
+  "log_level": "info",
+  "log_file": "logs/server.log"
+}
