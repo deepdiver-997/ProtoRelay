@@ -402,7 +402,7 @@ swaks --to recipient@example.com \
 
 ## 🌐 域名部署
 
-### 部署到域名 www.hgmail.xin
+### 部署到域名
 
 #### 1. DNS 配置
 
