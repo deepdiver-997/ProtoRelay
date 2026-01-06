@@ -1,4 +1,4 @@
-# Mail System V6 - SMTPS 邮件服务器
+# Mail System V6 - SMTPS 邮件服务器（中文版）
 
 一个基于 C++20 的现代化 SMTPS (SMTP over SSL/TLS) 邮件服务器，采用异步网络编程架构，提供高性能、可扩展的邮件收发服务。
 
@@ -395,7 +395,7 @@ swaks --to recipient@example.com \
       --server localhost:465 \
       --tls \
       --body "Debug test" \
-      --attach @/path/to/file.txt \
+      --attach /path/to/file.txt \
       --verbose \
       --show-mail-path
 ```
@@ -538,8 +538,10 @@ Logger::get_instance().init(
 ```
 mail-system/
 ├── CMakeLists.txt              # CMake 构建配置
-├── README.md                   # 本文件
+├── README.md                   # 英文文档
+├── README_zh.md                # 中文文档
 ├── .gitignore                  # Git 忽略文件
+├── COPYING_BOOST.txt           # Boost 许可证
 ├── config/                     # 配置文件目录
 │   ├── smtpsConfig.json       # SMTPS 服务器配置
 │   ├── db_config.json         # 数据库配置
@@ -634,35 +636,29 @@ cmake -DOPENSSL_ROOT_DIR=/usr/local/ssl ..
 
 **注意**: 本项目仅用于学习和研究目的，生产环境使用请务必配置 SSL/TLS、认证、反垃圾邮件等安全措施。
 
-## 📄 Third-party Libraries and License Notes
+## 📄 第三方库与许可说明
 
 ### nlohmann/json
 
-This project includes the single-header version of nlohmann/json (in `OuterLib/json`) for convenient JSON parsing. nlohmann/json is distributed under the MIT License. We include it here as a copy of the upstream single-header implementation for educational purposes.
+本项目包含 nlohmann/json 的单文件版本（位于 `OuterLib/json`）用于 JSON 解析。nlohmann/json 使用 MIT 许可发布，我们以 vendor 形式包含其单文件实现以便学习和实验使用。
 
-Attribution:
-
-- nlohmann/json — JSON for Modern C++ (single-header)
-    - Repository: https://github.com/nlohmann/json
-    - License: MIT License
-
-If you redistribute this project or produce a binary including nlohmann/json, you must keep the MIT license text available (the upstream license permits redistribution with attribution). The included single-header comes with its MIT license; ensure you preserve that file's license header if you vendor/update it.
+- **仓库**: https://github.com/nlohmann/json
+- **许可**: MIT License
+- **说明**: 在二进制分发或再发布本项目时，请务必保留 nlohmann/json 的 MIT 许可文本（单文件头部自带许可信息），以符合集成许可要求。
 
 ### Boost
 
-This project links against Boost. If you redistribute binaries or vendor Boost headers, include the Boost Software License text. A copy is provided in `COPYING_BOOST.txt` in the project root.
+本项目链接并使用 Boost 库。如需再分发二进制或 vendor Boost 头文件，请随包附上 Boost Software License 文本。Boost 许可证文件位于项目根目录 `COPYING_BOOST.txt`。
 
 ### OpenSSL
 
-This project links to OpenSSL. OpenSSL's licensing depends on the version:
+本项目链接到 OpenSSL。OpenSSL 拥有自己的许可与归属说明：
 
-- OpenSSL 1.1.x and earlier: OpenSSL License + SSLeay License (see upstream for exact text).
-- OpenSSL 3.x: Apache License 2.0.
+- OpenSSL 1.1.x 及更早版本：OpenSSL License + SSLeay License
+- OpenSSL 3.x：Apache License 2.0
 
-If you redistribute OpenSSL with your binaries, ensure you comply with the applicable OpenSSL licensing terms and include its license files and attribution. For redistribution, include the OpenSSL license text that came with your OpenSSL installation, or reference the upstream license page:
+如果你随二进制再分发 OpenSSL，请遵守 OpenSSL 的许可要求并随包附上相应许可文本。详情见：https://www.openssl.org/source/license.html
 
-https://www.openssl.org/source/license.html
+### 关于 Boost 许可
 
-### Notes about the Boost license
-
-This project links against Boost. If you redistribute binaries or vendor Boost headers, include the Boost Software License text. A copy is provided in `COPYING_BOOST.txt` in the project root.
+本项目链接并使用 Boost 库。如果需要再分发二进制或分发 Boost 头文件，请包含 Boost Software License 文本。项目根目录提供了 `COPYING_BOOST.txt` 文件供参考。
