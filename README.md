@@ -47,7 +47,7 @@ sudo apt-get install -y \
 ### 1. 克隆或进入项目目录
 
 ```bash
-cd /path/to/mail-system/v6
+cd /path/to/mail-system
 ```
 
 ### 2. 创建构建目录
@@ -211,7 +211,7 @@ sudo chmod 600 config/crt/server.key
 ### 1. 创建必要的目录
 
 ```bash
-cd /path/to/mail-system/v6
+cd /path/to/mail-system
 mkdir -p logs mail attachments
 ```
 
@@ -332,12 +332,11 @@ sudo firewall-cmd --reload
 
 ```bash
 # 为域名申请 Let's Encrypt 证书
-sudo certbot certonly --standalone -d mail.hgmail.xin
+sudo certbot certonly --standalone -d your_domain.com
 
 # 复制证书到项目目录
-sudo cp /etc/letsencrypt/live/mail.hgmail.xin/fullchain.pem config/crt/server.crt
-sudo cp /etc/letsencrypt/live/mail.hgmail.xin/privkey.pem config/crt/server.key
-
+sudo cp /etc/letsencrypt/live/your_domain.com/fullchain.pem config/crt/server.crt
+sudo cp /etc/letsencrypt/live/your_domain.com/privkey.pem config/crt/server.key
 # 设置权限
 sudo chmod 644 config/crt/server.crt
 sudo chmod 600 config/crt/server.key
@@ -347,11 +346,11 @@ sudo chmod 600 config/crt/server.key
 
 ```bash
 # 测试域名解析
-nslookup mail.hgmail.xin
+nslookup your_domain.com
 
 # 测试端口连通性
-telnet mail.hgmail.xin 465
-openssl s_client -connect mail.hgmail.xin:465
+telnet your_domain.com 465
+openssl s_client -connect your_domain.com:465
 
 # 测试邮件发送（使用 QQ 邮箱）
 python3 << 'EOF'
@@ -359,12 +358,12 @@ import smtplib
 from email.mime.text import MIMEText
 
 # 通过你的服务器发送邮件
-server = smtplib.SMTP_SSL('mail.hgmail.xin', 465)
+server = smtplib.SMTP_SSL('your_domain.com', 465)
 server.set_debuglevel(1)  # 显示调试信息
 
 msg = MIMEText('Test email from SMTPS server')
 msg['Subject'] = 'Test Email'
-msg['From'] = 'your-email@hgmail.xin'
+msg['From'] = 'your-email@your-domain.com'
 msg['To'] = 'your-qq@qq.com'
 
 server.send_message(msg)
@@ -420,7 +419,7 @@ Logger::get_instance().init(
 ## 📂 项目结构
 
 ```
-mail-system/v6/
+mail-system/
 ├── CMakeLists.txt              # CMake 构建配置
 ├── README.md                   # 本文件
 ├── .gitignore                  # Git 忽略文件
