@@ -265,7 +265,7 @@ mkdir -p logs mail attachments
 
 ```bash
 # 进入 build 目录
-cd build
+cd /path/to/mail-system
 
 # 启动服务器
 ./test/smtpsServer
