@@ -2,6 +2,7 @@
 #define I_CONNECTION_H
 
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <functional>
 #include <memory>
 #include <string>

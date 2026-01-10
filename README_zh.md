@@ -1,4 +1,4 @@
-# Mail System V6 - SMTPS 邮件服务器（中文版）
+# Mail System V6 - SMTPS 邮件服务器
 
 一个基于 C++20 的现代化 SMTPS (SMTP over SSL/TLS) 邮件服务器，采用异步网络编程架构，提供高性能、可扩展的邮件收发服务。
 
@@ -44,29 +44,44 @@ sudo apt-get install -y \
 
 ## 📦 编译项目
 
-### 1. 克隆或进入项目目录
+### 快速构建（推荐）
+
+使用 `build.sh` 脚本快速构建：
 
 ```bash
-cd /path/to/mail-system
+# Debug 构建（开发/调试）
+./build.sh Debug
+
+# Release 构建（测试/部署）
+./build.sh Release
+
+# 清理并重新构建
+./build.sh Debug clean
+./build.sh Release clean
 ```
 
-### 2. 创建构建目录
+### 手动构建
+
+#### 1. 创建构建目录
 
 ```bash
-mkdir build && cd build
+mkdir -p build && cd build
 ```
 
-### 3. 配置 CMake
+#### 2. 配置 CMake
 
 ```bash
-# 默认配置（生产环境）
-cmake ..
+# Debug 模式（开发/调试）
+cmake -DCMAKE_BUILD_TYPE=Debug ..
 
-# 或启用所有调试日志（开发环境）
-cmake -DENABLE_DEBUG_LOGS=ON ..
+# Release 模式（测试/部署）
+cmake -DCMAKE_BUILD_TYPE=Release ..
+
+# 或启用所有调试日志（即使在 Release 模式）
+cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_DEBUG_LOGS=ON ..
 ```
 
-### 4. 编译
+#### 3. 编译
 
 ```bash
 # 使用多线程编译加速
@@ -74,12 +89,26 @@ make -j$(nproc)  # Linux
 make -j$(sysctl -n hw.ncpu)  # macOS
 ```
 
-### 5. 编译成果
+#### 4. 编译成果
 
 编译成功后，可执行文件位于：
 ```
-build/test/smtpsServer
+test/smtpsServer
 ```
+
+### 构建模式对比
+
+| 特性 | Debug 模式 | Release 模式 |
+|------|-----------|------------|
+| **优化级别** | `-O0`（无优化） | `-O3`（高优化） |
+| **本地优化** | ❌ | ✅ `-march=native` |
+| **调试符号** | ✅ `-g` | ❌ |
+| **日志级别** | DEBUG（全部） | INFO（仅 INFO 和 WARNING） |
+| **编译时间** | 快 | 较慢 |
+| **运行时速度** | 慢 | 快 |
+| **二进制大小** | 大 | 小 |
+
+**详细构建指南**: `BUILD_GUIDE.md`
 
 ## ⚙️ 配置文件
 
@@ -96,10 +125,10 @@ build/test/smtpsServer
   "database": "mail",
   "initialize_script": "sql/create_tables.sql",
   "port": 3306,
-  "initial_pool_size": 5,
-  "max_pool_size": 10,
+  "initial_pool_size": 32,
+  "max_pool_size": 128,
   "connection_timeout": 5,
-  "idle_timeout": 60
+  "idle_timeout": 300
 }
 ```
 
@@ -109,6 +138,16 @@ build/test/smtpsServer
 - `password`: 数据库密码
 - `database`: 数据库名称
 - `initialize_script`: 初始化 SQL 脚本路径
+- `initial_pool_size`: 初始连接池大小
+- `max_pool_size`: 最大连接池大小
+- `connection_timeout`: 连接超时（秒）
+- `idle_timeout`: 空闲连接超时（秒）
+
+**实测配置（MacBook M2 Pro）**:
+- `initial_pool_size: 32`
+- `max_pool_size: 128`
+- `connection_timeout: 5`
+- `idle_timeout: 300`
 
 ### 2. 创建数据库
 
@@ -145,8 +184,8 @@ SOURCE sql/create_tables.sql;
   "dhFile": "",
   "maxMessageSize": 1048576,
   "maxConnections": 1000,
-  "io_thread_count": 4,
-  "worker_thread_count": 4,
+  "io_thread_count": 24,
+  "worker_thread_count": 12,
   "use_database": true,
   "db_config_file": "db_config.json",
   "connection_timeout": 300,
@@ -167,9 +206,16 @@ SOURCE sql/create_tables.sql;
 - `tcp_port`: TCP 监听端口（默认 25）
 - `certFile`: SSL 证书文件路径
 - `keyFile`: SSL 私钥文件路径
+- `io_thread_count`: IO 线程数（建议：CPU 核数的 50-75%）
+- `worker_thread_count`: 工作线程数（建议：CPU 核数的 75-150%）
 - `log_file`: 日志文件路径
 - `mail_storage_path`: 邮件存储路径
 - `attachment_storage_path`: 附件存储路径
+
+**实测配置（MacBook M2 Pro）**:
+- `io_thread_count: 24`
+- `worker_thread_count: 12`
+- 性能：~180 msg/s
 
 ### 4. SSL 证书配置
 
@@ -395,7 +441,7 @@ swaks --to recipient@example.com \
       --server localhost:465 \
       --tls \
       --body "Debug test" \
-      --attach /path/to/file.txt \
+      --attach @/path/to/file.txt \
       --verbose \
       --show-mail-path
 ```
@@ -536,12 +582,11 @@ Logger::get_instance().init(
 ## 📂 项目结构
 
 ```
-mail-system/
+mail-system/v7/
 ├── CMakeLists.txt              # CMake 构建配置
-├── README.md                   # 英文文档
-├── README_zh.md                # 中文文档
-├── .gitignore                  # Git 忽略文件
-├── COPYING_BOOST.txt           # Boost 许可证
+├── build.sh                   # 快速构建脚本
+├── BUILD_GUIDE.md             # 详细的构建指南
+├── README.md                  # 本文件
 ├── config/                     # 配置文件目录
 │   ├── smtpsConfig.json       # SMTPS 服务器配置
 │   ├── db_config.json         # 数据库配置
@@ -555,9 +600,10 @@ mail-system/
 │   ├── mailServer/            # 邮件服务器
 │   │   ├── connection/       # 连接层
 │   │   ├── session/          # 会话层
-│   │   ├── fsm/              # 状态机
-│   │   └── ...
-│   └── thread_pool/          # 线程池
+│   │   └── fsm/              # 状态机
+│   ├── persist_storage/     # 持久化存储
+│   ├── thread_pool/          # 线程池
+│   └── algorithm/            # 算法工具
 ├── src/mail_system/back/       # 源文件目录
 ├── sql/                       # SQL 脚本
 │   └── create_tables.sql     # 数据库表结构
@@ -570,6 +616,7 @@ mail-system/
 ├── logs/                      # 日志文件目录（自动生成）
 ├── mail/                      # 邮件存储目录（自动生成）
 ├── attachments/               # 附件存储目录（自动生成）
+├── OuterLib/                 # 外部库（nlohmann/json）
 └── build/                    # 构建目录（自动生成）
 ```
 
@@ -578,10 +625,293 @@ mail-system/
 详细文档请参考：
 
 - [架构设计文档](docs/ARCHITECTURE.md) - 完整的系统架构和设计思想
+- [构建指南](BUILD_GUIDE.md) - 详细的构建配置说明
 - [日志系统说明](docs/logging-guide.md) - 日志配置和使用指南
 - [日志配置完成报告](docs/logging-completion.md) - 日志系统集成总结
 - [数据库问题分析](docs/prepared-statement-connection-pool-issue.md) - Prepared Statement 兼容性问题
 - [快速配置指南](docs/quick-log-config.md) - 快速配置参考
+- [域名部署指南](docs/domain-deployment-guide.md) - 域名和 SSL 证书配置
+
+## ⚡ 性能指标与配置建议
+
+### 性能基准测试
+
+以下是基于实际测试结果的性能数据：
+
+| 硬件配置 | 并发连接数 | 邮件/秒 | 邮件/小时 | CPU 核数 | 内存 | 磁盘 IOPS |
+|---------|-----------|---------|-----------|----------|------|-----------|
+| **实际测试环境** |  |  |  |  |  |  |
+| MacBook Pro M2 | 32 | **~180** | **~648,000** | 12核 | 16GB | SSD (NVMe) |
+
+**测试配置**：
+- io_thread_count: 24
+- worker_thread_count: 12
+- 数据库连接池: initial=32, max=128
+- 邮件大小: ~10KB
+- 测试工具: cl.py (Python SMTP 客户端)
+
+**说明**：
+- 300 封和 600 封邮件测试均保持 ~180 msg/s 的稳定速度
+- 性能瓶颈可能受限于磁盘 I/O 或数据库写入速度
+- M2 Pro 性能核心 8 核 + 能效核心 4 核，实际可利用约 8-10 核
+
+### 影响性能的关键因素
+
+#### 1. CPU 配置
+
+| CPU 核数 | 推荐配置 | 说明 |
+|---------|---------|------|
+| 4 核 | `io_thread_count: 2`<br>`worker_thread_count: 2` | 基础配置，适合小型部署 |
+| 8 核 | `io_thread_count: 3-4`<br>`worker_thread_count: 4-6` | 推荐配置，平衡 IO 和计算 |
+| 12 核 (M2 Pro 实测) | `io_thread_count: 24`<br>`worker_thread_count: 12` | 当前实测配置 |
+| 16 核 | `io_thread_count: 4-6`<br>`worker_thread_count: 8-12` | 高性能配置，充分利用多核 |
+| 32 核+ | `io_thread_count: 6-8`<br>`worker_thread_count: 16-24` | 企业级配置 |
+
+**说明**：
+- `io_thread_count`: 网络 IO 线程数，通常为 CPU 核数的 50-75%
+- `worker_thread_count`: 工作线程数（持久化、附件处理等），通常为 CPU 核数的 75-150%
+- M2 Pro 实测使用 24 IO 线程 + 12 工作线程，性能稳定在 ~180 msg/s
+
+#### 2. 数据库配置
+
+| 并发量 | 数据库配置 | 说明 |
+|--------|-----------|------|
+| 低并发 (<100) | `initial_pool_size: 5`<br>`max_pool_size: 20` | 适合小型测试环境 |
+| 中并发 (100-500) | `initial_pool_size: 10`<br>`max_pool_size: 50` | 推荐配置 |
+| 高并发 (500+) | `initial_pool_size: 20`<br>`max_pool_size: 100`<br>`connection_timeout: 3` | 需要配合 MySQL 优化 |
+
+**实测配置（MacBook M2 Pro）**：
+- `initial_pool_size: 32`
+- `max_pool_size: 128`
+- `connection_timeout: 5`
+- `idle_timeout: 300`
+
+**MySQL 优化建议**：
+
+```sql
+-- my.cnf 配置示例（针对高并发场景）
+[mysqld]
+# 连接数配置
+max_connections = 500
+max_connect_errors = 1000
+
+# InnoDB 配置
+innodb_buffer_pool_size = 4G      # 设为物理内存的 50-70%
+innodb_log_file_size = 512M
+innodb_flush_log_at_trx_commit = 2  # 提高写入性能
+innodb_flush_method = O_DIRECT
+
+# 查询缓存
+query_cache_size = 0               # 禁用查询缓存（MySQL 8.0+ 已移除）
+
+# 临时表
+tmp_table_size = 256M
+max_heap_table_size = 256M
+
+# 线程配置
+thread_cache_size = 100
+```
+
+#### 3. 磁盘 I/O 配置
+
+| 磁盘类型 | 预期性能 | 适用场景 |
+|---------|---------|---------|
+| HDD (7200 RPM) | ~100 IOPS | 仅适合测试，生产环境不推荐 |
+| SATA SSD | ~50,000 IOPS | 小型部署 |
+| NVMe SSD | ~200,000+ IOPS | 推荐用于生产环境 |
+| NVMe RAID 0 | ~400,000+ IOPS | 高性能场景 |
+| 企业级 SSD | ~500,000+ IOPS | 大规模部署 |
+
+**磁盘优化建议**：
+- 邮件存储和附件存储使用独立磁盘（或分区）
+- 使用 XFS 或 ext4 文件系统
+- 启用 `noatime` 挂载选项减少磁盘写入
+
+#### 4. 网络配置
+
+| 网络带宽 | 支持并发 | 预期吞吐 |
+|---------|---------|---------|
+| 100 Mbps | ~50 并发 | ~10 MB/s |
+| 1 Gbps | ~500 并发 | ~100 MB/s |
+| 10 Gbps | ~5000 并发 | ~1 GB/s |
+
+**系统优化建议**：
+
+```bash
+# /etc/sysctl.conf 配置
+# 增加网络连接队列长度
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 5000
+
+# 增加文件描述符限制
+fs.file-max = 1000000
+
+# TCP 优化
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 10000 65535
+
+# 应用配置（在启动脚本中）
+ulimit -n 100000  # 增加文件描述符限制
+```
+
+### 性能调优清单
+
+#### 基础优化（必做）
+
+- [ ] 根据硬件配置调整线程数（`io_thread_count`, `worker_thread_count`）
+- [ ] 配置合适的数据库连接池大小（`max_pool_size`）
+- [ ] 使用 NVMe SSD 存储邮件和附件
+- [ ] 增加系统文件描述符限制
+- [ ] 配置合适的网络缓冲区大小
+
+#### 进阶优化（推荐）
+
+- [ ] MySQL `innodb_buffer_pool_size` 设为物理内存的 50-70%
+- [ ] 使用 SSD 存储数据库文件
+- [ ] 启用 `innodb_flush_log_at_trx_commit = 2` 提高写入性能
+- [ ] 邮件存储和附件存储使用独立磁盘
+- [ ] 配置 RAID 0 或 RAID 10 提升磁盘性能
+
+#### 高级优化（大规模部署）
+
+- [ ] 使用多个邮件服务器实例（负载均衡）
+- [ ] 部署读写分离的 MySQL 主从架构
+- [ ] 使用 Redis 缓存热点数据
+- [ ] 配置 CDN 加速附件下载
+- [ ] 实现邮件队列的分布式架构
+
+### 性能测试方法
+
+### 使用python脚本进行测试
+
+uv run ./test/cl.py --messages 300
+
+#### 使用 swaks 进行压力测试
+
+```bash
+# 单线程测试（基准测试）
+for i in {1..1000}; do
+    swaks --to test@example.com \
+          --from sender@example.com \
+          --server localhost:465 \
+          --tls \
+          --body "Test email $i" &
+done
+
+# 多线程并发测试（压力测试）
+#!/bin/bash
+CONCURRENT=100
+TOTAL_EMAILS=10000
+
+for ((i=0; i<TOTAL_EMAILS; i++)); do
+    swaks --to test@example.com \
+          --from sender@example.com \
+          --server localhost:465 \
+          --tls \
+          --body "Stress test email $i" &
+
+    # 控制并发数
+    if ((i % CONCURRENT == 0)); then
+        wait
+    fi
+done
+wait
+```
+
+#### 监控关键指标
+
+```bash
+# 实时监控 CPU 使用率
+top -p $(pgrep -d',' smtpsServer)
+
+# 监控网络连接数
+watch -n 1 'netstat -an | grep 465 | wc -l'
+
+# 监控磁盘 I/O
+iostat -x 1
+
+# 监控数据库连接
+watch -n 1 'mysql -u root -p -e "SHOW PROCESSLIST;" | wc -l'
+
+# 查看日志统计
+tail -f logs/mail_system.log | grep -E "Successfully processed|ERROR"
+```
+
+### 常见性能瓶颈
+
+| 问题症状 | 可能原因 | 解决方案 |
+|---------|---------|---------|
+| 处理速度慢，CPU 使用率低 | 磁盘 I/O 瓶颈 | 升级到 NVMe SSD，优化数据库 |
+| CPU 使用率 100% | 线程数配置不当 | 增加 `worker_thread_count` |
+| 大量超时错误 | 数据库连接池耗尽 | 增加 `max_pool_size` |
+| 内存占用过高 | 并发数过多 | 限制 `maxConnections` |
+| 网络连接被拒绝 | 文件描述符限制 | 增加 `ulimit -n` 设置 |
+
+### 极限性能场景配置示例
+
+```json
+{
+  "address": "0.0.0.0",
+  "port": 465,
+  "use_ssl": true,
+  "enable_ssl": true,
+  "enable_tcp": true,
+  "ssl_port": 465,
+  "tcp_port": 25,
+  "certFile": "crt/server.crt",
+  "keyFile": "crt/server.key",
+  "dhFile": "",
+  "maxMessageSize": 52428800,
+  "maxConnections": 2000,
+  "io_thread_count": 8,
+  "worker_thread_count": 24,
+  "use_database": true,
+  "db_config_file": "db_config.json",
+  "connection_timeout": 300,
+  "read_timeout": 60,
+  "write_timeout": 60,
+  "require_auth": false,
+  "max_auth_attempts": 3,
+  "log_level": "info",
+  "log_file": "../logs/server.log",
+  "mail_storage_path": "../mail/",
+  "attachment_storage_path": "../attachments/"
+}
+```
+
+```json
+{
+  "achieve": "mysql",
+  "host": "localhost",
+  "user": "mail_user",
+  "password": "your_password",
+  "database": "mail",
+  "initialize_script": "sql/create_tables.sql",
+  "port": 3306,
+  "initial_pool_size": 20,
+  "max_pool_size": 100,
+  "connection_timeout": 3,
+  "idle_timeout": 60
+}
+```
+
+### 下一步改进方向
+
+- 使用特化内存池分配会话所需内存，减少内存碎片
+- 邮件解析使用simd加速
+
+## 📚 文档
+
+详细文档请参考：
+
+- [架构设计文档](docs/ARCHITECTURE.md) - 完整的系统架构和设计思想
+- [构建指南](BUILD_GUIDE.md) - 详细的构建配置说明
+- [日志系统说明](docs/logging-guide.md) - 日志配置和使用指南
+- [日志配置完成报告](docs/logging-completion.md) - 日志系统集成总结
+- [数据库问题分析](docs/prepared-statement-connection-pool-issue.md) - Prepared Statement 兼容性问题
+- [快速配置指南](docs/quick-log-config.md) - 快速配置参考
+- [域名部署指南](docs/domain-deployment-guide.md) - 域名和 SSL 证书配置
 
 ## 🐛 常见问题
 
@@ -636,29 +966,35 @@ cmake -DOPENSSL_ROOT_DIR=/usr/local/ssl ..
 
 **注意**: 本项目仅用于学习和研究目的，生产环境使用请务必配置 SSL/TLS、认证、反垃圾邮件等安全措施。
 
-## 📄 第三方库与许可说明
+## 📄 Third-party Libraries and License Notes
 
 ### nlohmann/json
 
-本项目包含 nlohmann/json 的单文件版本（位于 `OuterLib/json`）用于 JSON 解析。nlohmann/json 使用 MIT 许可发布，我们以 vendor 形式包含其单文件实现以便学习和实验使用。
+This project includes the single-header version of nlohmann/json (in `OuterLib/json`) for convenient JSON parsing. nlohmann/json is distributed under the MIT License. We include it here as a copy of the upstream single-header implementation for educational purposes.
 
-- **仓库**: https://github.com/nlohmann/json
-- **许可**: MIT License
-- **说明**: 在二进制分发或再发布本项目时，请务必保留 nlohmann/json 的 MIT 许可文本（单文件头部自带许可信息），以符合集成许可要求。
+Attribution:
+
+- nlohmann/json — JSON for Modern C++ (single-header)
+    - Repository: https://github.com/nlohmann/json
+    - License: MIT License
+
+If you redistribute this project or produce a binary including nlohmann/json, you must keep the MIT license text available (the upstream license permits redistribution with attribution). The included single-header comes with its MIT license; ensure you preserve that file's license header if you vendor/update it.
 
 ### Boost
 
-本项目链接并使用 Boost 库。如需再分发二进制或 vendor Boost 头文件，请随包附上 Boost Software License 文本。Boost 许可证文件位于项目根目录 `COPYING_BOOST.txt`。
+This project links against Boost. If you redistribute binaries or vendor Boost headers, include the Boost Software License text. A copy is provided in `COPYING_BOOST.txt` in the project root.
 
 ### OpenSSL
 
-本项目链接到 OpenSSL。OpenSSL 拥有自己的许可与归属说明：
+This project links to OpenSSL. OpenSSL's licensing depends on the version:
 
-- OpenSSL 1.1.x 及更早版本：OpenSSL License + SSLeay License
-- OpenSSL 3.x：Apache License 2.0
+- OpenSSL 1.1.x and earlier: OpenSSL License + SSLeay License (see upstream for exact text).
+- OpenSSL 3.x: Apache License 2.0.
 
-如果你随二进制再分发 OpenSSL，请遵守 OpenSSL 的许可要求并随包附上相应许可文本。详情见：https://www.openssl.org/source/license.html
+If you redistribute OpenSSL with your binaries, ensure you comply with the applicable OpenSSL licensing terms and include its license files and attribution. For redistribution, include the OpenSSL license text that came with your OpenSSL installation, or reference the upstream license page:
 
-### 关于 Boost 许可
+https://www.openssl.org/source/license.html
 
-本项目链接并使用 Boost 库。如果需要再分发二进制或分发 Boost 头文件，请包含 Boost Software License 文本。项目根目录提供了 `COPYING_BOOST.txt` 文件供参考。
+### Notes about the Boost license
+
+This project links against Boost. If you redistribute binaries or vendor Boost headers, include the Boost Software License text. A copy is provided in `COPYING_BOOST.txt` in the project root.

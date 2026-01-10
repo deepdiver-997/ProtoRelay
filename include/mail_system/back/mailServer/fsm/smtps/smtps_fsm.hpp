@@ -8,6 +8,7 @@
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/persist_storage/persistent_queue.h"
 #include <cstddef>
 #include <functional>
 #include <future>
@@ -53,35 +54,43 @@ enum class SmtpsEvent {
 
 // SMTPS 上下文
 struct SmtpsContext {
-    bool is_authenticated = false;
-    std::string client_username;
-    std::string sender_address;
-    std::vector<std::string> recipient_addresses;
-    std::string mail_data;
+    bool is_authenticated = false;               // AUTH 是否通过，决定后续命令是否允许
+    std::string client_username;                 // AUTH 登录名；MAIL FROM 缺省时作为发件人
+    std::string sender_address;                  // MAIL FROM 解析出的地址
+    std::vector<std::string> recipient_addresses;// RCPT TO 收件人列表
+    std::string mail_data;                       // 旧逻辑保留：完整邮件字符串缓冲（非流式时）
+
     // streaming / MIME parsing helpers
-    bool header_parsed = false;
-    bool streaming_enabled = false;
-    bool multipart = false;
-    bool has_attachment = true;
-    std::string boundary;
-    std::string header_buffer;
-    std::string line_buffer;
-    std::string text_body_buffer;
-    size_t text_body_size = 0;
-    size_t buffered_body_size = 0;
-    bool body_limit_exceeded = false;
-    std::string abort_reason;
-    std::string current_part_headers;
-    bool in_part_header = false;
-    bool current_part_is_attachment = false;
-    std::string current_part_encoding;
-    std::string current_part_mime;
-    std::string current_attachment_filename;
-    std::string current_attachment_path;
-    std::ofstream current_attachment_stream;
-    std::string base64_remainder;
-    size_t current_attachment_size = 0;
-    std::vector<attachment> streamed_attachments;
+    bool header_parsed = false;                  // DATA 阶段是否已解析完邮件头
+    bool streaming_enabled = false;              // 是否启用流式写盘（检测到大体或 multipart 后）
+    bool multipart = false;                      // 邮件是否为 multipart/*
+    bool has_attachment = false;                 // 是否检测到 Content-Disposition: attachment
+    std::string boundary;                        // multipart 边界字符串
+    std::string header_buffer;                   // 收集头部行直到遇到空行
+    std::string line_buffer;                     // 行级缓冲，处理 CRLF 与前导点去除
+    std::string text_body_buffer;                // 纯文本体累积（非流式或未触发刷盘时）
+    size_t text_body_size = 0;                   // 已接收正文总字节数（逻辑计数）
+    size_t buffered_body_size = 0;               // 已缓存在 text_body_buffer 的字节数
+    bool body_limit_exceeded = false;            // 超过大小限制时标记，后续可能拒收
+    std::string abort_reason;                    // 中断原因描述，便于日志
+
+    std::string current_part_headers;            // 当前 MIME 部分的头部缓存
+    bool in_part_header = false;                 // 是否仍在当前部分头部区域
+    bool current_part_is_attachment = false;     // 当前部分是否为附件
+    std::string current_part_encoding;           // 当前部分的 Content-Transfer-Encoding
+    std::string current_part_mime;               // 当前部分的 Content-Type
+    std::string current_attachment_filename;     // 当前附件文件名（来自 MIME 头）
+    std::string current_attachment_path;         // 当前附件落盘路径
+    std::ofstream current_attachment_stream;     // 备用流句柄（现以缓冲方式为主）
+    std::string base64_remainder;                // Base64 断行余数，拼接下一块使用
+    size_t current_attachment_size = 0;          // 当前附件累计写入大小
+    std::vector<attachment> streamed_attachments;// 已完成的附件元数据，DATA_END 时搬运到 mail
+    
+    // 附件缓冲区相关（采用与邮件相同的缓冲策略）
+    size_t attachment_buffer_size = 0;           // 当前附件缓冲区大小
+    std::unique_ptr<char[]> attachment_buffer;   // 附件数据缓冲指针
+    size_t attachment_buffer_used = 0;           // 附件缓冲已使用字节数
+    size_t attachment_buffer_expand_count = 0;   // 附件缓冲扩容次数，超过阈值转刷盘
 
     void clear() {
         is_authenticated = false;
@@ -111,6 +120,8 @@ struct SmtpsContext {
         base64_remainder.clear();
         current_attachment_size = 0;
         streamed_attachments.clear();
+        attachment_buffer_used = 0;
+        attachment_buffer_expand_count = 0;
         if (current_attachment_stream.is_open()) {
             current_attachment_stream.close();
         }
@@ -131,12 +142,15 @@ protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
+    std::shared_ptr<mail_system::persist_storage::PersistentQueue> m_persistentQueue;
 public:
     SmtpsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
              std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+             std::shared_ptr<persist_storage::PersistentQueue> persistent_queue,
              std::shared_ptr<DBPool> db_pool)
         : m_ioThreadPool(io_thread_pool),
           m_workerThreadPool(worker_thread_pool),
+          m_persistentQueue(persistent_queue),
           m_dbPool(db_pool) {}
     virtual ~SmtpsFsm() = default;
 
@@ -252,11 +266,21 @@ public:
             return std::future<bool>();
         }
 
-        // 复制 mail 数据，避免悬空指针问题
-        mail mail_data = *data;
+        if (!m_dbPool) {
+            LOG_DATABASE_ERROR("DBPool is null in save_mail_metadata_async");
+            return std::future<bool>();
+        }
+
+        if (!m_workerThreadPool) {
+            LOG_DATABASE_ERROR("WorkerThreadPool is null in save_mail_metadata_async");
+            return std::future<bool>();
+        }
+
+        mail& mail_data = *data;
+
 
         auto task = [this, file_path_prefix, mail_data]() -> bool {
-            auto connection = m_dbPool->get_connection();
+            auto connection = this->m_dbPool->get_connection();
             if (!connection || !connection->is_connected()) {
                 LOG_DATABASE_ERROR("Failed to get database connection in async task");
                 return false;
@@ -266,41 +290,53 @@ public:
 
             bool success = true;
 
-            for (const auto& recipient : mail_data.to) {
-                std::string body_path = file_path_prefix;
+            // 第一步：插入邮件元数据到 mails 表（新 schema：id, subject, body_path, status）
+            std::string body_path = file_path_prefix;
+            std::string mail_sql = "INSERT INTO mails (id, subject, body_path, status) VALUES (" +
+                std::to_string(mail_data.id) + ", '" +
+                mysql_connection->escape_string(mail_data.subject) + "', '" +
+                mysql_connection->escape_string(body_path) + "', " +
+                std::to_string(mail_data.status) + ")";
+            LOG_DATABASE_INFO("Executing SQL: {}", mail_sql);
+            if (!mysql_connection->execute(mail_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", mysql_connection->get_last_error());
+                return false;
+            }
 
-                // 插入邮件元数据，使用自生成的ID
-                std::string mail_sql = "INSERT INTO mails (id, sender, recipient, subject, body_path, status) VALUES (" +
+            // 第二步：插入邮件收发件人关系到 mail_recipients 表
+            // 一份邮件可能有多个收件人，所以为每个收件人插入一条关系记录
+            std::string recipient_sql = "INSERT INTO mail_recipients (mail_id, sender, recipient) VALUES ";
+            for (size_t i = 0; i < mail_data.to.size(); ++i) {
+                recipient_sql += "(" + std::to_string(mail_data.id) + ", '";
+                recipient_sql += mysql_connection->escape_string(mail_data.from) + "', '";
+                recipient_sql += mysql_connection->escape_string(mail_data.to[i]) + "')";
+                
+                if (i < mail_data.to.size() - 1) {
+                    recipient_sql += ", ";
+                }
+            }
+            recipient_sql += ";";
+            LOG_DATABASE_INFO("Executing SQL: {}", recipient_sql);
+            if (!mysql_connection->execute(recipient_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", mysql_connection->get_last_error());
+                // 如果插入收件人失败，删除已插入的邮件元数据
+                std::string delete_sql = "DELETE FROM mails WHERE id = " + std::to_string(mail_data.id);
+                mysql_connection->execute(delete_sql);
+                return false;
+            }
+
+            // 第三步：插入附件元数据
+            for (const auto& att : mail_data.attachments) {
+                std::string att_sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type) VALUES (" +
                     std::to_string(mail_data.id) + ", '" +
-                    mysql_connection->escape_string(mail_data.from) + "', '" +
-                    mysql_connection->escape_string(recipient) + "', '" +
-                    mysql_connection->escape_string(mail_data.subject) + "', '" +
-                    mysql_connection->escape_string(body_path) + "', " +
-                    std::to_string(mail_data.status) + + ")";
-                LOG_DATABASE_INFO("Executing SQL: {}", mail_sql);
-                if (!mysql_connection->execute(mail_sql)) {
-                    LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", mysql_connection->get_last_error());
+                    mysql_connection->escape_string(att.filename) + "', '" +
+                    mysql_connection->escape_string(att.filepath) + "', " +
+                    std::to_string(att.file_size) + ", '" +
+                    mysql_connection->escape_string(att.mime_type) + "')";
+                LOG_DATABASE_INFO("Executing SQL: {}", att_sql);
+                if (!mysql_connection->execute(att_sql)) {
+                    LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
                     success = false;
-                    break;
-                }
-
-                // 插入附件元数据
-                for (const auto& att : mail_data.attachments) {
-                    std::string att_sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type) VALUES (" +
-                        std::to_string(mail_data.id) + ", '" +
-                        mysql_connection->escape_string(att.filename) + "', '" +
-                        mysql_connection->escape_string(att.filepath) + "', " +
-                        std::to_string(att.file_size) + ", '" +
-                        mysql_connection->escape_string(att.mime_type) + "')";
-                    LOG_DATABASE_INFO("Executing SQL: {}", att_sql);
-                    if (!mysql_connection->execute(att_sql)) {
-                        LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
-                        success = false;
-                        break;
-                    }
-                }
-
-                if (!success) {
                     break;
                 }
             }
@@ -308,9 +344,47 @@ public:
             return success;
         };
 
-        future = m_workerThreadPool->submit(std::move(task));
+        future = this->m_workerThreadPool->submit(std::move(task));
 
         return future;
+    }
+
+    // 保存附件元数据到数据库（异步），返回 future
+    std::future<bool> save_attachment_metadata_async(const attachment& att, size_t mail_id) {
+        if (!m_dbPool || !m_workerThreadPool) {
+            LOG_DATABASE_ERROR("DBPool or WorkerThreadPool is null in save_attachment_metadata_async");
+            return std::future<bool>();
+        }
+
+        auto task = [this, att, mail_id]() -> bool {
+            auto connection = this->m_dbPool->get_connection();
+            if (!connection || !connection->is_connected()) {
+                LOG_DATABASE_ERROR("Failed to get database connection in save_attachment_metadata_async");
+                return false;
+            }
+
+            auto mysql_connection = std::dynamic_pointer_cast<MySQLConnection>(connection);
+            if (!mysql_connection) {
+                LOG_DATABASE_ERROR("Failed to cast to MySQLConnection");
+                return false;
+            }
+
+            std::string att_sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type, upload_time) VALUES (" +
+                std::to_string(mail_id) + ", '" +
+                mysql_connection->escape_string(att.filename) + "', '" +
+                mysql_connection->escape_string(att.filepath) + "', " +
+                std::to_string(att.file_size) + ", '" +
+                mysql_connection->escape_string(att.mime_type) + "', " +
+                std::to_string(att.upload_time) + ")";
+            LOG_DATABASE_INFO("Executing SQL: {}", att_sql);
+            if (!mysql_connection->execute(att_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
+                return false;
+            }
+            return true;
+        };
+
+        return this->m_workerThreadPool->submit(std::move(task));
     }
 
     // 根据文件路径删除邮件元数据 假定数据库操作一定成功

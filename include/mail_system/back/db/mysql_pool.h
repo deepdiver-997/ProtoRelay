@@ -23,7 +23,7 @@ public:
     size_t get_available_connections() const override;
     void close() override;
 
-protected:
+// protected:
     // 连接包装类，用于跟踪连接的使用情况
     struct ConnectionWrapper {
         std::shared_ptr<IDBConnection> connection;
@@ -35,6 +35,62 @@ protected:
               last_used(std::chrono::steady_clock::now()),
               in_use(false) {}
     };
+
+    // RAII 连接包装类，自动释放连接回连接池
+    class RAIIConnection {
+    private:
+        std::shared_ptr<IDBConnection> connection_;
+        MySQLPool* pool_;
+
+    public:
+        RAIIConnection(std::shared_ptr<IDBConnection> conn, MySQLPool* pool)
+            : connection_(conn), pool_(pool) {}
+
+        // 禁止拷贝
+        RAIIConnection(const RAIIConnection&) = delete;
+        RAIIConnection& operator=(const RAIIConnection&) = delete;
+
+        // 允许移动
+        RAIIConnection(RAIIConnection&& other) noexcept
+            : connection_(std::move(other.connection_)), pool_(other.pool_) {
+            other.pool_ = nullptr;
+        }
+
+        RAIIConnection& operator=(RAIIConnection&& other) noexcept {
+            if (this != &other) {
+                release();
+                connection_ = std::move(other.connection_);
+                pool_ = other.pool_;
+                other.pool_ = nullptr;
+            }
+            return *this;
+        }
+
+        ~RAIIConnection() {
+            release();
+        }
+
+        // 获取原始连接
+        std::shared_ptr<IDBConnection> get() const { return connection_; }
+
+        // 显式释放连接
+        void release() {
+            if (connection_ && pool_) {
+                pool_->release_connection(connection_);
+                connection_.reset();
+                pool_ = nullptr;
+            }
+        }
+
+        // 智能指针操作符
+        std::shared_ptr<IDBConnection> operator->() const { return connection_; }
+        explicit operator bool() const { return connection_ != nullptr; }
+    };
+
+    // 获取 RAII 连接，自动管理生命周期
+    RAIIConnection get_raii_connection() {
+        return RAIIConnection(get_connection(), this);
+    }
 
     void initialize_pool() override;
     std::shared_ptr<IDBConnection> create_connection() override;

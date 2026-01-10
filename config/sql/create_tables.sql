@@ -15,19 +15,29 @@ CREATE TABLE IF NOT EXISTS users (
     INDEX idx_mail_address (mail_address)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户信息表';
 
--- 创建邮件表
+-- 创建邮件表（只存储邮件元数据，不存储收发件人）
 CREATE TABLE IF NOT EXISTS mails (
-    id BIGINT PRIMARY KEY NOT NULL COMMENT '邮件ID（由服务器生成）',
-    sender VARCHAR(255) NOT NULL COMMENT '发件人邮箱地址',
-    recipient VARCHAR(255) NOT NULL COMMENT '收件人邮箱地址',
+    id BIGINT PRIMARY KEY NOT NULL COMMENT '邮件ID（由服务器生成的Snowflake ID）',
     subject VARCHAR(255) NOT NULL COMMENT '邮件主题',
     body_path VARCHAR(512) COMMENT '邮件正文文件路径',
     send_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
-    status INT NOT NULL DEFAULT 0 COMMENT '邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除',
-    INDEX idx_sender (sender),
-    INDEX idx_recipient (recipient),
     INDEX idx_send_time (send_time)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件信息表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件元数据表';
+
+-- 创建邮件收发件人关系表（一份邮件可能有多个收件人）
+CREATE TABLE IF NOT EXISTS mail_recipients (
+    id BIGINT PRIMARY KEY NOT NULL COMMENT '关系记录ID（由服务器生成的Snowflake ID）',
+    mail_id BIGINT NOT NULL COMMENT '邮件ID',
+    sender VARCHAR(255) NOT NULL COMMENT '发件人邮箱地址',
+    recipient VARCHAR(255) NOT NULL COMMENT '收件人邮箱地址',
+    status INT NOT NULL DEFAULT 0 COMMENT '邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除',
+    send_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
+    FOREIGN KEY (mail_id) REFERENCES mails(id) ON DELETE CASCADE,
+    UNIQUE KEY uk_mail_sender_recipient (mail_id, sender, recipient) COMMENT '同一份邮件同一对收发件人只记录一次',
+    INDEX idx_mail_id (mail_id),
+    INDEX idx_sender (sender),
+    INDEX idx_recipient (recipient)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件收发件人关系表';
 
 -- 创建附件表
 CREATE TABLE IF NOT EXISTS attachments (

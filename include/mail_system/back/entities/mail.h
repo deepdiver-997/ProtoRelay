@@ -5,6 +5,20 @@
 #include<vector>
 #include<ctime>
 #include <fstream>
+#include <unordered_map>
+#include <future>
+
+namespace mail_system {
+namespace persist_storage {
+enum class PersistStatus : int {
+    PENDING = 0,
+    PROCESSING = 1,
+    SUCCESS = 2,
+    FAILED = 3,
+    CANCELLED = 4
+};
+}
+}
 
 struct mailbox
 {
@@ -26,11 +40,13 @@ struct attachment
     std::string mime_type;     // 文件MIME类型
     time_t upload_time;        // 上传时间
     std::string content;       // 解析阶段暂存的原始内容（落盘后可清空）
+    std::shared_future<bool> meta_future; // 附件元数据持久化返回的 future，可拷贝
 };
 
 struct mail
 {
     size_t id;                  // 主键
+    std::vector<size_t> ids;    // 关系的主键
     std::string from;           // 发件人邮箱地址
     std::vector<std::string> to;// 收件人邮箱地址
     std::string header;         // 邮件头
@@ -41,11 +57,13 @@ struct mail
     int status;                 // 邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除
     std::string body_path;      // 邮件正文存储路径（使用文件存储）
     std::vector<attachment> attachments; // 附件元数据列表
+    mail_system::persist_storage::PersistStatus persist_status{mail_system::persist_storage::PersistStatus::PENDING}; // 持久化状态
+    bool mail_over{false};    // 邮件内容是否完整（用于流式处理）
+    std::shared_future<bool> meta_future; // 附件元数据持久化返回的 future，可拷贝
     mail() = default;
-    mail(size_t id, std::string from, std::vector<std::string> to, std::string header, std::string body, time_t send_time, int box_id, int status)
-        : id(id), from(from), to(to), header(header), body(body), send_time(send_time), box_id(box_id), status(status) {}
     mail(const mail& other) {
         id = other.id;
+        ids = other.ids;
         from = other.from;
         to = other.to;
         header = other.header;
@@ -55,11 +73,14 @@ struct mail
         box_id = other.box_id;
         status = other.status;
         attachments = other.attachments;
+        persist_status = other.persist_status;
+        body_path = other.body_path;
+        mail_over = other.mail_over;
     }
     mail(mail&& other) noexcept {
         id = other.id;
+        ids = std::move(other.ids);
         from = std::move(other.from);
-        to = std::move(other.to);
         header = std::move(other.header);
         body = std::move(other.body);
         subject = std::move(other.subject);
@@ -67,14 +88,8 @@ struct mail
         box_id = other.box_id;
         status = other.status;
         attachments = std::move(other.attachments);
-    }
-    static bool save_mail_to_file(const mail& mail, const std::string& file_path) {
-        std::ofstream out(file_path);
-        if (out.is_open()) {
-            out << mail.body;
-            out.close();
-            return true;
-        }
-        return false;
+        persist_status = other.persist_status;
+        body_path = std::move(other.body_path);
+        mail_over = other.mail_over;
     }
 };

@@ -48,7 +48,6 @@ public:
         , read_buffer_(8192)
         , use_buffer_(8192)
         , mail_(nullptr)
-        , mails_()
         , closed_(false)
         , m_server(server) {}
 
@@ -62,7 +61,6 @@ public:
         , use_buffer_(std::move(other.use_buffer_))
         , client_address_(std::move(other.client_address_))
         , mail_(std::move(other.mail_))
-        , mails_(std::move(other.mails_))
         , usr_(std::move(other.usr_))
         , closed_(other.closed_)
         , m_server(other.m_server) {
@@ -88,7 +86,7 @@ public:
         try {
             if (connection_ && connection_->is_open()) {
                 connection_->close();
-                std::cout << "Session closed." << std::endl;
+                std::cout << "Session closed for " << get_client_ip() << std::endl;
             } else {
                 std::cout << "Session already closed or connection not open." << std::endl;
             }
@@ -134,14 +132,6 @@ public:
 
     // 获取邮件对象指针（转移所有权）
     std::unique_ptr<mail> get_mail_ptr() { return std::move(mail_); }
-
-    // 获取所有邮件对象
-    std::vector<std::unique_ptr<mail>> get_mails() {
-        if (mail_) {
-            mails_.push_back(std::move(mail_));
-        }
-        return std::move(mails_);
-    }
 
     // 获取用户对象
     usr* get_usr() { return usr_.get(); }
@@ -218,7 +208,6 @@ protected:
 public:
     // 邮件和用户对象
     std::unique_ptr<mail> mail_;
-    std::vector<std::unique_ptr<mail>> mails_;
     std::unique_ptr<usr> usr_;
 
 protected:
@@ -261,7 +250,7 @@ public:
                 }
 
                 if (error) {
-                    std::cerr << "Error reading data: " << error.message() << std::endl;
+                    LOG_SESSION_ERROR("Error reading data: {}", error.message());
                     self->handle_error(error);
                     return;
                 }
@@ -282,9 +271,11 @@ public:
 
                 // 回调不为空则执行回调
                 if (cb) {
+                    // 直接在IO线程中执行回调，避免不必要的线程切换
                     cb(std::move(self), error, bytes_transferred);
                 }
                 else {
+                    // 默认处理：调用process_read
                     self->process_read(std::move(self));
                 }
             })
@@ -316,6 +307,7 @@ public:
                     self->handle_error(error);
                 } else {
                     if (cb) {
+                        // 直接在IO线程中执行回调
                         cb(std::move(self), error);
                     } else {
                         // 回调为空，自动继续读取

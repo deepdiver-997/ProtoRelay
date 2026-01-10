@@ -84,9 +84,12 @@ try {
                     LOG_SERVER_INFO("Database pool initialized successfully");
                 } else {
                     LOG_SERVER_ERROR("Failed to initialize database pool");
+                    return;
                 }
+                m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(m_dbPool, m_workerThreadPool);
             } else {
                 LOG_SERVER_ERROR("Unsupported database achieve: {}", config.db_pool_config.achieve);
+                return;
             }
         }
 
@@ -156,12 +159,11 @@ try {
 
 ServerBase::~ServerBase() {
     stop();
+    // Logger 是全局单例，不应该在这里 shutdown
+    // 应该在程序最后统一关闭
 }
 
 void ServerBase::accept_ssl_connection() {
-    // if (!m_enable_ssl || !m_ssl_acceptor) {
-    //     return;
-    // }
 
     LOG_NETWORK_DEBUG("Waiting for SSL connection...");
     // 创建新的TCP socket和SSL流
@@ -279,6 +281,7 @@ void ServerBase::run() {
     while (m_state.load() == ServerState::Running || m_state.load() == ServerState::Paused) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    // std::this_thread::sleep_for(std::chrono::minutes(1));
 }
 
 void ServerBase::stop(ServerState next_state) {
@@ -299,6 +302,13 @@ void ServerBase::stop(ServerState next_state) {
             if(m_listenerThread.joinable())
                 m_listenerThread.join();
             LOG_SERVER_INFO("Listener thread stopped");
+            
+            // 先关闭 PersistentQueue，停止其 worker 线程
+            if(m_persistentQueue) {
+                m_persistentQueue->shutdown();
+                LOG_SERVER_INFO("PersistentQueue shutdown");
+            }
+            
             if(m_ioThreadPool)
                 m_ioThreadPool->stop();
             if(m_workerThreadPool)

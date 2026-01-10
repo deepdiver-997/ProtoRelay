@@ -12,8 +12,9 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
       std::shared_ptr<ThreadPoolBase> wokerThreadPool,
        std::shared_ptr<DBPool> dbPool)
         : ServerBase(config, ioThreadPool, wokerThreadPool, dbPool) {
-    m_tcp_fsm = std::make_shared<TraditionalSmtpsFsm<TcpConnection>>(m_ioThreadPool, m_workerThreadPool, m_dbPool);
-    m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(m_ioThreadPool, m_workerThreadPool, m_dbPool);
+    m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(m_dbPool, m_workerThreadPool);
+    m_tcp_fsm = std::make_shared<TraditionalSmtpsFsm<TcpConnection>>(m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_dbPool);
+    m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_dbPool);
 }
 
 SmtpsServer::~SmtpsServer() {
