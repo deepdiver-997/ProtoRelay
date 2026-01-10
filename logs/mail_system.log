@@ -1,5 +1,0 @@
-[2026-01-06 20:52:45.353] [info] [39363415] [SERVER] Logger initialized
-[2026-01-06 20:52:45.353] [info] [39363415] [SERVER] SMTPS Server V6 Starting...
-[2026-01-06 20:52:45.367] [info] [39363415] [SERVER] Logger initialized with level: info
-[2026-01-06 20:52:45.367] [error] [39363415] [SERVER] Error initializing server: Failed to create mail storage directory: /Users/zhuhongrui/Desktop/code/c++/project/mail-system/v6/mail/
-[2026-01-06 20:52:45.368] [error] [39363415] [SERVER] Error: Failed to create mail storage directory: /Users/zhuhongrui/Desktop/code/c++/project/mail-system/v6/mail/
