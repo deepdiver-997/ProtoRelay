@@ -1,8 +1,8 @@
 -- 创建数据库
-CREATE DATABASE IF NOT EXISTS mail;
+CREATE DATABASE IF NOT EXISTS mail2;
 
 -- 使用数据库
-USE mail;
+USE mail2;
 
 -- 创建用户表
 CREATE TABLE IF NOT EXISTS users (

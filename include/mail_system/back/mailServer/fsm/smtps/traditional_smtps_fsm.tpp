@@ -108,8 +108,12 @@ void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_USERNAME;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_PASSWORD;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH)] = SmtpsState::WAIT_MAIL_FROM;
+    // Be tolerant to repeated EHLO/HELO after greeting.
+    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
     transition_table_[std::make_pair(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
+    // SMTP transaction reset: allow MAIL FROM again before DATA.
+    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
     transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO)] = SmtpsState::WAIT_DATA;
     transition_table_[std::make_pair(SmtpsState::WAIT_DATA, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
     transition_table_[std::make_pair(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
@@ -149,6 +153,10 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
         std::bind(&TraditionalSmtpsFsm::handle_wait_auth_auth, this,
                   std::placeholders::_1, std::placeholders::_2);
 
+    state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::EHLO] =
+        std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this,
+                  std::placeholders::_1, std::placeholders::_2);
+
     state_handlers_[SmtpsState::WAIT_AUTH_USERNAME][SmtpsEvent::AUTH] =
         std::bind(&TraditionalSmtpsFsm::handle_wait_auth_username, this,
                   std::placeholders::_1, std::placeholders::_2);
@@ -167,6 +175,10 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
 
     state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::RCPT_TO] =
         std::bind(&TraditionalSmtpsFsm::handle_wait_rcpt_to_rcpt_to, this,
+                  std::placeholders::_1, std::placeholders::_2);
+
+    state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::MAIL_FROM] =
+        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this,
                   std::placeholders::_1, std::placeholders::_2);
 
     state_handlers_[SmtpsState::WAIT_DATA][SmtpsEvent::DATA] =
@@ -194,6 +206,9 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
     for (int i = 0; i < static_cast<int>(SmtpsState::WAIT_QUIT) + 1; ++i) {
         state_handlers_[static_cast<SmtpsState>(i)][SmtpsEvent::ERROR] =
             std::bind(&TraditionalSmtpsFsm::handle_error, this,
+                      std::placeholders::_1, std::placeholders::_2);
+        state_handlers_[static_cast<SmtpsState>(i)][SmtpsEvent::TIMEOUT] =
+            std::bind(&TraditionalSmtpsFsm::handle_timeout, this,
                       std::placeholders::_1, std::placeholders::_2);
     }
 }
@@ -304,6 +319,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     const std::string& args
 ) {
     LOG_SMTP_DETAIL_DEBUG("Received EHLO: {}", args);
+    LOG_SMTP_DETAIL_INFO("EHLO accepted: state={}, args=[{}]",
+                         SmtpsFsm<ConnectionType>::get_state_name(
+                             static_cast<SmtpsState>(session->get_current_state())),
+                         args);
 
     std::string response = "250-" + args + " Hello\r\n";
     response += "250-SIZE 10240000\r\n"
@@ -326,6 +345,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
                 LOG_SMTP_DETAIL_ERROR("Error sending EHLO response: {}", ec.message());
                 return;
             }
+            LOG_SMTP_DETAIL_INFO("EHLO response sent, switching to WAIT_AUTH");
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
             SessionBase<ConnectionType>::do_async_read(std::move(s), [] (
                 std::unique_ptr<SessionBase<ConnectionType>> sss,
@@ -507,10 +527,18 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     std::unique_ptr<SessionBase<ConnectionType>> session,
     const std::string& args
 ) {
+    LOG_SMTP_DETAIL_INFO("MAIL FROM received: state={}, args=[{}]",
+                         SmtpsFsm<ConnectionType>::get_state_name(
+                             static_cast<SmtpsState>(session->get_current_state())),
+                         args);
     std::regex mail_from_regex(R"(FROM:\s*<([^>]*)>)", std::regex_constants::icase);
     std::smatch matches;
     if (std::regex_search(args, matches, mail_from_regex) && matches.size() > 1) {
-        static_cast<SmtpsContext*>(session->get_context())->sender_address = matches[1];
+        LOG_SMTP_DETAIL_INFO("MAIL FROM accepted: sender={}", matches[1].str());
+        auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        ctx->sender_address = matches[1];
+        // New MAIL FROM starts/restarts the envelope transaction.
+        ctx->recipient_addresses.clear();
         SessionBase<ConnectionType>::do_async_write(
             std::move(session),
             "250 Ok\r\n",
@@ -538,6 +566,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
             }
         );
     } else {
+        LOG_SMTP_DETAIL_WARN("MAIL FROM rejected by parser: args=[{}], expected pattern='FROM:<address>'", args);
         SessionBase<ConnectionType>::do_async_write(
             std::move(session),
             "501 Syntax error in parameters or arguments\r\n",
@@ -757,6 +786,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             if (status == persist_storage::PersistStatus::SUCCESS) {
                 // 成功则回复 250 OK 并继续
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
+                smtp_session->transfer_mail_ownership_to_outbound();
                 smtp_session->reset_mail_state();
                 SessionBase<ConnectionType>::do_async_write(std::move(s), "250 OK\r\n", [] (
                     std::unique_ptr<SessionBase<ConnectionType>> sss,
@@ -819,10 +849,34 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
 }
 
 template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::handle_timeout(
+    std::unique_ptr<SessionBase<ConnectionType>> session,
+    const std::string& args
+) {
+    SessionBase<ConnectionType>::do_async_read(std::move(session), [] (
+        std::unique_ptr<SessionBase<ConnectionType>> s,
+        const boost::system::error_code& error,
+        std::size_t bytes_transferred
+    ) mutable {
+        if (error) {
+            LOG_SMTP_DETAIL_ERROR("Error reading after timeout/empty fragment: {}", error.message());
+            return;
+        }
+        auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(s->get_fsm());
+        fsm->auto_process_event(std::move(s));
+    });
+}
+
+template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_error(
     std::unique_ptr<SessionBase<ConnectionType>> session,
     const std::string& args
 ) {
+    LOG_SMTP_DETAIL_WARN("SMTP error event: state={}, args=[{}], stay_times={}",
+                         SmtpsFsm<ConnectionType>::get_state_name(
+                             static_cast<SmtpsState>(session->get_current_state())),
+                         args,
+                         session->stay_times_);
     session->stay_times_++;
     if (session->stay_times_ > 3) {
         LOG_SMTP_DETAIL_ERROR("Too many errors, closing session.");

@@ -13,8 +13,9 @@ ServerBase::ServerBase(const ServerConfig& config,
     : m_ioThreadPool(ioThreadPool),
       m_workerThreadPool(wokerThreadPool),
       m_dbPool(dbPool),
-      m_config(config),
       ssl_in_worker(config.ssl_in_worker),
+            m_domain(config.system_domain.empty() ? std::string("example.com") : config.system_domain),
+            m_config(config),
       m_ssl_endpoint(boost::asio::ip::make_address(config.address), config.ssl_port),
       m_tcp_endpoint(boost::asio::ip::make_address(config.address), config.tcp_port),
       m_sslContext(boost::asio::ssl::context::sslv23),
@@ -87,6 +88,17 @@ try {
                     return;
                 }
                 m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(m_dbPool, m_workerThreadPool);
+                m_persistentQueue->set_local_domain(m_domain);
+                m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
+                    m_dbPool,
+                    m_ioThreadPool,
+                    m_workerThreadPool,
+                    m_domain,
+                    m_config.outbound_ports,
+                    static_cast<int>(m_config.outbound_max_attempts)
+                );
+                m_persistentQueue->set_outbound_client(m_outboundClient);
+                m_outboundClient->start();
             } else {
                 LOG_SERVER_ERROR("Unsupported database achieve: {}", config.db_pool_config.achieve);
                 return;
@@ -304,6 +316,11 @@ void ServerBase::stop(ServerState next_state) {
             LOG_SERVER_INFO("Listener thread stopped");
             
             // 先关闭 PersistentQueue，停止其 worker 线程
+            if (m_outboundClient) {
+                m_outboundClient->stop();
+                LOG_SERVER_INFO("Outbound client stopped");
+            }
+
             if(m_persistentQueue) {
                 m_persistentQueue->shutdown();
                 LOG_SERVER_INFO("PersistentQueue shutdown");

@@ -3,6 +3,9 @@
 #include <iostream>
 #include <memory>
 #include <signal.h>
+#include <string>
+#include <thread>
+#include <chrono>
 #if ENABLE_DATABASE_QUERY_DEBUG_LOG
 #define ENABLE_DATABASE_QUERY_DEBUG_LOG 0
 #endif
@@ -14,6 +17,43 @@
 
 using namespace mail_system;
 
+namespace {
+constexpr const char* kDefaultConfigPath = "config/smtpsConfig.json";
+
+void print_usage(const char* program_name) {
+    std::cout << "Usage: " << program_name << " [config_path]\n"
+              << "       " << program_name << " -c <config_path>\n"
+              << "       " << program_name << " --config <config_path>\n";
+}
+
+bool resolve_config_path(int argc, char* argv[], std::string& config_path) {
+    config_path = kDefaultConfigPath;
+    if (argc <= 1) {
+        return true;
+    }
+
+    const std::string first_arg = argv[1] ? argv[1] : "";
+    if (first_arg == "-h" || first_arg == "--help") {
+        print_usage(argv[0]);
+        return false;
+    }
+
+    if (first_arg == "-c" || first_arg == "--config") {
+        if (argc < 3 || argv[2] == nullptr) {
+            std::cerr << "Missing config path after " << first_arg << "\n";
+            print_usage(argv[0]);
+            return false;
+        }
+        config_path = argv[2];
+        return true;
+    }
+
+    // Backward-compatible: treat the first positional arg as config path.
+    config_path = first_arg;
+    return true;
+}
+}
+
 // 全局服务器指针，用于信号处理
 std::unique_ptr<SmtpsServer> g_server = nullptr;
 
@@ -22,26 +62,38 @@ void signal_handler(int signal) {
     LOG_SERVER_INFO("\nReceived signal {}, shutting down...", signal);
     if (g_server) {
         g_server->stop();
+        g_server.reset();
     }
 }
 
 int main(int argc, char* argv[]) {
-    // 初始化日志系统
-    Logger::get_instance().init("logs/mail_system.log", 1024 * 1024 * 5, 3, spdlog::level::debug);
-
     // 注册信号处理
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    LOG_SERVER_INFO("SMTPS Server V6 Starting...");
+    std::cout << "SMTPS Server V7 Starting..." << std::endl;
 
     try {
-        // 加载配置
-        ServerConfig config;
-        if (!config.loadFromFile("config/smtpsConfig.json")) {
-            std::cerr << "Failed to load config file: config/smtpsConfig.json" << std::endl;
+        std::string config_path;
+        if (!resolve_config_path(argc, argv, config_path)) {
             return 1;
         }
+
+        // 加载配置
+        ServerConfig config;
+        if (!config.loadFromFile(config_path)) {
+            std::cerr << "Failed to load config file: " << config_path << std::endl;
+            return 1;
+        }
+
+        // Initialize logger from config so runtime log path/level are respected.
+        Logger::get_instance().init(
+            config.log_file,
+            1024 * 1024 * 5,
+            3,
+            Logger::string_to_level(config.log_level)
+        );
+        LOG_SERVER_INFO("Loaded config file: {}", config_path);
         std::cout << "config:\n";
         config.show();
         std::cout << std::endl;
@@ -60,11 +112,22 @@ int main(int argc, char* argv[]) {
 
         LOG_SERVER_INFO("SMTPS Server stopped");
 
-        // 关闭日志系统
+        // 【关键】手动释放服务器资源，确保在 Logger shutdown 之前完成所有清理
+        g_server.reset();  // 触发 ServerBase 析构 → PersistentQueue 析构 → worker 线程退出
+        
+        // 等待所有后台线程完全退出（PersistentQueue worker、worker_pool 任务等）
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        // 现在可以安全关闭日志系统了
         Logger::get_instance().shutdown();
 
     } catch (const std::exception& e) {
         LOG_SERVER_ERROR("Error: {}", e.what());
+        std::cerr << "Exception caught in main: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        LOG_SERVER_ERROR("Unknown exception caught in main");
+        std::cerr << "Unknown exception in main()" << std::endl;
         return 1;
     }
 

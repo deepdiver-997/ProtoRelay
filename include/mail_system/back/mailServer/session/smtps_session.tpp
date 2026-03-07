@@ -11,6 +11,7 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , fsm_(std::move(fsm))
     , state_(SmtpsState::INIT)
     , next_event_(SmtpsEvent::CONNECT)
+    , ignore_current_command_(false)
     , context_()
     , buffer_size_(INITIAL_BUFFER_SIZE)
     , buffer_(new char[INITIAL_BUFFER_SIZE])
@@ -41,6 +42,12 @@ void SmtpsSession<ConnectionType>::handle_read(const std::string& data) {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<ConnectionType>> self) {
+    if (ignore_current_command_) {
+        ignore_current_command_ = false;
+        SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+        return;
+    }
+
     auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(this->get_fsm());
     fsm->auto_process_event(std::move(self));
 }
@@ -332,6 +339,22 @@ bool SmtpsSession<ConnectionType>::check_mail_persist_status() {
 }
 
 template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
+    if (!this->m_server || !this->m_server->m_outboundClient || !this->get_mail()) {
+        return;
+    }
+
+    auto owned_mail = this->get_mail_ptr();
+    if (!owned_mail) {
+        return;
+    }
+
+    if (!this->m_server->m_outboundClient->accept_mail_ownership(std::move(owned_mail))) {
+        LOG_SESSION_WARN("Failed to transfer mail ownership to outbound client");
+    }
+}
+
+template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
     if (!mail_ptr) {
         return;
@@ -559,8 +582,18 @@ void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data,
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
-    LOG_SESSION_INFO("Handling data: {}", data);
     std::string trimmed = algorithm::trim(data);
+
+    // In command phase, a standalone CRLF can arrive as a fragmented delimiter.
+    // Emit TIMEOUT so FSM can continue reading without reusing a stale event.
+    if (state_ != SmtpsState::IN_MESSAGE && trimmed.empty()) {
+        ignore_current_command_ = false;
+        next_event_ = SmtpsEvent::TIMEOUT;
+        last_command_args_.clear();
+        return;
+    }
+
+    LOG_SESSION_INFO("Handling data: {}", data);
 
     if (state_ == SmtpsState::IN_MESSAGE) {
         process_message_data(data);
@@ -608,10 +641,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
         return;
     }
 
-    if (trimmed.empty()) {
-        next_event_ = SmtpsEvent::ERROR;
-        return;
-    }
+    ignore_current_command_ = false;
 
     if (state_ == SmtpsState::WAIT_AUTH_USERNAME || state_ == SmtpsState::WAIT_AUTH_PASSWORD) {
         next_event_ = SmtpsEvent::AUTH;

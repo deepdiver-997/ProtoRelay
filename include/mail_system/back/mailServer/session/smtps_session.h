@@ -52,6 +52,7 @@ public:
     void create_mail_on_data_command();
     void submit_mail_to_queue();
     bool check_mail_persist_status();
+    void transfer_mail_ownership_to_outbound();
     void flush_body_and_wait();
     void reset_mail_state();
 
@@ -106,6 +107,7 @@ private:
     std::shared_ptr<SmtpsFsm<ConnectionType>> fsm_;
     SmtpsState state_;
     SmtpsEvent next_event_;
+    bool ignore_current_command_;
     SmtpsContext context_;
     std::string last_command_args_;
 

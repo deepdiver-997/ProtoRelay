@@ -83,6 +83,7 @@ private:
     void handle_in_message_data(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_in_message_data_end(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_wait_quit_quit(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_timeout(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_error(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
 };
 

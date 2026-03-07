@@ -180,6 +180,8 @@ set(COMMON_SRCS
     src/mail_system/back/thread_pool/boost_thread_pool.cpp
     src/mail_system/back/thread_pool/io_thread_pool.cpp
     src/mail_system/back/algorithm/snow.cpp
+    src/mail_system/back/outbound/outbox_repository.cpp
+    src/mail_system/back/outbound/smtp_outbound_client.cpp
     src/smtp_utils.cpp
     src/persistent_queue.cpp
 )
@@ -237,6 +239,15 @@ if(MYSQL_INCLUDE_DIRS)
     target_include_directories(smtpsServer PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
 endif()
 
+# OpenSSL include（仅在未使用导入目标时作为兜底）
+if(USE_SSL)
+    if(DEFINED OPENSSL_INCLUDE_DIRS AND OPENSSL_INCLUDE_DIRS)
+        target_include_directories(smtpsServer PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIRS})
+    elseif(DEFINED OPENSSL_INCLUDE_DIR AND OPENSSL_INCLUDE_DIR)
+        target_include_directories(smtpsServer PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIR})
+    endif()
+endif()
+
 # -----------------------------
 # 链接依赖（显式链接，避免 link_directories）
 # -----------------------------
@@ -256,7 +267,14 @@ endif()
 set(LINK_LIBRARIES ${Boost_LIBRARIES} Threads::Threads ${MYSQL_LIBRARIES} spdlog::spdlog)
 
 if(USE_SSL)
-    list(APPEND LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
+    if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+        list(APPEND LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
+    elseif(OPENSSL_LIBRARIES)
+        message(WARNING "OpenSSL imported targets unavailable, fallback to OPENSSL_LIBRARIES")
+        list(APPEND LINK_LIBRARIES ${OPENSSL_LIBRARIES})
+    else()
+        message(FATAL_ERROR "USE_SSL=ON but neither OpenSSL imported targets nor OPENSSL_LIBRARIES are available")
+    endif()
 endif()
 
 target_link_libraries(smtpsServer PRIVATE ${LINK_LIBRARIES})

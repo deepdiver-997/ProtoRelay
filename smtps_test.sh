@@ -3,8 +3,11 @@
 # SMTP自动化测试脚本
 # 用于测试SMTPS服务器的邮件接收功能
 
-SMTP_SERVER="localhost"
-SMTP_PORT="25"
+SMTP_SERVER="${SMTP_SERVER:-localhost}"
+SMTP_PORT="${SMTP_PORT:-25}"
+MAIL_FROM="${MAIL_FROM:-sender@example.com}"
+RCPT_TO="${RCPT_TO:-receiver@example.net}"
+MAIL_SUBJECT="${MAIL_SUBJECT:-SMTP Test Mail}"
 
 # 颜色输出
 GREEN='\033[0;32m'
@@ -14,6 +17,8 @@ NC='\033[0m' # No Color
 
 echo -e "${YELLOW}=== SMTP自动化测试脚本 ===${NC}"
 echo "测试服务器: $SMTP_SERVER:$SMTP_PORT"
+echo "MAIL FROM: $MAIL_FROM"
+echo "RCPT TO: $RCPT_TO"
 echo ""
 
 # 等待服务启动
@@ -38,17 +43,17 @@ echo -e "${YELLOW}步骤2: 发送测试邮件${NC}"
     sleep 1
     printf "helo client\r\n"
     sleep 1
-    printf "mail from:<asd@acc>\r\n"
+    printf "mail from:<$MAIL_FROM>\r\n"
     sleep 1
-    printf "rcpt to:<asd@svd>\r\n"
+    printf "rcpt to:<$RCPT_TO>\r\n"
     sleep 1
     printf "data\r\n"
     sleep 1
-    printf "Subject: SMTP Test Mail\r\n"
+    printf "Subject: $MAIL_SUBJECT\r\n"
     sleep 0.5
-    printf "From: asd@acc\r\n"
+    printf "From: $MAIL_FROM\r\n"
     sleep 0.5
-    printf "To: asd@svd\r\n"
+    printf "To: $RCPT_TO\r\n"
     sleep 0.5
     printf "\r\n"
     sleep 0.5

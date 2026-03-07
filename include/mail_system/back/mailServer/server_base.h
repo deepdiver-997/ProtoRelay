@@ -17,6 +17,7 @@
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/outbound/smtp_outbound_client.h"
 // #include "mail_system/back/mailServer/session/session_base.h"
 
 // #include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
@@ -102,9 +103,10 @@ public:
     std::shared_ptr<mail_system::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
     std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;
+    std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
     // std::shared_ptr<ClientFSM> m_client_fsm;
     bool ssl_in_worker;
-    const std::string m_domain = "example.com";
+    std::string m_domain;
     ServerConfig m_config;
 
 protected:

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <cstdint>
+#include <vector>
 #include <nlohmann/json.hpp> // JSON库
 #include "mail_system/back/db/db_pool.h"
 
@@ -57,6 +58,12 @@ struct ServerConfig {
     std::string log_file;            // 日志文件路径
     std::string mail_storage_path;   // 邮件存储路径
     std::string attachment_storage_path; // 附件存储路径
+
+    // 系统标识与出站策略配置
+    std::string system_name;         // 当前邮件系统名称
+    std::string system_domain;       // 当前邮件系统的域名（用于内外部判定）
+    std::vector<uint16_t> outbound_ports; // 预留：真实SMTP投递端口优先级
+    size_t outbound_max_attempts;    // 预留：每条出站记录最大尝试次数
     
     ServerConfig()
         : address("0.0.0.0")
@@ -79,6 +86,10 @@ struct ServerConfig {
         , require_auth(true)
         , max_auth_attempts(3)
         , log_level("info")
+        , system_name("mail-system")
+        , system_domain("example.com")
+        , outbound_ports({25, 587, 465})
+        , outbound_max_attempts(8)
     {}
 
     ServerConfig(const ServerConfig& other) = default;
@@ -123,7 +134,19 @@ struct ServerConfig {
                   << "\nlog_file = " << log_file
                   << "\nmail_storage_path = " << mail_storage_path
                   << "\nattachment_storage_path = " << attachment_storage_path
+                  << "\nsystem_name = " << system_name
+                  << "\nsystem_domain = " << system_domain
+                  << "\noutbound_max_attempts = " << outbound_max_attempts
                   << std::endl;
+
+        std::cout << "outbound_ports = [";
+        for (size_t i = 0; i < outbound_ports.size(); ++i) {
+            std::cout << outbound_ports[i];
+            if (i + 1 < outbound_ports.size()) {
+                std::cout << ", ";
+            }
+        }
+        std::cout << "]" << std::endl;
     }
     
     // 设置向后兼容的端口（非const方法）
@@ -251,6 +274,25 @@ struct ServerConfig {
         log_file = resolve_path(filename, json_config.value("log_file", log_file));
         mail_storage_path = resolve_path(filename, json_config.value("mail_storage_path", mail_storage_path));
         attachment_storage_path = resolve_path(filename, json_config.value("attachment_storage_path", attachment_storage_path));
+        system_name = json_config.value("system_name", system_name);
+        system_domain = json_config.value("system_domain", system_domain);
+        outbound_max_attempts = json_config.value("outbound_max_attempts", outbound_max_attempts);
+
+        if (json_config.contains("outbound_ports") && json_config["outbound_ports"].is_array()) {
+            std::vector<uint16_t> parsed_ports;
+            for (const auto& item : json_config["outbound_ports"]) {
+                if (!item.is_number_unsigned()) {
+                    continue;
+                }
+                const auto parsed = static_cast<uint32_t>(item.get<uint32_t>());
+                if (parsed > 0 && parsed <= 65535) {
+                    parsed_ports.push_back(static_cast<uint16_t>(parsed));
+                }
+            }
+            if (!parsed_ports.empty()) {
+                outbound_ports = std::move(parsed_ports);
+            }
+        }
 
         // 设置向后兼容的端口
         setup_backward_compatibility_ports();

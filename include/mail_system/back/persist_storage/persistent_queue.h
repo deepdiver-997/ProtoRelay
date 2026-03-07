@@ -13,6 +13,12 @@
 #include <string>
 
 namespace mail_system {
+namespace outbound {
+class SmtpOutboundClient;
+}
+}
+
+namespace mail_system {
 namespace persist_storage {
 
 class PersistentQueue {
@@ -36,6 +42,9 @@ public:
 
     // 获取队列大小
     size_t queue_size() const;
+
+    void set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client);
+    void set_local_domain(std::string local_domain);
 
     // 关闭队列，等待所有任务完成
     void shutdown();
@@ -67,8 +76,12 @@ public:
     // 主工作循环
     void worker_loop();
 
+    void enqueue_outbox_tasks(mail* mail_data);
+
     std::shared_ptr<DBPool> db_pool_;
     std::shared_ptr<ThreadPoolBase> worker_pool_;
+    std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client_;
+    std::string local_domain_{"example.com"};
     
     std::vector<mail*> task_queue_;
     std::mutex queue_mutex_;

@@ -44,6 +44,7 @@ attachments/*.*
 # ==================== 敏感配置文件 ====================
 # 数据库配置（包含密码）
 config/db_config.json
+config/db_config_mail2.json
 config/db_config_local.json
 config/*_local.json
 

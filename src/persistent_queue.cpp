@@ -1,6 +1,8 @@
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
+#include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/outbound/smtp_outbound_client.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -13,7 +15,7 @@ namespace persist_storage {
 PersistentQueue::PersistentQueue(
     std::shared_ptr<DBPool> db_pool,
     std::shared_ptr<ThreadPoolBase> worker_pool
-) : db_pool_(db_pool), worker_pool_(worker_pool), shutdown_(false), worker_running_(false), current_task_count_(0), task_queue_(MAX_TASK_COUNT) {
+) : db_pool_(db_pool), worker_pool_(worker_pool), shutdown_(false), worker_running_(false), current_task_count_(0) {
     // 启动工作线程
     worker_running_ = true;
     worker_thread_ = std::thread(&PersistentQueue::worker_loop, this);
@@ -170,6 +172,16 @@ size_t PersistentQueue::queue_size() const {
     return current_task_count_.load();
 }
 
+void PersistentQueue::set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client) {
+    outbound_client_ = std::move(outbound_client);
+}
+
+void PersistentQueue::set_local_domain(std::string local_domain) {
+    if (!local_domain.empty()) {
+        local_domain_ = std::move(local_domain);
+    }
+}
+
 void PersistentQueue::shutdown() {
     if (shutdown_.load()) {
         return;
@@ -217,6 +229,7 @@ void PersistentQueue::process_task() {
 
         if (success) {
             mail_data->persist_status = PersistStatus::SUCCESS;
+            enqueue_outbox_tasks(mail_data);
             LOG_PERSISTENT_QUEUE_INFO("Successfully processed mail ID {}", mail_data->id);
         } else {
             mail_data->persist_status = PersistStatus::FAILED;
@@ -412,6 +425,18 @@ void PersistentQueue::worker_loop() {
         // }
     }
     // 不在这里打印退出日志，因为可能在析构阶段调用，此时 Logger 可能已 shutdown
+}
+
+void PersistentQueue::enqueue_outbox_tasks(mail* mail_data) {
+    if (!mail_data || !outbound_client_) {
+        return;
+    }
+
+    outbound::OutboxRepository repository(db_pool_);
+    if (!repository.enqueue_from_mail(*mail_data, local_domain_, nullptr)) {
+        return;
+    }
+    outbound_client_->notify_outbox_ready();
 }
 
 // bool PersistentQueue::save_mail_body(mail* mail_data, const std::string& file_path, std::string& error) {
