@@ -175,11 +175,44 @@ void MySQLPool::initialize_pool() {
     // 执行SQL脚本
     try {
         execute_sql_script(m_config.initialize_script);
+        reconnect_pool_connections();
     } catch (const std::exception& e) {
         LOG_DATABASE_ERROR("Failed to execute SQL script: {}", e.what());
         close();
         LOG_DATABASE_ERROR("Database pool closed due to initialization failure.");
     }
+}
+
+void MySQLPool::reconnect_pool_connections() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // 重置可用连接队列，重连成功后再重新入队。
+    std::queue<std::shared_ptr<ConnectionWrapper>> empty;
+    std::swap(m_availableConnections, empty);
+
+    std::size_t success = 0;
+    std::size_t failed = 0;
+    for (auto& wrapper : m_connections) {
+        if (!wrapper || !wrapper->connection) {
+            ++failed;
+            continue;
+        }
+
+        wrapper->connection->disconnect();
+        if (wrapper->connection->connect()) {
+            wrapper->in_use = false;
+            wrapper->last_used = std::chrono::steady_clock::now();
+            m_availableConnections.push(wrapper);
+            ++success;
+        } else {
+            wrapper->in_use = false;
+            ++failed;
+        }
+    }
+
+    LOG_DATABASE_INFO("Reconnect pool connections after schema init: success={}, failed={}",
+                      success,
+                      failed);
 }
 
 std::shared_ptr<IDBConnection> MySQLPool::create_connection() {

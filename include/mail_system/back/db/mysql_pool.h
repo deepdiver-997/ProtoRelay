@@ -113,6 +113,8 @@ private:
     bool validate_connection(std::shared_ptr<IDBConnection> connection);
     // 执行SQL脚本
     void execute_sql_script(const std::string& script_path);
+    // 初始化脚本后，重连已有连接使其绑定到目标数据库
+    void reconnect_pool_connections();
 };
 
 // MySQL连接池工厂实现

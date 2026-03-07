@@ -247,9 +247,22 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql) {
 
     LOG_DB_QUERY_DEBUG("Executing mysql_query()...");
     if (mysql_query(m_mysql, sql.c_str()) != 0) {
+        const auto err = mysql_errno(m_mysql);
+        if (err == 1046 && !m_database.empty()) {
+            LOG_DB_QUERY_WARN("No database selected, trying USE {} and retry query", m_database);
+            if (mysql_select_db(m_mysql, m_database.c_str()) == 0 &&
+                mysql_query(m_mysql, sql.c_str()) == 0) {
+                LOG_DB_QUERY_INFO("Retry query succeeded after selecting database {}", m_database);
+            } else {
+                LOG_DB_QUERY_ERROR("MySQL query error: {} (errno: {})",
+                                   mysql_error(m_mysql), mysql_errno(m_mysql));
+                return nullptr;
+            }
+        } else {
         LOG_DB_QUERY_ERROR("MySQL query error: {} (errno: {})",
                          mysql_error(m_mysql), mysql_errno(m_mysql));
         return nullptr;
+        }
     }
 
     LOG_DB_QUERY_DEBUG("Query executed successfully, storing result...");
@@ -386,6 +399,15 @@ bool MySQLConnection::execute(const std::string& sql) {
 
     LOG_DB_QUERY_DEBUG("Executing mysql_query()...");
     if (mysql_query(m_mysql, sql.c_str()) != 0) {
+        const auto err = mysql_errno(m_mysql);
+        if (err == 1046 && !m_database.empty()) {
+            LOG_DB_QUERY_WARN("No database selected, trying USE {} and retry execute", m_database);
+            if (mysql_select_db(m_mysql, m_database.c_str()) == 0 &&
+                mysql_query(m_mysql, sql.c_str()) == 0) {
+                LOG_DB_QUERY_INFO("Retry execute succeeded after selecting database {}", m_database);
+                return true;
+            }
+        }
         LOG_DB_QUERY_ERROR("MySQL execute error: {} (errno: {})",
                          mysql_error(m_mysql), mysql_errno(m_mysql));
         return false;
