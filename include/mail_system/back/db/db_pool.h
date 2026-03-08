@@ -10,6 +10,7 @@
 #include <vector>
 #include <mutex>
 #include <condition_variable>
+#include <filesystem>
 
 namespace mail_system {
 

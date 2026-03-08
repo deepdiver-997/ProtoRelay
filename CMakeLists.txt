@@ -310,6 +310,11 @@ endif()
 # 根据SSL选项链接不同的库
 set(LINK_LIBRARIES ${Boost_LIBRARIES} Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} spdlog::spdlog)
 
+# GCC < 9 may require explicit filesystem runtime library.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    list(APPEND LINK_LIBRARIES stdc++fs)
+endif()
+
 if(USE_SSL)
     if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
         list(APPEND LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
