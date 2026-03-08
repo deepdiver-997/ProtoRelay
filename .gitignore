@@ -54,6 +54,7 @@ config/crt/*.pem
 config/crt/*.crt
 config/certificates/
 config/ssl/
+config/dkim/**
 
 # 保留示例配置文件
 !config/db_config_example.json
@@ -112,6 +113,8 @@ $RECYCLE.BIN/
 *.sh
 !smtp_test.sh  # 保留这个测试脚本
 !./test/cl.py
+!scripts/generate_dkim_keys.sh
+!build.sh
 
 # 临时压缩包
 *.tar.gz

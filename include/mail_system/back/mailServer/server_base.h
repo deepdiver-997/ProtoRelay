@@ -104,6 +104,7 @@ public:
     std::shared_ptr<DBPool> m_dbPool;
     std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;
     std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
+    std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
     // std::shared_ptr<ClientFSM> m_client_fsm;
     bool ssl_in_worker;
     std::string m_domain;

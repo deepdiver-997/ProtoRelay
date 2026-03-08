@@ -1,4 +1,5 @@
 #include "mail_system/back/mailServer/server_base.h"
+#include "mail_system/back/outbound/cares_dns_resolver.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
@@ -89,10 +90,30 @@ try {
                 }
                 m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(m_dbPool, m_workerThreadPool);
                 m_persistentQueue->set_local_domain(m_domain);
+                m_outboundInterruptFlag = std::make_shared<std::atomic<bool>>(true);
+                outbound::OutboundIdentityConfig outbound_identity;
+                outbound_identity.helo_domain = m_config.outbound_helo_domain;
+                outbound_identity.mail_from_domain = m_config.outbound_mail_from_domain;
+                outbound_identity.rewrite_header_from = m_config.outbound_rewrite_header_from;
+                outbound_identity.dkim_enabled = m_config.outbound_dkim_enabled;
+                outbound_identity.dkim_selector = m_config.outbound_dkim_selector;
+                outbound_identity.dkim_domain = m_config.outbound_dkim_domain;
+                outbound_identity.dkim_private_key_file = m_config.outbound_dkim_private_key_file;
+
+                outbound::OutboundPollingConfig outbound_polling;
+                outbound_polling.busy_sleep_ms = static_cast<int>(m_config.outbound_poll_busy_sleep_ms);
+                outbound_polling.backoff_base_ms = static_cast<int>(m_config.outbound_poll_backoff_base_ms);
+                outbound_polling.backoff_max_ms = static_cast<int>(m_config.outbound_poll_backoff_max_ms);
+                outbound_polling.backoff_shift_cap = static_cast<std::size_t>(m_config.outbound_poll_backoff_shift_cap);
+
                 m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
                     m_dbPool,
                     m_ioThreadPool,
                     m_workerThreadPool,
+                    std::make_shared<outbound::CaresDnsResolver>(),
+                    m_outboundInterruptFlag,
+                    std::move(outbound_identity),
+                    outbound_polling,
                     m_domain,
                     m_config.outbound_ports,
                     static_cast<int>(m_config.outbound_max_attempts)
@@ -251,6 +272,9 @@ void ServerBase::start() {
     }
     if (m_state.load() != ServerState::Stopped) {
         m_state.store(ServerState::Running);
+    if (m_outboundInterruptFlag) {
+        m_outboundInterruptFlag->store(true);
+    }
     if (!m_acceptor->is_open()) {
         m_acceptor->open(m_acceptor->local_endpoint().protocol());
         m_acceptor->listen();
@@ -306,6 +330,9 @@ void ServerBase::stop(ServerState next_state) {
     if (m_state.load() == ServerState::Running) {
         try {
             m_state.store(next_state);
+            if (m_outboundInterruptFlag) {
+                m_outboundInterruptFlag->store(false);
+            }
             // boost::asio::post(*m_ioContext, [this]() {
             //     m_acceptor->close();
             //     if(m_workGuard->owns_work() && m_state == ServerState::Stopped)

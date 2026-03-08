@@ -121,6 +121,39 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig)
 set(MYSQL_INCLUDE_DIRS "")
 set(MYSQL_LIBRARIES "")
+set(CARES_INCLUDE_DIRS "")
+set(CARES_LIBRARIES "")
+set(CARES_LIBRARY_DIRS "")
+
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PC_CARES QUIET libcares)
+    if(NOT PC_CARES_FOUND)
+        pkg_check_modules(PC_CARES QUIET cares)
+    endif()
+    if(PC_CARES_FOUND)
+        set(CARES_INCLUDE_DIRS ${PC_CARES_INCLUDE_DIRS})
+        set(CARES_LIBRARY_DIRS ${PC_CARES_LIBRARY_DIRS})
+        if(PC_CARES_LINK_LIBRARIES)
+            set(CARES_LIBRARIES ${PC_CARES_LINK_LIBRARIES})
+        else()
+            set(CARES_LIBRARIES ${PC_CARES_LIBRARIES})
+        endif()
+        message(STATUS "✓ Found c-ares via pkg-config")
+    endif()
+endif()
+
+if(NOT CARES_LIBRARIES)
+    find_path(CARES_INCLUDE_DIR ares.h PATHS /opt/homebrew/include /usr/local/include /usr/include)
+    find_library(CARES_LIBRARY NAMES cares c-ares PATHS /opt/homebrew/lib /usr/local/lib /usr/lib)
+    if(CARES_INCLUDE_DIR AND CARES_LIBRARY)
+        set(CARES_INCLUDE_DIRS ${CARES_INCLUDE_DIR})
+        set(CARES_LIBRARIES ${CARES_LIBRARY})
+        get_filename_component(CARES_LIBRARY_DIRS ${CARES_LIBRARY} DIRECTORY)
+        message(STATUS "✓ Found c-ares library: ${CARES_LIBRARY}")
+    else()
+        message(FATAL_ERROR "c-ares not found. Please install c-ares (e.g. brew install c-ares).")
+    endif()
+endif()
 
 # 第一步：尝试 pkg-config
 if(PKG_CONFIG_FOUND)
@@ -182,6 +215,9 @@ set(COMMON_SRCS
     src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/outbound/outbox_repository.cpp
     src/mail_system/back/outbound/smtp_outbound_client.cpp
+    src/mail_system/back/outbound/outbound_utils.cpp
+    src/mail_system/back/outbound/mx_routing_utils.cpp
+    src/mail_system/back/outbound/cares_dns_resolver.cpp
     src/smtp_utils.cpp
     src/persistent_queue.cpp
 )
@@ -239,6 +275,14 @@ if(MYSQL_INCLUDE_DIRS)
     target_include_directories(smtpsServer PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
 endif()
 
+if(CARES_INCLUDE_DIRS)
+    target_include_directories(smtpsServer PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
+endif()
+
+if(CARES_LIBRARY_DIRS)
+    target_link_directories(smtpsServer PRIVATE ${CARES_LIBRARY_DIRS})
+endif()
+
 # OpenSSL include（仅在未使用导入目标时作为兜底）
 if(USE_SSL)
     if(DEFINED OPENSSL_INCLUDE_DIRS AND OPENSSL_INCLUDE_DIRS)
@@ -264,7 +308,7 @@ if(NOT MYSQL_LIBRARIES)
 endif()
 
 # 根据SSL选项链接不同的库
-set(LINK_LIBRARIES ${Boost_LIBRARIES} Threads::Threads ${MYSQL_LIBRARIES} spdlog::spdlog)
+set(LINK_LIBRARIES ${Boost_LIBRARIES} Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} spdlog::spdlog)
 
 if(USE_SSL)
     if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)

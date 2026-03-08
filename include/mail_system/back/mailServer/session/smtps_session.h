@@ -108,6 +108,7 @@ private:
     SmtpsState state_;
     SmtpsEvent next_event_;
     bool ignore_current_command_;
+    std::string command_read_buffer_;
     SmtpsContext context_;
     std::string last_command_args_;
 

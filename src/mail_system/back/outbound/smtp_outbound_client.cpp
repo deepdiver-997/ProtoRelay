@@ -1,15 +1,24 @@
 #include "mail_system/back/outbound/smtp_outbound_client.h"
 
+#include "mail_system/back/outbound/cares_dns_resolver.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/outbound/mx_routing_utils.h"
+#include "mail_system/back/outbound/outbound_utils.h"
+#include "mail_system/back/outbound/smtp_transport_utils.h"
 #include "mail_system/back/thread_pool/io_thread_pool.h"
 
+#include <boost/asio.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/ssl.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <thread>
 
 namespace mail_system {
 namespace outbound {
@@ -17,8 +26,6 @@ namespace outbound {
 namespace {
 constexpr std::size_t kClaimBatchSize = 32;
 constexpr int kLeaseSeconds = 45;
-constexpr int kLoopWaitMs = 200;
-constexpr int kSmtpIoTimeoutSeconds = 10;
 constexpr int kDefaultRetryDelaySeconds = 30;
 std::atomic<std::uint64_t> g_dispatch_attempt_seq{0};
 
@@ -67,6 +74,14 @@ struct SmtpExecResult {
     std::string error_message;
 };
 
+using ContinueFn = smtp_transport::ContinueFn;
+using smtp_transport::kIoOperationTimeout;
+using smtp_transport::looks_like_ehlo_capability_response;
+using smtp_transport::read_smtp_response;
+using smtp_transport::run_interruptible_ec;
+using smtp_transport::send_smtp_data;
+using smtp_transport::send_smtp_line;
+
 std::string join_ports(const std::vector<std::uint16_t>& ports) {
     std::ostringstream oss;
     for (std::size_t i = 0; i < ports.size(); ++i) {
@@ -78,125 +93,67 @@ std::string join_ports(const std::vector<std::uint16_t>& ports) {
     return oss.str();
 }
 
-std::string trim_cr(std::string line) {
-    if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
+std::chrono::milliseconds compute_adaptive_wait(const OutboundPollingConfig& cfg,
+                                                std::size_t empty_claim_rounds,
+                                                bool has_memory_pending) {
+    const int busy_sleep_ms = std::max(1, cfg.busy_sleep_ms);
+    const int backoff_base_ms = std::max(1, cfg.backoff_base_ms);
+    const int backoff_max_ms = std::max(busy_sleep_ms, cfg.backoff_max_ms);
+    const std::size_t backoff_shift_cap = cfg.backoff_shift_cap;
+
+    if (has_memory_pending) {
+        return std::chrono::milliseconds(busy_sleep_ms);
     }
-    return line;
+
+    const std::size_t shift = std::min(empty_claim_rounds, backoff_shift_cap);
+    int wait_ms = backoff_base_ms << shift;
+    wait_ms = std::max(busy_sleep_ms, std::min(wait_ms, backoff_max_ms));
+    return std::chrono::milliseconds(wait_ms);
 }
 
-bool parse_smtp_code(const std::string& line, int& code_out) {
-    if (line.size() < 3 ||
-        !std::isdigit(static_cast<unsigned char>(line[0])) ||
-        !std::isdigit(static_cast<unsigned char>(line[1])) ||
-        !std::isdigit(static_cast<unsigned char>(line[2]))) {
-        return false;
+std::string rewrite_sender_domain(const std::string& sender, const std::string& domain_override) {
+    if (domain_override.empty()) {
+        return sender;
     }
-
-    code_out = (line[0] - '0') * 100 + (line[1] - '0') * 10 + (line[2] - '0');
-    return true;
+    const auto at_pos = sender.find('@');
+    if (at_pos == std::string::npos) {
+        return sender;
+    }
+    return sender.substr(0, at_pos + 1) + domain_override;
 }
 
-bool read_smtp_response(boost::asio::ip::tcp::iostream& stream,
-                        int& code_out,
-                        std::string& response_out,
-                        std::string& error_out) {
-    response_out.clear();
-    code_out = 0;
+constexpr const char* kStartTlsReadyToken = "__STARTTLS_READY__";
 
-    std::string line;
-    if (!std::getline(stream, line)) {
-        error_out = "failed to read smtp response";
-        return false;
-    }
-
-    line = trim_cr(line);
-    response_out = line;
-
-    if (!parse_smtp_code(line, code_out)) {
-        error_out = "invalid smtp response: " + line;
-        return false;
-    }
-
-    // Multi-line response: 250-... until 250 ...
-    while (line.size() >= 4 && line[3] == '-') {
-        if (!std::getline(stream, line)) {
-            error_out = "truncated multi-line smtp response";
-            return false;
-        }
-        line = trim_cr(line);
-        response_out += "\\n" + line;
-    }
-
-    return true;
-}
-
-bool send_smtp_line(boost::asio::ip::tcp::iostream& stream, const std::string& line) {
-    stream << line << "\r\n" << std::flush;
-    return static_cast<bool>(stream);
-}
-
-bool looks_like_ehlo_capability_response(const std::string& response) {
-    if (response.rfind("250-", 0) != 0) {
-        return false;
-    }
-    return response.find("SMTPUTF8") != std::string::npos ||
-           response.find("SIZE") != std::string::npos ||
-           response.find("8BITMIME") != std::string::npos ||
-           response.find("STARTTLS") != std::string::npos;
-}
-
-SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
-                                   const std::vector<std::uint16_t>& outbound_ports) {
+template <typename StreamType>
+SmtpExecResult execute_smtp_transaction(StreamType& stream,
+                                        boost::asio::streambuf& buffer,
+                                        const OutboxRecord& record,
+                                        const std::string& helo_domain,
+                                        const std::string& envelope_sender,
+                                        const std::string& header_from,
+                                        const OutboundIdentityConfig& identity_config,
+                                        bool allow_starttls_upgrade,
+                                        bool expect_greeting,
+                                        const ContinueFn& should_continue) {
     SmtpExecResult result;
-    if (outbound_ports.empty()) {
-        result.error_message = "outbound_ports is empty";
-        return result;
-    }
-
-    LOG_SERVER_INFO("Outbound SMTP start: outbox_id={}, mail_id={}, recipient={}, ports=[{}]",
-                    record.id,
-                    record.mail_id,
-                    record.recipient,
-                    join_ports(outbound_ports));
-
-    boost::asio::ip::tcp::iostream stream;
-    stream.expires_after(std::chrono::seconds(kSmtpIoTimeoutSeconds));
-
-    std::uint16_t connected_port = 0;
-    for (auto port : outbound_ports) {
-        stream.clear();
-        stream.connect("127.0.0.1", std::to_string(port));
-        if (stream) {
-            connected_port = port;
-            LOG_SERVER_INFO("Outbound SMTP connected: outbox_id={}, port={}", record.id, connected_port);
-            break;
-        }
-    }
-
-    if (connected_port == 0) {
-        result.error_message = "failed to connect all configured outbound ports";
-        result.retry_delay_seconds = kDefaultRetryDelaySeconds;
-        LOG_SERVER_WARN("Outbound SMTP connect failed: outbox_id={}, ports=[{}]",
-                        record.id,
-                        join_ports(outbound_ports));
-        return result;
-    }
-
     int code = 0;
     std::string response;
     std::string error;
-    SmtpStep step = SmtpStep::ReadGreeting;
 
+    SmtpStep step = expect_greeting ? SmtpStep::ReadGreeting : SmtpStep::SendEhlo;
     while (step != SmtpStep::Done) {
-        stream.expires_after(std::chrono::seconds(kSmtpIoTimeoutSeconds));
+        if (should_continue && !should_continue()) {
+            result.error_message = "outbound client stopping";
+            return result;
+        }
+
         switch (step) {
         case SmtpStep::ReadGreeting:
-            if (!read_smtp_response(stream, code, response, error)) {
+            if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read greeting failed: " + error;
                 return result;
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -210,37 +167,38 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
             break;
 
         case SmtpStep::SendEhlo:
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, request=EHLO outbound.local",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=EHLO {}",
                             record.id,
-                            smtp_step_name(step));
-            if (!send_smtp_line(stream, "EHLO outbound.local")) {
-                result.error_message = "send EHLO failed";
+                            smtp_step_name(step),
+                            helo_domain);
+            if (!send_smtp_line(stream, "EHLO " + helo_domain, should_continue, error)) {
+                result.error_message = "send EHLO failed: " + error;
                 return result;
             }
-            if (!read_smtp_response(stream, code, response, error)) {
+            if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read EHLO response failed: " + error;
                 return result;
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
                             response);
+
             if (code >= 400) {
-                // Compatibility fallback: some servers reject EHLO but accept HELO.
-                LOG_SERVER_WARN("Outbound SMTP EHLO rejected: outbox_id={}, code={}, response=[{}], trying HELO",
+                LOG_OUTBOUND_WARN("Outbound SMTP EHLO rejected: outbox_id={}, code={}, response=[{}], trying HELO",
                                 record.id,
                                 code,
                                 response);
-                if (!send_smtp_line(stream, "HELO outbound.local")) {
-                    result.error_message = "send HELO fallback failed";
+                if (!send_smtp_line(stream, "HELO " + helo_domain, should_continue, error)) {
+                    result.error_message = "send HELO fallback failed: " + error;
                     return result;
                 }
-                if (!read_smtp_response(stream, code, response, error)) {
+                if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                     result.error_message = "read HELO fallback response failed: " + error;
                     return result;
                 }
-                LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step=SendHeloFallback, code={}, response=[{}]",
+                LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step=SendHeloFallback, code={}, response=[{}]",
                                 record.id,
                                 code,
                                 response);
@@ -250,31 +208,57 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                     return result;
                 }
             }
+
+            if (allow_starttls_upgrade && response.find("STARTTLS") != std::string::npos) {
+                LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step=SendStartTls, request=STARTTLS",
+                                record.id);
+                if (!send_smtp_line(stream, "STARTTLS", should_continue, error)) {
+                    result.error_message = "send STARTTLS failed: " + error;
+                    return result;
+                }
+                if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
+                    result.error_message = "read STARTTLS response failed: " + error;
+                    return result;
+                }
+                LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step=SendStartTls, code={}, response=[{}]",
+                                record.id,
+                                code,
+                                response);
+                if (code != 220) {
+                    result.error_message = "STARTTLS rejected: " + response;
+                    result.permanent_failure = (code >= 500);
+                    return result;
+                }
+
+                result.error_message = kStartTlsReadyToken;
+                return result;
+            }
+
             step = SmtpStep::SendMailFrom;
             break;
 
-        case SmtpStep::SendMailFrom: {
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, request=MAIL FROM:<{}>",
+        case SmtpStep::SendMailFrom:
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=MAIL FROM:<{}>",
                             record.id,
                             smtp_step_name(step),
-                            record.sender);
-            if (!send_smtp_line(stream, "MAIL FROM:<" + record.sender + ">")) {
-                result.error_message = "send MAIL FROM failed";
+                            envelope_sender);
+            if (!send_smtp_line(stream, "MAIL FROM:<" + envelope_sender + ">", should_continue, error)) {
+                result.error_message = "send MAIL FROM failed: " + error;
                 return result;
             }
-            if (!read_smtp_response(stream, code, response, error)) {
+            if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read MAIL FROM response failed: " + error;
                 return result;
             }
             if (looks_like_ehlo_capability_response(response)) {
-                LOG_SERVER_WARN("Outbound SMTP response realign: outbox_id={}, step=SendMailFrom, got EHLO capability response, reading next",
+                LOG_OUTBOUND_WARN("Outbound SMTP response realign: outbox_id={}, step=SendMailFrom, got EHLO capability response, reading next",
                                 record.id);
-                if (!read_smtp_response(stream, code, response, error)) {
+                if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                     result.error_message = "read MAIL FROM realign response failed: " + error;
                     return result;
                 }
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -286,22 +270,21 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
             }
             step = SmtpStep::SendRcptTo;
             break;
-        }
 
-        case SmtpStep::SendRcptTo: {
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, request=RCPT TO:<{}>",
+        case SmtpStep::SendRcptTo:
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=RCPT TO:<{}>",
                             record.id,
                             smtp_step_name(step),
                             record.recipient);
-            if (!send_smtp_line(stream, "RCPT TO:<" + record.recipient + ">")) {
-                result.error_message = "send RCPT TO failed";
+            if (!send_smtp_line(stream, "RCPT TO:<" + record.recipient + ">", should_continue, error)) {
+                result.error_message = "send RCPT TO failed: " + error;
                 return result;
             }
-            if (!read_smtp_response(stream, code, response, error)) {
+            if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read RCPT TO response failed: " + error;
                 return result;
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -313,31 +296,30 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
             }
             step = SmtpStep::SendData;
             break;
-        }
 
         case SmtpStep::SendData:
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, request=DATA",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=DATA",
                             record.id,
                             smtp_step_name(step));
-            if (!send_smtp_line(stream, "DATA")) {
-                result.error_message = "send DATA failed";
+            if (!send_smtp_line(stream, "DATA", should_continue, error)) {
+                result.error_message = "send DATA failed: " + error;
                 return result;
             }
-            if (!read_smtp_response(stream, code, response, error)) {
+            if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read DATA response failed: " + error;
                 return result;
             }
             if (code == 250) {
-                LOG_SERVER_WARN("Outbound SMTP response realign: outbox_id={}, step=SendData, got code=250 before 354, reading next",
+                LOG_OUTBOUND_WARN("Outbound SMTP response realign: outbox_id={}, step=SendData, got code=250 before 354, reading next",
                                 record.id);
-                std::string next_response;
                 int next_code = 0;
-                if (read_smtp_response(stream, next_code, next_response, error)) {
+                std::string next_response;
+                if (read_smtp_response(stream, buffer, next_code, next_response, should_continue, error)) {
                     code = next_code;
                     response = std::move(next_response);
                 }
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -351,26 +333,30 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
             break;
 
         case SmtpStep::SendBody: {
-            std::ostringstream data;
-            data << "Subject: Outbound relay test\r\n"
-                 << "From: <" << record.sender << ">\r\n"
-                 << "To: <" << record.recipient << ">\r\n"
-                 << "\r\n"
-                 << "relayed by outbound client, outbox_id=" << record.id << "\r\n"
-                 << ".\r\n";
-            stream << data.str() << std::flush;
-            if (!stream) {
-                result.error_message = "send message body failed";
+            bool dkim_applied = false;
+            std::string dkim_error;
+            const std::string wire_message = build_outbound_message(record,
+                                                                    header_from,
+                                                                    identity_config,
+                                                                    &dkim_applied,
+                                                                    &dkim_error);
+            if (identity_config.dkim_enabled && !dkim_applied && !dkim_error.empty()) {
+                LOG_OUTBOUND_WARN("Outbound DKIM disabled for this message: outbox_id={}, reason={}",
+                                record.id,
+                                dkim_error);
+            }
+            if (!send_smtp_data(stream, wire_message, should_continue, error)) {
+                result.error_message = "send message body failed: " + error;
                 return result;
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, request=<message body>",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=<message body>",
                             record.id,
                             smtp_step_name(step));
-            if (!read_smtp_response(stream, code, response, error)) {
+            if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read final DATA response failed: " + error;
                 return result;
             }
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -386,10 +372,10 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
         }
 
         case SmtpStep::SendQuit:
-            LOG_SERVER_INFO("Outbound SMTP step: outbox_id={}, step={}, request=QUIT",
+            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=QUIT",
                             record.id,
                             smtp_step_name(step));
-            send_smtp_line(stream, "QUIT");
+            (void)send_smtp_line(stream, "QUIT", should_continue, error);
             step = SmtpStep::Done;
             break;
 
@@ -403,41 +389,211 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
     if (result.response.empty()) {
         result.response = "250 message accepted";
     }
-    LOG_SERVER_INFO("Outbound SMTP success: outbox_id={}, recipient={}, response={}",
-                    record.id,
-                    record.recipient,
-                    result.response);
     return result;
 }
 
-std::string extract_domain(const std::string& email) {
-    const auto at_pos = email.find('@');
-    if (at_pos == std::string::npos || at_pos + 1 >= email.size()) {
-        return {};
+SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
+                                   const std::vector<std::uint16_t>& outbound_ports,
+                                   const OutboundIdentityConfig& identity_config,
+                                   const std::string& target_host,
+                                   const ContinueFn& should_continue) {
+    SmtpExecResult result;
+    if (should_continue && !should_continue()) {
+        result.error_message = "outbound client stopping";
+        return result;
     }
-    return email.substr(at_pos + 1);
-}
 
-bool has_external_recipient(const mail& mail_data, const std::string& local_domain) {
-    for (const auto& recipient : mail_data.to) {
-        const auto domain = extract_domain(recipient);
-        if (!domain.empty() && domain != local_domain) {
-            return true;
+    if (outbound_ports.empty()) {
+        result.error_message = "outbound_ports is empty";
+        return result;
+    }
+
+    LOG_OUTBOUND_INFO("Outbound SMTP start: outbox_id={}, mail_id={}, recipient={}, target_host={}, ports=[{}]",
+                    record.id,
+                    record.mail_id,
+                    record.recipient,
+                    target_host,
+                    join_ports(outbound_ports));
+
+    const std::string helo_domain = identity_config.helo_domain.empty() ? "outbound.local" : identity_config.helo_domain;
+    const std::string envelope_sender = rewrite_sender_domain(record.sender, identity_config.mail_from_domain);
+    const std::string header_from = identity_config.rewrite_header_from ? envelope_sender : record.sender;
+
+    boost::asio::io_context io_context;
+    boost::asio::ssl::context ssl_ctx(boost::asio::ssl::context::tls_client);
+    ssl_ctx.set_default_verify_paths();
+    ssl_ctx.set_verify_mode(boost::asio::ssl::verify_none);
+
+    boost::system::error_code addr_ec;
+    auto target_ip = boost::asio::ip::make_address(target_host, addr_ec);
+    if (addr_ec) {
+        result.error_message = "invalid target address: " + target_host;
+        return result;
+    }
+
+    std::uint16_t connected_port = 0;
+    for (auto port : outbound_ports) {
+        if (should_continue && !should_continue()) {
+            result.error_message = "outbound client stopping";
+            break;
+        }
+
+        boost::asio::ip::tcp::socket socket(io_context);
+        std::string connect_error;
+        if (!run_interruptible_ec(
+                socket,
+                [&](auto handler) { socket.async_connect(boost::asio::ip::tcp::endpoint(target_ip, port), std::move(handler)); },
+                should_continue,
+                kIoOperationTimeout,
+                "smtp connect",
+                connect_error)) {
+            if (connect_error.find("interrupted") != std::string::npos) {
+                result.error_message = "outbound client stopping";
+                break;
+            }
+            continue;
+        }
+
+        connected_port = port;
+        LOG_OUTBOUND_INFO("Outbound SMTP connected: outbox_id={}, host={}, port={}",
+                        record.id,
+                        target_host,
+                        connected_port);
+
+        if (port == 465) {
+            boost::asio::ssl::stream<boost::asio::ip::tcp::socket> tls_stream(std::move(socket), ssl_ctx);
+            std::string handshake_error;
+            if (!run_interruptible_ec(
+                    tls_stream,
+                    [&](auto handler) { tls_stream.async_handshake(boost::asio::ssl::stream_base::client, std::move(handler)); },
+                    should_continue,
+                    kIoOperationTimeout,
+                    "implicit TLS handshake",
+                    handshake_error)) {
+                if (handshake_error.find("interrupted") != std::string::npos) {
+                    result.success = false;
+                    result.error_message = "outbound client stopping";
+                    break;
+                }
+                result.success = false;
+                result.error_message = handshake_error;
+                continue;
+            }
+            LOG_OUTBOUND_INFO("Outbound SMTP TLS handshake succeeded: outbox_id={}, host={}, port={}",
+                            record.id,
+                            target_host,
+                            port);
+
+            boost::asio::streambuf tls_buffer;
+            result = execute_smtp_transaction(tls_stream,
+                                              tls_buffer,
+                                              record,
+                                              helo_domain,
+                                              envelope_sender,
+                                              header_from,
+                                              identity_config,
+                                              false,
+                                              true,
+                                              should_continue);
+        } else {
+            boost::asio::streambuf plain_buffer;
+            result = execute_smtp_transaction(socket,
+                                              plain_buffer,
+                                              record,
+                                              helo_domain,
+                                              envelope_sender,
+                                              header_from,
+                                              identity_config,
+                                              true,
+                                              true,
+                                              should_continue);
+            if (result.error_message == kStartTlsReadyToken) {
+                if (should_continue && !should_continue()) {
+                    result.success = false;
+                    result.error_message = "outbound client stopping";
+                    break;
+                }
+
+                boost::asio::ssl::stream<boost::asio::ip::tcp::socket> tls_stream(std::move(socket), ssl_ctx);
+                std::string handshake_error;
+                if (!run_interruptible_ec(
+                        tls_stream,
+                        [&](auto handler) { tls_stream.async_handshake(boost::asio::ssl::stream_base::client, std::move(handler)); },
+                        should_continue,
+                        kIoOperationTimeout,
+                        "STARTTLS handshake",
+                        handshake_error)) {
+                    if (handshake_error.find("interrupted") != std::string::npos) {
+                        result.success = false;
+                        result.error_message = "outbound client stopping";
+                        break;
+                    }
+                    result.success = false;
+                    result.error_message = handshake_error;
+                    continue;
+                }
+                LOG_OUTBOUND_INFO("Outbound SMTP TLS handshake succeeded: outbox_id={}, host={}, port={}",
+                                record.id,
+                                target_host,
+                                port);
+
+                boost::asio::streambuf tls_buffer;
+                result = execute_smtp_transaction(tls_stream,
+                                                  tls_buffer,
+                                                  record,
+                                                  helo_domain,
+                                                  envelope_sender,
+                                                  header_from,
+                                                  identity_config,
+                                                  false,
+                                                  false,
+                                                  should_continue);
+            }
+        }
+
+        if (result.success || result.permanent_failure) {
+            break;
         }
     }
-    return false;
+
+    if (connected_port == 0) {
+        result.error_message = "failed to connect all configured outbound ports";
+        result.retry_delay_seconds = kDefaultRetryDelaySeconds;
+        LOG_OUTBOUND_WARN("Outbound SMTP connect failed: outbox_id={}, host={}, ports=[{}]",
+                        record.id,
+                        target_host,
+                        join_ports(outbound_ports));
+        return result;
+    }
+
+    if (result.success) {
+        LOG_OUTBOUND_INFO("Outbound SMTP success: outbox_id={}, recipient={}, response={}",
+                        record.id,
+                        record.recipient,
+                        result.response);
+    }
+    return result;
 }
+
 }
 
 SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
                                        std::shared_ptr<ThreadPoolBase> io_thread_pool,
                                        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+                                       std::shared_ptr<IDnsResolver> dns_resolver,
+                                       std::shared_ptr<std::atomic<bool>> server_interrupt_flag,
+                                       OutboundIdentityConfig identity_config,
+                                       OutboundPollingConfig polling_config,
                                                                              std::string local_domain,
                                                                              std::vector<std::uint16_t> outbound_ports,
                                                                              int max_delivery_attempts)
     : db_pool_(std::move(db_pool)),
       io_thread_pool_(std::move(io_thread_pool)),
       worker_thread_pool_(std::move(worker_thread_pool)),
+      dns_resolver_(std::move(dns_resolver)),
+            server_interrupt_flag_(std::move(server_interrupt_flag)),
+            identity_config_(std::move(identity_config)),
+        polling_config_(std::move(polling_config)),
       repository_(db_pool_),
             local_domain_(std::move(local_domain)),
             outbound_ports_(std::move(outbound_ports)),
@@ -449,6 +605,17 @@ SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
     std::ostringstream oss;
     oss << "outbound-worker-" << std::this_thread::get_id();
     worker_id_ = oss.str();
+
+    polling_config_.busy_sleep_ms = std::max(1, polling_config_.busy_sleep_ms);
+    polling_config_.backoff_base_ms = std::max(1, polling_config_.backoff_base_ms);
+    polling_config_.backoff_max_ms = std::max(polling_config_.busy_sleep_ms, polling_config_.backoff_max_ms);
+
+    if (identity_config_.dkim_enabled) {
+        LOG_OUTBOUND_INFO("DKIM config loaded: selector={}, domain={}, key_file={}",
+                          identity_config_.dkim_selector,
+                          identity_config_.dkim_domain,
+                          identity_config_.dkim_private_key_file);
+    }
 }
 
 SmtpOutboundClient::~SmtpOutboundClient() {
@@ -469,7 +636,7 @@ void SmtpOutboundClient::start() {
             ports << ",";
         }
     }
-    LOG_SERVER_INFO("SmtpOutboundClient started, local_domain={}, outbound_ports=[{}], max_delivery_attempts={}",
+    LOG_OUTBOUND_INFO("SmtpOutboundClient started, local_domain={}, outbound_ports=[{}], max_delivery_attempts={}",
                     local_domain_,
                     ports.str(),
                     max_delivery_attempts_);
@@ -485,7 +652,7 @@ void SmtpOutboundClient::stop() {
     if (orchestrator_thread_.joinable()) {
         orchestrator_thread_.join();
     }
-    LOG_SERVER_INFO("SmtpOutboundClient stopped");
+    LOG_OUTBOUND_INFO("SmtpOutboundClient stopped");
 }
 
 bool SmtpOutboundClient::accept_mail_ownership(std::unique_ptr<mail> mail_ptr) {
@@ -514,21 +681,34 @@ void SmtpOutboundClient::notify_outbox_ready() {
 }
 
 void SmtpOutboundClient::run_loop() {
+    std::size_t empty_claim_rounds = 0;
+
     while (running_.load()) {
         drain_notifications();
         drain_completion_queue();
         repository_.requeue_expired_leases();
 
         auto records = repository_.claim_batch(worker_id_, kClaimBatchSize, kLeaseSeconds);
+        if (!records.empty()) {
+            empty_claim_rounds = 0;
+        } else {
+            ++empty_claim_rounds;
+        }
+
         for (const auto& record : records) {
             dispatch_delivery_task(record);
         }
 
         std::unique_lock<std::mutex> lock(notify_mutex_);
+        const auto wait_duration = compute_adaptive_wait(polling_config_, empty_claim_rounds, !ownership_queue_.empty());
         notify_cv_.wait_for(lock,
-                            std::chrono::milliseconds(kLoopWaitMs),
+                            wait_duration,
                             [this]() {
-                                return !running_.load() || !ownership_queue_.empty();
+                                if (!running_.load() || !ownership_queue_.empty()) {
+                                    return true;
+                                }
+                                std::lock_guard<std::mutex> completion_lock(completion_mutex_);
+                                return !completion_queue_.empty();
                             });
     }
 
@@ -577,7 +757,7 @@ void SmtpOutboundClient::drain_completion_queue() {
         }
 
         if (!ok) {
-            LOG_SERVER_ERROR("SmtpOutboundClient: failed to persist outbox state, outbox_id={}, attempt_id={}",
+            LOG_OUTBOUND_ERROR("SmtpOutboundClient: failed to persist outbox state, outbox_id={}, attempt_id={}",
                              completion.outbox_id,
                              completion.dispatch_attempt_id);
         }
@@ -599,13 +779,72 @@ void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record) {
     const auto attempt_id = ++g_dispatch_attempt_seq;
 
     auto task = [this, record, attempt_id]() mutable {
+        const auto should_continue = [this]() {
+            if (!running_.load()) {
+                return false;
+            }
+            return !server_interrupt_flag_ || server_interrupt_flag_->load();
+        };
+
+        if (!should_continue()) {
+            DeliveryCompletion completion;
+            completion.outbox_id = record.id;
+            completion.mail_id = record.mail_id;
+            completion.dispatch_attempt_id = attempt_id;
+            completion.success = false;
+            completion.permanent_failure = false;
+            completion.retry_delay_seconds = 5;
+            completion.error_message = "outbound client stopping";
+            push_completion(std::move(completion));
+            return;
+        }
+
         std::cout << "[OUTBOUND_FLOW_OK] mail_id=" << record.mail_id
                   << " outbox_id=" << record.id
                   << " attempt_id=" << attempt_id
                   << " attempt_count=" << record.attempt_count
                   << std::endl;
 
-        auto exec_result = run_plain_smtp_flow(record, outbound_ports_);
+        // Resolve MX targets for recipient domain before SMTP delivery.
+        auto target_hosts = build_target_hosts(record, dns_resolver_.get());
+        LOG_OUTBOUND_INFO("Outbound DNS targets: outbox_id={}, recipient={}, hosts=[{}]",
+                        record.id,
+                        record.recipient,
+                        [&target_hosts]() {
+                            std::ostringstream oss;
+                            for (std::size_t i = 0; i < target_hosts.size(); ++i) {
+                                oss << target_hosts[i];
+                                if (i + 1 < target_hosts.size()) {
+                                    oss << ",";
+                                }
+                            }
+                            return oss.str();
+                        }());
+
+        SmtpExecResult exec_result;
+        bool delivered = false;
+        for (const auto& host : target_hosts) {
+            if (!should_continue()) {
+                exec_result.success = false;
+                exec_result.permanent_failure = false;
+                exec_result.error_message = "outbound client stopping";
+                break;
+            }
+
+            exec_result = run_plain_smtp_flow(record, outbound_ports_, identity_config_, host, should_continue);
+            if (exec_result.success) {
+                delivered = true;
+                break;
+            }
+            if (exec_result.permanent_failure) {
+                break;
+            }
+        }
+
+        if (!delivered && exec_result.success) {
+            exec_result.success = false;
+            exec_result.error_message = "delivery status inconsistent";
+        }
 
         DeliveryCompletion completion;
         completion.outbox_id = record.id;
@@ -618,7 +857,7 @@ void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record) {
         completion.error_message = exec_result.error_message;
 
         if (!completion.success) {
-            LOG_SERVER_WARN("Outbound SMTP failed: outbox_id={}, attempt_id={}, permanent_failure={}, error={}",
+            LOG_OUTBOUND_WARN("Outbound SMTP failed: outbox_id={}, attempt_id={}, permanent_failure={}, error={}",
                             completion.outbox_id,
                             completion.dispatch_attempt_id,
                             completion.permanent_failure,

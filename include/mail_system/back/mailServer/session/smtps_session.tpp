@@ -12,6 +12,7 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , state_(SmtpsState::INIT)
     , next_event_(SmtpsEvent::CONNECT)
     , ignore_current_command_(false)
+    , command_read_buffer_()
     , context_()
     , buffer_size_(INITIAL_BUFFER_SIZE)
     , buffer_(new char[INITIAL_BUFFER_SIZE])
@@ -582,18 +583,34 @@ void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data,
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
-    std::string trimmed = algorithm::trim(data);
+    std::string trimmed;
 
-    // In command phase, a standalone CRLF can arrive as a fragmented delimiter.
-    // Emit TIMEOUT so FSM can continue reading without reusing a stale event.
-    if (state_ != SmtpsState::IN_MESSAGE && trimmed.empty()) {
-        ignore_current_command_ = false;
-        next_event_ = SmtpsEvent::TIMEOUT;
-        last_command_args_.clear();
-        return;
+    if (state_ != SmtpsState::IN_MESSAGE) {
+        command_read_buffer_ += data;
+
+        const auto newline_pos = command_read_buffer_.find('\n');
+        if (newline_pos == std::string::npos) {
+            next_event_ = SmtpsEvent::TIMEOUT;
+            last_command_args_.clear();
+            return;
+        }
+
+        std::string line = command_read_buffer_.substr(0, newline_pos + 1);
+        command_read_buffer_.erase(0, newline_pos + 1);
+        trimmed = algorithm::trim(line);
+
+        // Ignore standalone CRLF and continue with buffered/next data.
+        if (trimmed.empty()) {
+            next_event_ = SmtpsEvent::TIMEOUT;
+            last_command_args_.clear();
+            return;
+        }
+
+        LOG_SESSION_INFO("Handling data: {}", line);
+    } else {
+        trimmed = algorithm::trim(data);
+        LOG_SESSION_INFO("Handling data: {}", data);
     }
-
-    LOG_SESSION_INFO("Handling data: {}", data);
 
     if (state_ == SmtpsState::IN_MESSAGE) {
         process_message_data(data);

@@ -1,6 +1,7 @@
 #ifndef MAIL_SYSTEM_SMTP_OUTBOUND_CLIENT_H
 #define MAIL_SYSTEM_SMTP_OUTBOUND_CLIENT_H
 
+#include "mail_system/back/outbound/dns_resolver.h"
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include <atomic>
@@ -34,11 +35,34 @@ struct DeliveryCompletion {
     std::string error_message;
 };
 
+struct OutboundIdentityConfig {
+    std::string helo_domain{"outbound.local"};
+    std::string mail_from_domain{};
+    bool rewrite_header_from{true};
+
+    // DKIM 配置入口（当前先透传，后续可接入签名实现）。
+    bool dkim_enabled{false};
+    std::string dkim_selector{"default"};
+    std::string dkim_domain{};
+    std::string dkim_private_key_file{};
+};
+
+struct OutboundPollingConfig {
+    int busy_sleep_ms{20};
+    int backoff_base_ms{50};
+    int backoff_max_ms{1200};
+    std::size_t backoff_shift_cap{6};
+};
+
 class SmtpOutboundClient {
 public:
     SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
                        std::shared_ptr<ThreadPoolBase> io_thread_pool,
                        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+                       std::shared_ptr<IDnsResolver> dns_resolver,
+                       std::shared_ptr<std::atomic<bool>> server_interrupt_flag,
+                       OutboundIdentityConfig identity_config,
+                       OutboundPollingConfig polling_config,
                        std::string local_domain,
                        std::vector<std::uint16_t> outbound_ports = {25, 587, 465},
                        int max_delivery_attempts = 8);
@@ -62,6 +86,10 @@ private:
     std::shared_ptr<DBPool> db_pool_;
     std::shared_ptr<ThreadPoolBase> io_thread_pool_;
     std::shared_ptr<ThreadPoolBase> worker_thread_pool_;
+    std::shared_ptr<IDnsResolver> dns_resolver_;
+    std::shared_ptr<std::atomic<bool>> server_interrupt_flag_;
+    OutboundIdentityConfig identity_config_;
+    OutboundPollingConfig polling_config_;
     OutboxRepository repository_;
     std::string local_domain_;
     std::vector<std::uint16_t> outbound_ports_;

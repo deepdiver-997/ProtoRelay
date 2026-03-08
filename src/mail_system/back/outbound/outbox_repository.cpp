@@ -40,7 +40,7 @@ bool execute_with_deadlock_retry(const std::shared_ptr<IDBConnection>& conn,
         }
 
         const int delay_ms = kDeadlockRetryBaseDelayMs * (1 << (attempt - 1));
-        LOG_SERVER_WARN("OutboxRepository: deadlock on {}, outbox_id={}, retry={}/{}, delay_ms={}, error={}",
+        LOG_OUTBOUND_WARN("OutboxRepository: deadlock on {}, outbox_id={}, retry={}/{}, delay_ms={}, error={}",
                         operation_name,
                         outbox_id,
                         attempt,
@@ -61,20 +61,20 @@ bool OutboxRepository::enqueue_from_mail(const mail& mail_data,
                                          const std::string& local_domain,
                                          std::vector<std::uint64_t>* outbox_ids) {
     if (!db_pool_) {
-        LOG_SERVER_ERROR("OutboxRepository: db_pool is null");
+        LOG_OUTBOUND_ERROR("OutboxRepository: db_pool is null");
         return false;
     }
 
     auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
     if (!mysql_pool) {
-        LOG_SERVER_ERROR("OutboxRepository: db_pool is not MySQLPool");
+        LOG_OUTBOUND_ERROR("OutboxRepository: db_pool is not MySQLPool");
         return false;
     }
 
     auto raii_conn = mysql_pool->get_raii_connection();
     auto conn = raii_conn.get();
     if (!conn || !conn->is_connected()) {
-        LOG_SERVER_ERROR("OutboxRepository: failed to get DB connection");
+        LOG_OUTBOUND_ERROR("OutboxRepository: failed to get DB connection");
         return false;
     }
 
@@ -95,7 +95,7 @@ bool OutboxRepository::enqueue_from_mail(const mail& mail_data,
             << kDefaultMaxAttempts << ", NOW())";
 
         if (!conn->execute(sql.str())) {
-            LOG_SERVER_ERROR("OutboxRepository: failed to insert outbox row, mail_id={}, recipient={}, error={}",
+            LOG_OUTBOUND_ERROR("OutboxRepository: failed to insert outbox row, mail_id={}, recipient={}, error={}",
                              mail_data.id,
                              recipient,
                              conn->get_last_error());

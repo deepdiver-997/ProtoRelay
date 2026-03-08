@@ -22,6 +22,7 @@ enum class LogModule {
     SMTP_DETAIL,   // SMTP 详细状态机日志
     SESSION,       // 会话管理日志
     PERSISTENT_QUEUE, // 持久化队列日志
+    OUTBOUND,      // 出站投递客户端/仓储日志
     THREAD_POOL,   // 线程池日志
     FILE_IO,       // 文件 I/O 日志
     AUTH           // 认证日志
@@ -84,6 +85,8 @@ public:
                 std::make_shared<spdlog::logger>("SESSION", sinks.begin(), sinks.end());
             m_loggers[static_cast<size_t>(LogModule::PERSISTENT_QUEUE)] =
                 std::make_shared<spdlog::logger>("PERSISTENT_QUEUE", sinks.begin(), sinks.end());
+            m_loggers[static_cast<size_t>(LogModule::OUTBOUND)] =
+                std::make_shared<spdlog::logger>("OUTBOUND", sinks.begin(), sinks.end());
             m_loggers[static_cast<size_t>(LogModule::THREAD_POOL)] =
                 std::make_shared<spdlog::logger>("THREAD_POOL", sinks.begin(), sinks.end());
             m_loggers[static_cast<size_t>(LogModule::FILE_IO)] =
@@ -163,7 +166,7 @@ private:
     Logger& operator=(const Logger&) = delete;
 
     bool m_initialized = false;
-    std::array<std::shared_ptr<spdlog::logger>, 11> m_loggers;
+    std::array<std::shared_ptr<spdlog::logger>, 12> m_loggers;
 };
 
 // 便捷函数：获取 logger
@@ -196,6 +199,7 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
 #define ENABLE_FILE_IO_DEBUG_LOG 0
 #define ENABLE_AUTH_DEBUG_LOG 0
 #define ENABLE_PERSISTENT_QUEUE_DEBUG_LOG 1
+#define ENABLE_OUTBOUND_DEBUG_LOG 1
 
 // ==================== 模块化日志宏定义 ====================
 
@@ -350,6 +354,24 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
     mail_system::log(mail_system::LogModule::PERSISTENT_QUEUE)->error(__VA_ARGS__)
 #define LOG_PERSISTENT_QUEUE_CRITICAL(...) \
     mail_system::log(mail_system::LogModule::PERSISTENT_QUEUE)->critical(__VA_ARGS__)
+
+// THREAD_POOL 模块日志
+#define LOG_OUTBOUND_TRACE(...) \
+    if constexpr (ENABLE_OUTBOUND_DEBUG_LOG) { \
+        mail_system::log(mail_system::LogModule::OUTBOUND)->trace(__VA_ARGS__); \
+    }
+#define LOG_OUTBOUND_DEBUG(...) \
+    if constexpr (ENABLE_OUTBOUND_DEBUG_LOG) { \
+        mail_system::log(mail_system::LogModule::OUTBOUND)->debug(__VA_ARGS__); \
+    }
+#define LOG_OUTBOUND_INFO(...) \
+    mail_system::log(mail_system::LogModule::OUTBOUND)->info(__VA_ARGS__)
+#define LOG_OUTBOUND_WARN(...) \
+    mail_system::log(mail_system::LogModule::OUTBOUND)->warn(__VA_ARGS__)
+#define LOG_OUTBOUND_ERROR(...) \
+    mail_system::log(mail_system::LogModule::OUTBOUND)->error(__VA_ARGS__)
+#define LOG_OUTBOUND_CRITICAL(...) \
+    mail_system::log(mail_system::LogModule::OUTBOUND)->critical(__VA_ARGS__)
 
 // THREAD_POOL 模块日志
 #define LOG_THREAD_POOL_TRACE(...) \

@@ -12,6 +12,30 @@
 namespace mail_system {
 namespace persist_storage {
 
+namespace {
+
+std::string extract_domain_lower(const std::string& email) {
+    const auto at_pos = email.find('@');
+    if (at_pos == std::string::npos || at_pos + 1 >= email.size()) {
+        return {};
+    }
+    std::string domain = email.substr(at_pos + 1);
+    std::transform(domain.begin(), domain.end(), domain.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return domain;
+}
+
+int recipient_status_for_domain(const std::string& recipient,
+                                const std::string& local_domain) {
+    const auto recipient_domain = extract_domain_lower(recipient);
+    const auto system_domain = extract_domain_lower(local_domain);
+    // 1=未读（本域），2=未送达（外域）
+    return (!recipient_domain.empty() && !system_domain.empty() && recipient_domain == system_domain) ? 1 : 2;
+}
+
+} // namespace
+
 PersistentQueue::PersistentQueue(
     std::shared_ptr<DBPool> db_pool,
     std::shared_ptr<ThreadPoolBase> worker_pool
@@ -274,7 +298,7 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error)
                             std::to_string(mail_data->id) + ", '" +
                             conn->escape_string(mail_data->from) + "', '" +
                             conn->escape_string(mail_data->to[i]) +
-                            "', " + (mail_data->to[i] == "@localhost" ? "1" : "2") + "),";
+                            "', " + std::to_string(recipient_status_for_domain(mail_data->to[i], local_domain_)) + "),";
         }
         recipient_sql[recipient_sql.size() - 1] = ';'; // 替换最后一个逗号为分号
         

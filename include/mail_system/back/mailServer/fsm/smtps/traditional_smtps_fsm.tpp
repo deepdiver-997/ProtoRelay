@@ -103,7 +103,7 @@ void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
     transition_table_[std::make_pair(SmtpsState::INIT, SmtpsEvent::CONNECT)] = SmtpsState::GREETING;
     transition_table_[std::make_pair(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
     transition_table_[std::make_pair(SmtpsState::GREETING, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
-    if constexpr (std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
+    if constexpr (!std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
         transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS)] = SmtpsState::INIT;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_USERNAME;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_PASSWORD;
@@ -144,7 +144,7 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
         std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this,
                   std::placeholders::_1, std::placeholders::_2);
 
-    if constexpr (std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
+    if constexpr (!std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
         state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::STARTTLS] =
             std::bind(&TraditionalSmtpsFsm::handle_wait_auth_starttls, this,
                     std::placeholders::_1, std::placeholders::_2);
@@ -853,6 +853,13 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_timeout(
     std::unique_ptr<SessionBase<ConnectionType>> session,
     const std::string& args
 ) {
+    // Try to consume any already-buffered command line before reading socket again.
+    session->handle_read("");
+    if (static_cast<SmtpsEvent>(session->get_next_event()) != SmtpsEvent::TIMEOUT) {
+        auto_process_event(std::move(session));
+        return;
+    }
+
     SessionBase<ConnectionType>::do_async_read(std::move(session), [] (
         std::unique_ptr<SessionBase<ConnectionType>> s,
         const boost::system::error_code& error,

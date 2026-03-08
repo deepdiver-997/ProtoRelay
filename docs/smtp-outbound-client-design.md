@@ -169,3 +169,70 @@
 - 可观测：日志中能追踪一次投递全链路
 - 接口和存储抽象可兼容后续对象存储迁移
 - 数据库更新可异步批量执行，不阻塞主线程轮询
+
+## 12. 当前实现对照（2026-03）
+
+本节用于回答“当前代码到底怎么跑”的问题，避免设计与实现偏差。
+
+### 12.1 谁在查库并分发任务
+
+- 当前是 `SmtpOutboundClient` 内部的 `orchestrator_thread_` 单线程循环负责：
+	- `requeue_expired_leases()`
+	- `claim_batch(worker_id, limit, lease_sec)`
+	- 将 claim 到的记录分发到 IO 线程池或 worker 线程池执行 SMTP 投递
+- 也就是说：
+	- `client 主线程负责查库 + 分发`
+	- 具体 SMTP 网络 I/O 在线程池执行
+
+### 12.2 `mail_outbox` 何时写入
+
+- 当前实现中，`mail_outbox` 已在持久化阶段写入：
+	- `PersistentQueue::process_task()` 先落库 `mails/mail_recipients/attachments`
+	- 成功后调用 `enqueue_outbox_tasks(mail_data)`
+	- `enqueue_outbox_tasks()` 内部执行 `OutboxRepository::enqueue_from_mail(...)` 写入 `mail_outbox`
+	- 写入后再 `notify_outbox_ready()` 唤醒 outbound client
+- 结论：
+	- 不是“client 先读出要补写的 outbox 再写回”
+	- 你的判断是对的：在持久化阶段直接写 `mail_outbox` 更好，可减少竞争窗口
+
+### 12.3 `mail_recipients.status` 当前语义
+
+- 当前表注释语义：`1=未读，2=未送达`
+- 当前代码按“是否本域”决定状态，但本地判断实现仍较粗糙（示例逻辑是固定比较），后续应统一为：
+	- 本系统域内收件人：`未读`
+	- 外域收件人：`未送达`
+	- 与 `system_domain/local_domain` 一致判定
+
+## 13. 竞争与轮询优化建议
+
+### 13.1 单个 client 是否应按负载动态 sleep
+
+建议是。可把每轮 sleep 改为“有任务快轮询、空闲慢轮询”的自适应策略。
+
+示例策略：
+- `claim_count == limit`：`sleep 5~20ms`
+- `0 < claim_count < limit`：`sleep 30~80ms`
+- `claim_count == 0`：指数回退到 `100~1000ms`（被 notify 时立即唤醒）
+
+### 13.2 进程内由单轮询者统一 claim 是否减少竞争
+
+在单进程内通常会减少竞争：
+- 优点：
+	- 降低同进程内多线程同时抢占 `mail_outbox` 的锁竞争
+	- 更稳定的批量 claim 行为
+- 代价：
+	- 轮询/分发线程成为调度热点，需要保证不被慢操作阻塞
+
+当前架构已接近该方案（单 orchestrator）。建议继续保持“单轮询 + 多执行线程”。
+
+### 13.3 多进程/多节点竞争如何控制
+
+- 保持现有 `claim_batch` 原子更新 + `lease_until` 超时回收
+- 通过小批次 claim（例如 16~64）降低锁持有时间
+- 避免在 claim 事务中做耗时操作（DNS/SMTP）
+
+## 14. 推荐落地调整（下一步）
+
+1. 在 `SmtpOutboundClient::run_loop` 增加自适应 backoff（替代固定 `kLoopWaitMs`）。
+2. 将本域判定统一封装，修正 `mail_recipients.status` 赋值逻辑，避免硬编码比较。
+3. 将 `enqueue_outbox_tasks` 与邮件元数据写入置于同一事务边界（可选增强），进一步降低边界竞争与不一致风险。

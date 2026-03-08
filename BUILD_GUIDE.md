@@ -18,6 +18,12 @@
 | **运行时速度** | 慢 | 快 |
 | **二进制大小** | 大 | 小 |
 
+新增低内存兜底模式（`SafeRelease`）：
+- 单线程构建（默认 `-j1`）
+- 降低优化压力（`-O2`）
+- 关闭调试日志编译开关
+- 适用于 2核2G 等低内存服务器
+
 ## 快速开始
 
 ### 使用 build.sh 脚本
@@ -29,9 +35,19 @@
 # Release 构建（推荐用于测试/部署）
 ./build.sh Release
 
+# SafeRelease 构建（低内存服务器推荐）
+./build.sh SafeRelease
+
+# SafeRelease 清理并重建
+./build.sh SafeRelease clean
+
 # 清理并重新构建
 ./build.sh Debug clean
 ./build.sh Release clean
+
+# 指定并行度（可选，SafeRelease 默认就是 1）
+./build.sh Release clean 1
+BUILD_JOBS=1 ./build.sh Release
 ```
 
 ### 手动 CMake 命令

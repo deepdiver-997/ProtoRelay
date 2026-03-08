@@ -64,6 +64,19 @@ struct ServerConfig {
     std::string system_domain;       // 当前邮件系统的域名（用于内外部判定）
     std::vector<uint16_t> outbound_ports; // 预留：真实SMTP投递端口优先级
     size_t outbound_max_attempts;    // 预留：每条出站记录最大尝试次数
+    uint32_t outbound_poll_busy_sleep_ms;   // 负载繁忙时轮询间隔
+    uint32_t outbound_poll_backoff_base_ms; // 空闲轮询回退基准
+    uint32_t outbound_poll_backoff_max_ms;  // 空闲轮询回退上限
+    uint32_t outbound_poll_backoff_shift_cap; // 指数回退最大移位次数
+
+    // 出站投递身份与 DKIM 配置
+    std::string outbound_helo_domain;      // EHLO/HELO 使用的域名
+    std::string outbound_mail_from_domain; // 若非空，改写 envelope MAIL FROM 域名
+    bool outbound_rewrite_header_from;     // 是否将 From 头改写到 outbound_mail_from_domain
+    bool outbound_dkim_enabled;            // 是否启用 DKIM（当前先配置占位）
+    std::string outbound_dkim_selector;    // DKIM selector
+    std::string outbound_dkim_domain;      // DKIM domain (d=)
+    std::string outbound_dkim_private_key_file; // DKIM 私钥文件路径
     
     ServerConfig()
         : address("0.0.0.0")
@@ -90,6 +103,17 @@ struct ServerConfig {
         , system_domain("example.com")
         , outbound_ports({25, 587, 465})
         , outbound_max_attempts(8)
+        , outbound_poll_busy_sleep_ms(20)
+        , outbound_poll_backoff_base_ms(50)
+        , outbound_poll_backoff_max_ms(1200)
+        , outbound_poll_backoff_shift_cap(6)
+        , outbound_helo_domain("outbound.local")
+        , outbound_mail_from_domain("")
+        , outbound_rewrite_header_from(true)
+        , outbound_dkim_enabled(false)
+        , outbound_dkim_selector("default")
+        , outbound_dkim_domain("")
+        , outbound_dkim_private_key_file("")
     {}
 
     ServerConfig(const ServerConfig& other) = default;
@@ -137,6 +161,17 @@ struct ServerConfig {
                   << "\nsystem_name = " << system_name
                   << "\nsystem_domain = " << system_domain
                   << "\noutbound_max_attempts = " << outbound_max_attempts
+                  << "\noutbound_poll_busy_sleep_ms = " << outbound_poll_busy_sleep_ms
+                  << "\noutbound_poll_backoff_base_ms = " << outbound_poll_backoff_base_ms
+                  << "\noutbound_poll_backoff_max_ms = " << outbound_poll_backoff_max_ms
+                  << "\noutbound_poll_backoff_shift_cap = " << outbound_poll_backoff_shift_cap
+                  << "\noutbound_helo_domain = " << outbound_helo_domain
+                  << "\noutbound_mail_from_domain = " << outbound_mail_from_domain
+                  << "\noutbound_rewrite_header_from = " << (outbound_rewrite_header_from ? "true" : "false")
+                  << "\noutbound_dkim_enabled = " << (outbound_dkim_enabled ? "true" : "false")
+                  << "\noutbound_dkim_selector = " << outbound_dkim_selector
+                  << "\noutbound_dkim_domain = " << outbound_dkim_domain
+                  << "\noutbound_dkim_private_key_file = " << outbound_dkim_private_key_file
                   << std::endl;
 
         std::cout << "outbound_ports = [";
@@ -277,6 +312,18 @@ struct ServerConfig {
         system_name = json_config.value("system_name", system_name);
         system_domain = json_config.value("system_domain", system_domain);
         outbound_max_attempts = json_config.value("outbound_max_attempts", outbound_max_attempts);
+        outbound_poll_busy_sleep_ms = json_config.value("outbound_poll_busy_sleep_ms", outbound_poll_busy_sleep_ms);
+        outbound_poll_backoff_base_ms = json_config.value("outbound_poll_backoff_base_ms", outbound_poll_backoff_base_ms);
+        outbound_poll_backoff_max_ms = json_config.value("outbound_poll_backoff_max_ms", outbound_poll_backoff_max_ms);
+        outbound_poll_backoff_shift_cap = json_config.value("outbound_poll_backoff_shift_cap", outbound_poll_backoff_shift_cap);
+        outbound_helo_domain = json_config.value("outbound_helo_domain", outbound_helo_domain);
+        outbound_mail_from_domain = json_config.value("outbound_mail_from_domain", outbound_mail_from_domain);
+        outbound_rewrite_header_from = json_config.value("outbound_rewrite_header_from", outbound_rewrite_header_from);
+        outbound_dkim_enabled = json_config.value("outbound_dkim_enabled", outbound_dkim_enabled);
+        outbound_dkim_selector = json_config.value("outbound_dkim_selector", outbound_dkim_selector);
+        outbound_dkim_domain = json_config.value("outbound_dkim_domain", outbound_dkim_domain);
+        outbound_dkim_private_key_file = resolve_path(filename,
+            json_config.value("outbound_dkim_private_key_file", outbound_dkim_private_key_file));
 
         if (json_config.contains("outbound_ports") && json_config["outbound_ports"].is_array()) {
             std::vector<uint16_t> parsed_ports;
