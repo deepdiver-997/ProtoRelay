@@ -185,7 +185,7 @@ if(NOT MYSQL_LIBRARIES)
     
     find_path(MYSQL_INCLUDE_DIR mysql.h
         PATHS ${MYSQL_SEARCH_PATHS}
-        PATH_SUFFIXES include
+        PATH_SUFFIXES include include/mysql mysql
     )
     
     find_library(MYSQL_CLIENT_LIB

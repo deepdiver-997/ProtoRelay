@@ -1,0 +1,52 @@
+name: Build Ubuntu 24.04 Binary
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            libboost-system-dev \
+            libboost-thread-dev \
+            libspdlog-dev \
+            libssl-dev \
+            libmysqlclient-dev \
+            libc-ares-dev \
+            pkg-config
+
+      - name: Build (SafeRelease – portable, no -march=native)
+        run: ./build.sh SafeRelease clean
+
+      - name: Show and save dynamic library dependencies
+        run: |
+          echo "=== ldd output for smtpsServer ===" | tee test/smtpsServer.ldd.txt
+          ldd test/smtpsServer | tee -a test/smtpsServer.ldd.txt
+          echo ""
+          echo "Install runtime libraries on Ubuntu 24.04 with:"
+          echo "  sudo apt-get install libmysqlclient21 libc-ares2 libspdlog1.12 libssl3 libfmt9"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smtpsServer-ubuntu24
+          path: |
+            test/smtpsServer
+            test/smtpsServer.ldd.txt
+          if-no-files-found: error
