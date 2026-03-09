@@ -15,6 +15,13 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 # 添加编译选项
 option(USE_SSL "Enable SSL/TLS support" ON)
 option(ENABLE_DEBUG_LOGS "Enable debug logs for all modules" OFF)
+option(BUILD_OBJECT_ONLY "Compile object files only and skip final executable link" OFF)
+
+# Object-only artifacts are often linked on a different machine where libfmt
+# version may differ. Keep fmt implementation header-only to avoid ABI mismatch.
+if(BUILD_OBJECT_ONLY)
+    add_compile_definitions(FMT_HEADER_ONLY=1)
+endif()
 
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 20)
@@ -93,11 +100,23 @@ endif()
 # -----------------------------
 # 依赖查找（尽量自动化、跨平台）
 # -----------------------------
-find_package(Boost REQUIRED COMPONENTS system thread)
+# Object-only mode only needs headers at configure stage; full link libs are required otherwise.
+if(BUILD_OBJECT_ONLY)
+    find_package(Boost REQUIRED)
+else()
+    find_package(Boost REQUIRED COMPONENTS system thread)
+endif()
 find_package(spdlog REQUIRED)
 
 if(USE_SSL)
-    find_package(OpenSSL REQUIRED)
+    if(BUILD_OBJECT_ONLY)
+        find_package(OpenSSL)
+        if(NOT OpenSSL_FOUND)
+            message(WARNING "OpenSSL not found in object-only mode. Build will fail if OpenSSL headers are included by sources.")
+        endif()
+    else()
+        find_package(OpenSSL REQUIRED)
+    endif()
 else()
     # 如果禁用SSL，不查找OpenSSL但仍然定义相关变量以避免CMake错误
     set(OPENSSL_FOUND FALSE)
@@ -151,7 +170,16 @@ if(NOT CARES_LIBRARIES)
         get_filename_component(CARES_LIBRARY_DIRS ${CARES_LIBRARY} DIRECTORY)
         message(STATUS "✓ Found c-ares library: ${CARES_LIBRARY}")
     else()
-        message(FATAL_ERROR "c-ares not found. Please install c-ares (e.g. brew install c-ares).")
+        if(BUILD_OBJECT_ONLY)
+            if(CARES_INCLUDE_DIR)
+                set(CARES_INCLUDE_DIRS ${CARES_INCLUDE_DIR})
+                message(WARNING "c-ares library not found in object-only mode; compile-only will continue with headers.")
+            else()
+                message(WARNING "c-ares headers not found in object-only mode. Build may fail if ares.h is included by sources.")
+            endif()
+        else()
+            message(FATAL_ERROR "c-ares not found. Please install c-ares (e.g. brew install c-ares).")
+        endif()
     endif()
 endif()
 
@@ -185,7 +213,7 @@ if(NOT MYSQL_LIBRARIES)
     
     find_path(MYSQL_INCLUDE_DIR mysql.h
         PATHS ${MYSQL_SEARCH_PATHS}
-        PATH_SUFFIXES include
+        PATH_SUFFIXES include include/mysql
     )
     
     find_library(MYSQL_CLIENT_LIB
@@ -199,7 +227,16 @@ if(NOT MYSQL_LIBRARIES)
         set(MYSQL_LIBRARIES "${MYSQL_CLIENT_LIB}")
         message(STATUS "✓ Found MySQL: ${MYSQL_CLIENT_LIB}")
     else()
-        message(WARNING "✗ mysqlclient not found. Set manually: -DMYSQL_INCLUDE_DIRS=<path> -DMYSQL_LIBRARIES=<path>")
+        if(BUILD_OBJECT_ONLY)
+            if(MYSQL_INCLUDE_DIR)
+                set(MYSQL_INCLUDE_DIRS "${MYSQL_INCLUDE_DIR}")
+                message(WARNING "mysqlclient library not found in object-only mode; compile-only will continue with headers.")
+            else()
+                message(WARNING "mysql headers not found in object-only mode. Build may fail if mysql.h is included by sources.")
+            endif()
+        else()
+            message(WARNING "✗ mysqlclient not found. Set manually: -DMYSQL_INCLUDE_DIRS=<path> -DMYSQL_LIBRARIES=<path>")
+        endif()
     endif()
 endif()
 
@@ -237,65 +274,76 @@ file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}")
 message(STATUS "Build output: executables → ${TEST_OUTPUT_DIR}")
 message(STATUS "Build output: intermediate → ${CMAKE_BINARY_DIR}")
 
-# 可执行目标
-add_executable(smtpsServer ${SMTP_SRCS})
+# 构建目标：默认可执行；object-only 模式只编译 .o 不链接。
+if(BUILD_OBJECT_ONLY)
+    add_library(smtpsServer_obj OBJECT ${SMTP_SRCS})
+    set(SMTP_TARGET smtpsServer_obj)
+    message(STATUS "Object-only mode enabled: final executable link is skipped")
+else()
+    add_executable(smtpsServer ${SMTP_SRCS})
+    set(SMTP_TARGET smtpsServer)
+endif()
 
 # 全局输出目录 - 可执行文件到test目录，其他到build目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
 
 # 每个 target 的输出属性
-set_target_properties(smtpsServer PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-)
+if(NOT BUILD_OBJECT_ONLY)
+    set_target_properties(${SMTP_TARGET} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+endif()
 
 # -----------------------------
 # 包含目录（优先使用项目内的 OuterLib），并以 SYSTEM 标记外部库头以抑制警告
 # -----------------------------
 # 项目头
-target_include_directories(smtpsServer PRIVATE "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/include")
 
 # spdlog
 if(spdlog_FOUND)
-    target_include_directories(smtpsServer PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+    target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
 endif()
 
 # OuterLib (外部依赖库，如 nlohmann/json)
-target_include_directories(smtpsServer PRIVATE "${CMAKE_SOURCE_DIR}/OuterLib/json")
+target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/OuterLib/json")
 
 # Boost
 if(Boost_FOUND)
     # BOOST 提供的变量通常包含 include dirs
-    target_include_directories(smtpsServer PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
 else()
     message(FATAL_ERROR "Boost not found. Install Boost or set BOOST_ROOT / BOOST_INCLUDEDIR.")
 endif()
 
 # MySQL（若找到则加入）
 if(MYSQL_INCLUDE_DIRS)
-    target_include_directories(smtpsServer PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+    target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
 endif()
 
 if(CARES_INCLUDE_DIRS)
-    target_include_directories(smtpsServer PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
+    target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
 endif()
 
 if(CARES_LIBRARY_DIRS)
-    target_link_directories(smtpsServer PRIVATE ${CARES_LIBRARY_DIRS})
+    if(NOT BUILD_OBJECT_ONLY)
+        target_link_directories(${SMTP_TARGET} PRIVATE ${CARES_LIBRARY_DIRS})
+    endif()
 endif()
 
 # OpenSSL include（仅在未使用导入目标时作为兜底）
 if(USE_SSL)
     if(DEFINED OPENSSL_INCLUDE_DIRS AND OPENSSL_INCLUDE_DIRS)
-        target_include_directories(smtpsServer PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIRS})
+        target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIRS})
     elseif(DEFINED OPENSSL_INCLUDE_DIR AND OPENSSL_INCLUDE_DIR)
-        target_include_directories(smtpsServer PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIR})
+        target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIR})
     endif()
 endif()
 
 # -----------------------------
 # 链接依赖（显式链接，避免 link_directories）
 # -----------------------------
-if(NOT MYSQL_LIBRARIES)
+if(NOT BUILD_OBJECT_ONLY AND NOT MYSQL_LIBRARIES)
     if(APPLE)
         # If mysql client lib still not found, add Homebrew lib dir to link search and try -lmysqlclient as fallback
         message(STATUS "ℹ MYSQL_LIBRARIES empty — on macOS adding /opt/homebrew/lib to link search")
@@ -326,10 +374,14 @@ if(USE_SSL)
     endif()
 endif()
 
-target_link_libraries(smtpsServer PRIVATE ${LINK_LIBRARIES})
+if(NOT BUILD_OBJECT_ONLY)
+    target_link_libraries(${SMTP_TARGET} PRIVATE ${LINK_LIBRARIES})
+endif()
 
 # 目标编译选项
-target_compile_features(smtpsServer PRIVATE cxx_std_17)
+target_compile_features(${SMTP_TARGET} PRIVATE cxx_std_17)
 
 # 可选：安装规则（不强制）
-install(TARGETS smtpsServer RUNTIME DESTINATION bin)
+if(NOT BUILD_OBJECT_ONLY)
+    install(TARGETS smtpsServer RUNTIME DESTINATION bin)
+endif()

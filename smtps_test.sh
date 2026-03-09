@@ -3,10 +3,10 @@
 # SMTP自动化测试脚本
 # 用于测试SMTPS服务器的邮件接收功能
 
-SMTP_SERVER="${SMTP_SERVER:-localhost}"
+SMTP_SERVER="${SMTP_SERVER:-}"
 SMTP_PORT="${SMTP_PORT:-25}"
-MAIL_FROM="${MAIL_FROM:-2466245103@qq.com}"
-RCPT_TO="${RCPT_TO:-hongruizhu73@gmail.com}"
+MAIL_FROM="${MAIL_FROM:-}"
+RCPT_TO="${RCPT_TO:-}"
 MAIL_SUBJECT="${MAIL_SUBJECT:-SMTP Test Mail}"
 
 # 颜色输出

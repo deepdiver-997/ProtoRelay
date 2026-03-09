@@ -5,6 +5,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <functional>
@@ -75,16 +76,19 @@ bool run_interruptible_ec(StreamType& stream,
                           const char* op_name,
                           std::string& error_out) {
     auto& io = static_cast<boost::asio::io_context&>(lowest_layer(stream).get_executor().context());
-    boost::system::error_code op_ec = boost::asio::error::would_block;
-    bool done = false;
+    struct OpState {
+        boost::system::error_code ec{boost::asio::error::would_block};
+        std::atomic<bool> done{false};
+    };
+    auto state = std::make_shared<OpState>();
 
     start_op([&](const boost::system::error_code& ec) {
-        op_ec = ec;
-        done = true;
+        state->ec = ec;
+        state->done.store(true, std::memory_order_release);
     });
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!done) {
+    while (!state->done.load(std::memory_order_acquire)) {
         if (should_continue && !should_continue()) {
             abort_stream(stream);
             error_out = std::string(op_name) + " interrupted";
@@ -102,8 +106,8 @@ bool run_interruptible_ec(StreamType& stream,
         std::this_thread::sleep_for(kIoPollInterval);
     }
 
-    if (op_ec) {
-        error_out = std::string(op_name) + " failed: " + op_ec.message();
+    if (state->ec) {
+        error_out = std::string(op_name) + " failed: " + state->ec.message();
         return false;
     }
 
@@ -118,16 +122,19 @@ bool run_interruptible_ec_size(StreamType& stream,
                                const char* op_name,
                                std::string& error_out) {
     auto& io = static_cast<boost::asio::io_context&>(lowest_layer(stream).get_executor().context());
-    boost::system::error_code op_ec = boost::asio::error::would_block;
-    bool done = false;
+    struct OpState {
+        boost::system::error_code ec{boost::asio::error::would_block};
+        std::atomic<bool> done{false};
+    };
+    auto state = std::make_shared<OpState>();
 
     start_op([&](const boost::system::error_code& ec, std::size_t) {
-        op_ec = ec;
-        done = true;
+        state->ec = ec;
+        state->done.store(true, std::memory_order_release);
     });
 
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!done) {
+    while (!state->done.load(std::memory_order_acquire)) {
         if (should_continue && !should_continue()) {
             abort_stream(stream);
             error_out = std::string(op_name) + " interrupted";
@@ -145,8 +152,8 @@ bool run_interruptible_ec_size(StreamType& stream,
         std::this_thread::sleep_for(kIoPollInterval);
     }
 
-    if (op_ec) {
-        error_out = std::string(op_name) + " failed: " + op_ec.message();
+    if (state->ec) {
+        error_out = std::string(op_name) + " failed: " + state->ec.message();
         return false;
     }
 
@@ -215,10 +222,12 @@ bool send_smtp_line(StreamType& stream,
                     const std::string& line,
                     const ContinueFn& should_continue,
                     std::string& error_out) {
-    const std::string wire = line + "\r\n";
+    auto wire = std::make_shared<std::string>(line + "\r\n");
     return run_interruptible_ec_size(
         stream,
-        [&](auto handler) { boost::asio::async_write(stream, boost::asio::buffer(wire), std::move(handler)); },
+        [&stream, wire](auto handler) {
+            boost::asio::async_write(stream, boost::asio::buffer(*wire), std::move(handler));
+        },
         should_continue,
         kIoOperationTimeout,
         "write smtp line",
@@ -230,9 +239,12 @@ bool send_smtp_data(StreamType& stream,
                     const std::string& data,
                     const ContinueFn& should_continue,
                     std::string& error_out) {
+    auto payload = std::make_shared<std::string>(data);
     return run_interruptible_ec_size(
         stream,
-        [&](auto handler) { boost::asio::async_write(stream, boost::asio::buffer(data), std::move(handler)); },
+        [&stream, payload](auto handler) {
+            boost::asio::async_write(stream, boost::asio::buffer(*payload), std::move(handler));
+        },
         should_continue,
         kIoOperationTimeout,
         "write smtp body",

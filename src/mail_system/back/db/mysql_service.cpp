@@ -137,7 +137,7 @@ void MySQLConnection::set_connection_params(
 }
 
 bool MySQLConnection::connect() {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     if (m_connected) {
         LOG_DATABASE_DEBUG("Already connected to {}:{}", m_host, m_port);
@@ -225,14 +225,14 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql) {
     LOG_DB_QUERY_DEBUG("MySQLConnection::query() called");
     LOG_DB_QUERY_DEBUG("SQL: {}", sql);
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     // 直接检查成员变量，避免在持有锁的情况下调用 is_connected() 导致死锁
     if (!m_connected || !m_mysql) {
         LOG_DB_QUERY_DEBUG("Not connected, calling connect()...");
 
         // 释放锁以避免在 connect() 中死锁
-        lock.~lock_guard();
+        lock.unlock();
 
         if (!connect()) {
             LOG_DB_QUERY_ERROR("Failed to connect");
@@ -240,7 +240,7 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql) {
         }
 
         // 重新获取锁
-        new (&lock) std::lock_guard<std::mutex>(m_mutex);
+        lock.lock();
     } else {
         LOG_DB_QUERY_DEBUG("Already connected");
     }
@@ -284,19 +284,19 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql) {
 }
 
 std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const std::vector<std::string>& params) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     // 直接检查成员变量，避免在持有锁的情况下调用 is_connected() 导致死锁
     if (!m_connected || !m_mysql) {
         // 释放锁以避免在 connect() 中死锁
-        lock.~lock_guard();
+        lock.unlock();
 
         if (!connect()) {
             return nullptr;
         }
 
         // 重新获取锁
-        new (&lock) std::lock_guard<std::mutex>(m_mutex);
+        lock.lock();
     }
 
     // 准备语句
@@ -375,7 +375,7 @@ bool MySQLConnection::execute(const std::string& sql) {
     LOG_DB_QUERY_DEBUG("SQL length: {}", sql.length());
     LOG_DB_QUERY_DEBUG("Acquiring mutex lock...");
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     LOG_DB_QUERY_DEBUG("Mutex lock acquired");
 
@@ -384,7 +384,7 @@ bool MySQLConnection::execute(const std::string& sql) {
         LOG_DB_QUERY_DEBUG("Not connected, calling connect()...");
 
         // 释放锁以避免在 connect() 中死锁
-        lock.~lock_guard();
+        lock.unlock();
 
         if (!connect()) {
             LOG_DB_QUERY_ERROR("Failed to connect");
@@ -392,7 +392,7 @@ bool MySQLConnection::execute(const std::string& sql) {
         }
 
         // 重新获取锁
-        new (&lock) std::lock_guard<std::mutex>(m_mutex);
+        lock.lock();
     } else {
         LOG_DB_QUERY_DEBUG("Already connected");
     }
@@ -423,19 +423,19 @@ bool MySQLConnection::execute(const std::string& sql, const std::vector<std::str
 }
 
 bool MySQLConnection::execute(const std::string& sql, const std::vector<std::string>& params, const std::vector<ParamType>& types) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     // 直接检查成员变量，避免在持有锁的情况下调用 is_connected() 导致死锁
     if (!m_connected || !m_mysql) {
         // 释放锁以避免在 connect() 中死锁
-        lock.~lock_guard();
+        lock.unlock();
 
         if (!connect()) {
             return false;
         }
 
         // 重新获取锁
-        new (&lock) std::lock_guard<std::mutex>(m_mutex);
+        lock.lock();
     }
 
     // 准备语句

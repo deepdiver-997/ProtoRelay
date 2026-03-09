@@ -235,8 +235,9 @@ void ServerBase::accept_tcp_connection() {
 
     LOG_NETWORK_DEBUG("Waiting for TCP connection...");
     auto socket = std::make_unique<boost::asio::ip::tcp::socket>(*m_ioContext);
+    auto& peer_socket = *socket;
 
-    m_tcp_acceptor->async_accept(*socket,
+    m_tcp_acceptor->async_accept(peer_socket,
         [this, socket = std::move(socket)](const boost::system::error_code& error) mutable {
             if (!error) {
                 LOG_NETWORK_INFO("New TCP connection accepted from {}",

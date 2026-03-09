@@ -152,7 +152,10 @@ public:
         if (self->closed_ || !self->connection_) {
             return;
         }
-        self->connection_->async_handshake(
+
+        auto* conn = self->connection_.get();
+
+        conn->async_handshake(
             type,
             make_copyable([self = std::move(self), handler = std::forward<HandshakeHandler>(handler)](const boost::system::error_code& error) mutable {
                 if (self->closed_) {
@@ -235,12 +238,15 @@ public:
         std::unique_ptr<SessionBase<ConnectionType>> self,
         ReadCallback callback = nullptr
     ) {
-        if (self->closed_) {
+        if (self->closed_ || !self->connection_) {
             return;
         }
 
-        self->connection_->async_read(
-            boost::asio::buffer(self->read_buffer_),
+        auto* conn = self->connection_.get();
+        auto read_buffer = boost::asio::buffer(self->read_buffer_);
+
+        conn->async_read(
+            read_buffer,
             make_copyable([self = std::move(self), cb = std::move(callback)](
                 const boost::system::error_code& error,
                 std::size_t bytes_transferred
@@ -288,13 +294,19 @@ public:
         const std::string& data,
         WriteCallback callback = nullptr
     ) {
-        if (self->closed_) {
+        if (self->closed_ || !self->connection_) {
             return;
         }
 
-        self->connection_->async_write(
-            boost::asio::buffer(data),
-            make_copyable([self = std::move(self), cb = std::move(callback)](
+        auto* conn = self->connection_.get();
+
+        // Keep payload alive until async completion to avoid dangling buffer.
+        auto payload = std::make_shared<std::string>(data);
+        auto write_buffer = boost::asio::buffer(*payload);
+
+        conn->async_write(
+            write_buffer,
+            make_copyable([self = std::move(self), cb = std::move(callback), payload](
                 const boost::system::error_code& error,
                 std::size_t
             ) mutable {
