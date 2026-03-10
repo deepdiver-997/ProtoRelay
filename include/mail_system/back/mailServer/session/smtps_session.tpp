@@ -37,6 +37,26 @@ void SmtpsSession<ConnectionType>::start(std::unique_ptr<SmtpsSession> self) {
 }
 
 template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::start_after_starttls(std::unique_ptr<SmtpsSession> self) {
+    SessionBase<ConnectionType>::do_handshake(
+        std::move(self),
+        boost::asio::ssl::stream_base::server,
+        [](std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            if (ec) {
+                LOG_SESSION_ERROR("STARTTLS handshake failed: {}", ec.message());
+                return;
+            }
+
+            // RFC 3207: after STARTTLS handshake, both sides must discard prior SMTP state.
+            s->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
+            s->set_next_event(static_cast<int>(SmtpsEvent::TIMEOUT));
+            LOG_SMTP_DETAIL_INFO("STARTTLS handshake complete, waiting for EHLO on TLS session");
+            SessionBase<ConnectionType>::do_async_read(std::move(s), nullptr);
+        }
+    );
+}
+
+template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::handle_read(const std::string& data) {
     parse_smtp_command(data);
 }
@@ -292,6 +312,14 @@ void SmtpsSession<ConnectionType>::submit_mail_to_queue() {
         return;
     }
 
+    if (!context_.parsed_subject.empty()) {
+        this->get_mail()->subject = context_.parsed_subject;
+    }
+    if (!context_.source_message_id.empty()) {
+        this->get_mail()->source_message_id = context_.source_message_id;
+    }
+    this->get_mail()->header = context_.header_buffer;
+
     for (auto& att : context_.streamed_attachments) {
         this->get_mail()->attachments.push_back(std::move(att));
     }
@@ -399,6 +427,8 @@ void SmtpsSession<ConnectionType>::reset_mail_state() {
 
     context_.mail_data.clear();
     context_.header_buffer.clear();
+    context_.parsed_subject.clear();
+    context_.source_message_id.clear();
     context_.text_body_buffer.clear();
     context_.line_buffer.clear();
     context_.body_limit_exceeded = false;

@@ -196,6 +196,17 @@ ServerBase::~ServerBase() {
     // 应该在程序最后统一关闭
 }
 
+void ServerBase::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) {
+    if (!socket) {
+        return;
+    }
+
+    auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
+        std::move(*socket),
+        get_ssl_context());
+    pass_stream(std::move(ssl_stream));
+}
+
 void ServerBase::accept_ssl_connection() {
 
     LOG_NETWORK_DEBUG("Waiting for SSL connection...");

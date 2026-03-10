@@ -61,6 +61,9 @@ public:
         this->handle_accept(std::move(ssl_socket), boost::system::error_code());
     }
 
+    // Upgrade an accepted plain TCP socket to TLS and continue SMTP session flow.
+    virtual void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket);
+
 protected:
     // 创建新会话
     virtual void accept_ssl_connection();

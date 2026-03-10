@@ -6,11 +6,15 @@
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/common/logger.h"
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <memory>
 #include <mutex>
-#include <vector>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace mail_system {
 namespace outbound {
@@ -45,19 +49,24 @@ public:
 
     void set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client);
     void set_local_domain(std::string local_domain);
+    void set_batch_pop_size(size_t batch_size);
 
     // 关闭队列，等待所有任务完成
     void shutdown();
 
     // 检查是否已关闭
-    bool is_shutdown() const { return shutdown_; }
+    bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
 
 // private:
     // 处理单个持久化任务
-    void process_task();
+    bool process_task();
 
     // 批量插入邮件元数据到数据库（一次连接，一条SQL）
     bool batch_insert_metadata(mail* mail_data, std::string& error);
+
+#if ENABLE_INBOUND_DEDUP_CHECK
+    bool is_probable_duplicate_mail(mail* mail_data, MySQLConnection* conn);
+#endif
 
     bool batch_delete_metadata(mail* mail_data, std::string& error);
 
@@ -83,14 +92,14 @@ public:
     std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client_;
     std::string local_domain_{"example.com"};
     
-    std::vector<mail*> task_queue_;
+    std::deque<mail*> task_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    int MAX_TASK_COUNT = 100;
+    size_t MAX_TASK_COUNT = 100;
     std::atomic<size_t> current_task_count_{0};
+    std::atomic<size_t> batch_pop_size_{16};
     
     std::atomic<bool> shutdown_;
-    std::atomic<bool> worker_running_;
     std::thread worker_thread_;
 };
 

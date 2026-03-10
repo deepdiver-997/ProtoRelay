@@ -3,16 +3,51 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/outbound/smtp_outbound_client.h"
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
-#include <fstream>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <unordered_map>
 
 namespace mail_system {
 namespace persist_storage {
 
+#if ENABLE_INBOUND_DEDUP_CHECK
 namespace {
+constexpr int kInboundDedupWindowSeconds = 600;
+std::mutex g_inbound_dedup_mu;
+std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_inbound_dedup_seen;
+}
+#endif
+
+namespace {
+
+constexpr size_t kDefaultBatchPopSize = 16;
+constexpr size_t kMaxBatchPopSize = 256;
+
+size_t adjust_batch_size_by_backlog(size_t current_batch, size_t backlog_size) {
+    const size_t safe_current = std::max<size_t>(1, std::min(current_batch, kMaxBatchPopSize));
+
+    // Grow quickly when backlog is much larger than current pull size.
+    if (backlog_size > safe_current * 4) {
+        return std::min(kMaxBatchPopSize, safe_current * 2);
+    }
+
+    // Shrink when load drops, but keep at least default size under normal operation.
+    if (backlog_size < safe_current / 2 && safe_current > kDefaultBatchPopSize) {
+        return std::max(kDefaultBatchPopSize, safe_current / 2);
+    }
+
+    // Under very light load, allow a small batch to reduce per-iteration latency.
+    if (backlog_size <= 2 && safe_current > 4) {
+        return safe_current / 2;
+    }
+
+    return safe_current;
+}
 
 std::string extract_domain_lower(const std::string& email) {
     const auto at_pos = email.find('@');
@@ -39,11 +74,24 @@ int recipient_status_for_domain(const std::string& recipient,
 PersistentQueue::PersistentQueue(
     std::shared_ptr<DBPool> db_pool,
     std::shared_ptr<ThreadPoolBase> worker_pool
-) : db_pool_(db_pool), worker_pool_(worker_pool), shutdown_(false), worker_running_(false), current_task_count_(0) {
+)
+    : db_pool_(db_pool),
+      worker_pool_(worker_pool),
+      current_task_count_(0),
+      batch_pop_size_(kDefaultBatchPopSize),
+      shutdown_(false) {
+    if (const char* env_batch = std::getenv("PERSIST_QUEUE_BATCH_POP_SIZE"); env_batch != nullptr) {
+        const auto parsed = std::strtoul(env_batch, nullptr, 10);
+        if (parsed > 0) {
+            set_batch_pop_size(std::min(static_cast<size_t>(parsed), kMaxBatchPopSize));
+        }
+    }
+
     // 启动工作线程
-    worker_running_ = true;
     worker_thread_ = std::thread(&PersistentQueue::worker_loop, this);
-    LOG_PERSISTENT_QUEUE_INFO("PersistentQueue initialized and worker thread started");
+    LOG_PERSISTENT_QUEUE_INFO(
+        "PersistentQueue initialized and worker thread started, batch_pop_size={}",
+        batch_pop_size_.load(std::memory_order_relaxed));
 }
 
 PersistentQueue::~PersistentQueue() {
@@ -59,7 +107,7 @@ bool PersistentQueue::submit_mail(mail* mail_data) {
         return false;
     }
 
-    if (current_task_count_.load() >= MAX_TASK_COUNT) {
+    if (current_task_count_.load(std::memory_order_relaxed) >= MAX_TASK_COUNT) {
         LOG_PERSISTENT_QUEUE_WARN("PersistentQueue is full, cannot accept new mail tasks");
         return false;
     }
@@ -74,7 +122,7 @@ bool PersistentQueue::submit_mail(mail* mail_data) {
         // );
         // task_queue_.insert(it, mail_data);
         task_queue_.push_back(mail_data);
-        current_task_count_.fetch_add(1);
+        current_task_count_.fetch_add(1, std::memory_order_relaxed);
     }
     // 唤醒等待中的工作线程处理新任务
     queue_cv_.notify_one();
@@ -88,7 +136,7 @@ bool PersistentQueue::submit_mails(std::vector<mail*>& mail_list) {
         return false;
     }
     
-    if (current_task_count_.load() + mail_list.size() > MAX_TASK_COUNT) {
+    if (current_task_count_.load(std::memory_order_relaxed) + mail_list.size() > MAX_TASK_COUNT) {
         LOG_PERSISTENT_QUEUE_WARN("PersistentQueue is full, cannot accept new mail tasks");
         return false;
     }
@@ -104,7 +152,7 @@ bool PersistentQueue::submit_mails(std::vector<mail*>& mail_list) {
         //     );
         //     task_queue_.insert(it, mail_data);
         task_queue_.insert(task_queue_.end(), mail_list.begin(), mail_list.end());
-        current_task_count_.fetch_add(mail_list.size());
+        current_task_count_.fetch_add(mail_list.size(), std::memory_order_relaxed);
     }
     queue_cv_.notify_all();
     LOG_PERSISTENT_QUEUE_INFO("Mails submitted to PersistentQueue, current queue size: {}", queue_size());
@@ -193,7 +241,7 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
 }
 
 size_t PersistentQueue::queue_size() const {
-    return current_task_count_.load();
+    return current_task_count_.load(std::memory_order_relaxed);
 }
 
 void PersistentQueue::set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client) {
@@ -206,60 +254,90 @@ void PersistentQueue::set_local_domain(std::string local_domain) {
     }
 }
 
+void PersistentQueue::set_batch_pop_size(size_t batch_size) {
+    const size_t clamped = std::max<size_t>(1, std::min(batch_size, kMaxBatchPopSize));
+    batch_pop_size_.store(clamped, std::memory_order_relaxed);
+}
+
 void PersistentQueue::shutdown() {
-    if (shutdown_.load()) {
+    if (shutdown_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    shutdown_ = true;
-    worker_running_ = false;
     // 唤醒可能在等待中的工作线程以便正常退出
     queue_cv_.notify_all();
     // 不在这里打印日志，因为可能在析构阶段调用，此时 Logger 可能已 shutdown
 }
 
-void PersistentQueue::process_task() {
-    if (is_shutdown() || current_task_count_.load() == 0) {
-        return;
-    }
-    mail* mail_data = nullptr;
+bool PersistentQueue::process_task() {
+    std::vector<mail*> pending_batch;
+
     {
         std::unique_lock<std::mutex> lock(queue_mutex_);
-        queue_cv_.wait(lock, [this] { return !task_queue_.empty() || is_shutdown(); });
-        mail_data = task_queue_.front();
-        task_queue_.erase(task_queue_.begin());
-        current_task_count_.fetch_sub(1);
+        queue_cv_.wait(lock, [this] {
+            return shutdown_.load(std::memory_order_relaxed) || !task_queue_.empty();
+        });
+        if (shutdown_.load(std::memory_order_relaxed) && task_queue_.empty()) {
+            return false;
+        }
+
+        const size_t backlog_size = task_queue_.size();
+        const size_t current_batch = batch_pop_size_.load(std::memory_order_relaxed);
+        const size_t adaptive_batch = adjust_batch_size_by_backlog(current_batch, backlog_size);
+        if (adaptive_batch != current_batch) {
+            batch_pop_size_.store(adaptive_batch, std::memory_order_relaxed);
+        }
+
+        const size_t pop_count = std::min(backlog_size, adaptive_batch);
+        pending_batch.reserve(pop_count);
+        for (size_t i = 0; i < pop_count; ++i) {
+            pending_batch.push_back(task_queue_.front());
+            task_queue_.pop_front();
+        }
+        current_task_count_.fetch_sub(pending_batch.size(), std::memory_order_relaxed);
+    }
+
+    for (auto* mail_data : pending_batch) {
+        if (!mail_data) {
+            continue;
+        }
 
         if (mail_data->persist_status != PersistStatus::PENDING) {
             LOG_PERSISTENT_QUEUE_WARN("Mail ID {} has already been processed with status {}, skipping", mail_data->id, static_cast<int>(mail_data->persist_status));
-            return;
+            continue;
         }
+
+        worker_pool_->post([this, mail_data]() {
+            std::string error;
+            bool success = true;
+
+            mail_data->persist_status = PersistStatus::PROCESSING;
+
+            if (!batch_insert_attachments(mail_data, error)) {
+                LOG_PERSISTENT_QUEUE_ERROR("Failed to insert attachments for mail ID {}: {}", mail_data->id, error);
+                success = false;
+            }
+
+            if (!batch_insert_metadata(mail_data, error)) {
+                LOG_PERSISTENT_QUEUE_ERROR("Failed to insert metadata for mail ID {}: {}", mail_data->id, error);
+                success = false;
+            }
+
+            if (success) {
+                mail_data->persist_status = PersistStatus::SUCCESS;
+                if (!mail_data->deduplicated_inbound) {
+                    enqueue_outbox_tasks(mail_data);
+                } else {
+                    LOG_PERSISTENT_QUEUE_INFO("Mail {} deduplicated before insert, skipped outbox enqueue", mail_data->id);
+                }
+                LOG_PERSISTENT_QUEUE_INFO("Successfully processed mail ID {}", mail_data->id);
+            } else {
+                mail_data->persist_status = PersistStatus::FAILED;
+                LOG_PERSISTENT_QUEUE_ERROR("Processing failed for mail ID {}", mail_data->id);
+            }
+        });
     }
 
-    worker_pool_->submit([this, mail_data]() {
-        std::string error;
-        bool success = true;
-
-        mail_data->persist_status = PersistStatus::PROCESSING;
-
-        if (!batch_insert_attachments(mail_data, error)) {
-            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert attachments for mail ID {}: {}", mail_data->id, error);
-            success = false;
-        }
-
-        if (!batch_insert_metadata(mail_data, error)) {
-            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert metadata for mail ID {}: {}", mail_data->id, error);
-            success = false;
-        }
-
-        if (success) {
-            mail_data->persist_status = PersistStatus::SUCCESS;
-            enqueue_outbox_tasks(mail_data);
-            LOG_PERSISTENT_QUEUE_INFO("Successfully processed mail ID {}", mail_data->id);
-        } else {
-            mail_data->persist_status = PersistStatus::FAILED;
-            LOG_PERSISTENT_QUEUE_ERROR("Processing failed for mail ID {}", mail_data->id);
-        }
-    });
+    return true;
 }
 
 bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error) {
@@ -278,6 +356,16 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error)
     }
 
     try {
+#if ENABLE_INBOUND_DEDUP_CHECK
+        if (is_probable_duplicate_mail(mail_data, conn.get())) {
+            mail_data->deduplicated_inbound = true;
+            LOG_PERSISTENT_QUEUE_INFO("Dedup hit before DB insert, mail_id={}, message_id=[{}]",
+                                     mail_data->id,
+                                     mail_data->source_message_id);
+            return true;
+        }
+#endif
+
         // 第一步：插入邮件元数据到 mails 表
         std::string mail_sql = "INSERT INTO mails (id, subject, body_path) VALUES (" +
                               std::to_string(mail_data->id) + ", '" +
@@ -322,6 +410,100 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error)
     }
     // RAIIConnection 析构时自动释放连接
 }
+
+#if ENABLE_INBOUND_DEDUP_CHECK
+bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, MySQLConnection* conn) {
+    if (!mail_data || !conn || mail_data->to.empty()) {
+        return false;
+    }
+
+    const std::string sender = conn->escape_string(mail_data->from);
+    const std::string subject = conn->escape_string(mail_data->subject);
+
+    // First priority: upstream Message-ID in a short-lived in-memory cache.
+    if (!mail_data->source_message_id.empty()) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto ttl = std::chrono::seconds(kInboundDedupWindowSeconds);
+        std::lock_guard<std::mutex> lock(g_inbound_dedup_mu);
+
+        for (auto it = g_inbound_dedup_seen.begin(); it != g_inbound_dedup_seen.end();) {
+            if (now - it->second > ttl) {
+                it = g_inbound_dedup_seen.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        bool all_seen = true;
+        for (const auto& recipient_raw : mail_data->to) {
+            const std::string key = mail_data->from + "\n" + recipient_raw + "\n" + mail_data->source_message_id;
+            if (g_inbound_dedup_seen.find(key) == g_inbound_dedup_seen.end()) {
+                all_seen = false;
+            }
+        }
+        if (all_seen) {
+            return true;
+        }
+
+        for (const auto& recipient_raw : mail_data->to) {
+            const std::string key = mail_data->from + "\n" + recipient_raw + "\n" + mail_data->source_message_id;
+            g_inbound_dedup_seen[key] = now;
+        }
+
+        // Also run DB heuristic below so restart/cross-process duplicates are still reduced.
+        std::string sql =
+            "SELECT id FROM mails WHERE subject = '" + subject + "' "
+            "AND id IN (SELECT mail_id FROM mail_recipients WHERE sender = '" + sender + "') "
+            "AND TIMESTAMPDIFF(SECOND, send_time, NOW()) BETWEEN 0 AND " + std::to_string(kInboundDedupWindowSeconds) + " "
+            "LIMIT 20";
+
+        auto result = conn->query(sql);
+        if (result && result->get_row_count() > 0) {
+            // Message-ID is not persisted as a dedicated DB column yet; use it as a strict in-memory hint
+            // together with sender/subject/time window and recipient matching below.
+            for (const auto& recipient_raw : mail_data->to) {
+                const std::string recipient = conn->escape_string(recipient_raw);
+                std::string rcpt_sql =
+                    "SELECT 1 FROM mail_recipients r "
+                    "JOIN mails m ON m.id = r.mail_id "
+                    "WHERE r.sender='" + sender + "' "
+                    "AND r.recipient='" + recipient + "' "
+                    "AND m.subject='" + subject + "' "
+                    "AND TIMESTAMPDIFF(SECOND, m.send_time, NOW()) BETWEEN 0 AND " + std::to_string(kInboundDedupWindowSeconds) + " "
+                    "LIMIT 1";
+                auto rcpt_res = conn->query(rcpt_sql);
+                if (!(rcpt_res && rcpt_res->get_row_count() > 0)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    // Fallback heuristic when Message-ID is missing: sender+subject+all recipients in a short window.
+    if (mail_data->subject.empty()) {
+        return false;
+    }
+
+    for (const auto& recipient_raw : mail_data->to) {
+        const std::string recipient = conn->escape_string(recipient_raw);
+        std::string sql =
+            "SELECT 1 FROM mail_recipients r "
+            "JOIN mails m ON m.id = r.mail_id "
+            "WHERE r.sender='" + sender + "' "
+            "AND r.recipient='" + recipient + "' "
+            "AND m.subject='" + subject + "' "
+            "AND TIMESTAMPDIFF(SECOND, m.send_time, NOW()) BETWEEN 0 AND " + std::to_string(kInboundDedupWindowSeconds) + " "
+            "LIMIT 1";
+        auto result = conn->query(sql);
+        if (!(result && result->get_row_count() > 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+#endif
 
 bool PersistentQueue::batch_insert_attachments(mail* mail_data, std::string& error) {
     if (!mail_data || mail_data->attachments.empty()) {
@@ -440,13 +622,8 @@ bool PersistentQueue::batch_delete_attachments(mail* mail_data, std::string& err
 
 void PersistentQueue::worker_loop() {
     LOG_PERSISTENT_QUEUE_INFO("PersistentQueue worker thread started");
-    while (worker_running_) {
-        process_task();
-        // if (current_task_count_.load() * 1.5 < MAX_TASK_COUNT) {
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        // } else {
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        // }
+    while (process_task()) {
+        // process_task() blocks on condition_variable, so no busy spin in idle state.
     }
     // 不在这里打印退出日志，因为可能在析构阶段调用，此时 Logger 可能已 shutdown
 }

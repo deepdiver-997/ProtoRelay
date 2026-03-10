@@ -58,10 +58,20 @@ std::unordered_map<std::string, std::string> parse_headers_map(const std::string
     std::unordered_map<std::string, std::string> headers;
     std::istringstream iss(header_block);
     std::string line;
+    std::string last_key;
     while (std::getline(iss, line)) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
+
+        // RFC 5322 folded header continuation line.
+        if (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+            if (!last_key.empty()) {
+                headers[last_key] += " " + trim(line);
+            }
+            continue;
+        }
+
         auto pos = line.find(':');
         if (pos == std::string::npos) {
             continue;
@@ -75,6 +85,7 @@ std::unordered_map<std::string, std::string> parse_headers_map(const std::string
             value.clear();
         }
         headers[key] = value;
+        last_key = key;
     }
     return headers;
 }
@@ -129,6 +140,16 @@ std::string decode_base64(const std::string& input) {
 void analyze_top_header(SmtpsContext& ctx) {
     LOG_SESSION_INFO("analyze_top_header: header_buffer=[{}]", ctx.header_buffer.substr(0, 200));
     auto headers = parse_headers_map(ctx.header_buffer);
+    ctx.parsed_subject = get_header_value(headers, "subject");
+    ctx.source_message_id = get_header_value(headers, "message-id");
+
+    if (!ctx.parsed_subject.empty()) {
+        LOG_SESSION_INFO("analyze_top_header: subject=[{}]", ctx.parsed_subject);
+    }
+    if (!ctx.source_message_id.empty()) {
+        LOG_SESSION_INFO("analyze_top_header: message-id=[{}]", ctx.source_message_id);
+    }
+
     auto it = headers.find("content-type");
     if (it != headers.end()) {
         LOG_SESSION_INFO("analyze_top_header: content-type raw=[{}]", it->second);

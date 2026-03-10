@@ -71,6 +71,10 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    #ifdef GNU_LINUX
+    std::cout << "Remember to execute 'sudo setcap 'cap_net_bind_service=+ep' " << argv[0] << "' to allow binding to privileged ports without running as root." << std::endl;
+    #endif
+
     std::cout << "SMTPS Server V7 Starting..." << std::endl;
 
     try {

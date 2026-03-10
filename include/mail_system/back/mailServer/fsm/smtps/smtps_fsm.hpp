@@ -59,6 +59,8 @@ struct SmtpsContext {
     std::string sender_address;                  // MAIL FROM 解析出的地址
     std::vector<std::string> recipient_addresses;// RCPT TO 收件人列表
     std::string mail_data;                       // 旧逻辑保留：完整邮件字符串缓冲（非流式时）
+    std::string parsed_subject;                  // 从头部解析出的Subject
+    std::string source_message_id;               // 从头部解析出的Message-ID
 
     // streaming / MIME parsing helpers
     bool header_parsed = false;                  // DATA 阶段是否已解析完邮件头
@@ -98,6 +100,8 @@ struct SmtpsContext {
         sender_address.clear();
         recipient_addresses.clear();
         mail_data.clear();
+        parsed_subject.clear();
+        source_message_id.clear();
         header_parsed = false;
         streaming_enabled = false;
         multipart = false;

@@ -16,6 +16,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 option(USE_SSL "Enable SSL/TLS support" ON)
 option(ENABLE_DEBUG_LOGS "Enable debug logs for all modules" OFF)
 option(BUILD_OBJECT_ONLY "Compile object files only and skip final executable link" OFF)
+option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check before DB insert" ON)
 
 # Object-only artifacts are often linked on a different machine where libfmt
 # version may differ. Keep fmt implementation header-only to avoid ABI mismatch.
@@ -380,6 +381,12 @@ endif()
 
 # 目标编译选项
 target_compile_features(${SMTP_TARGET} PRIVATE cxx_std_17)
+
+if(ENABLE_INBOUND_DEDUP_CHECK)
+    target_compile_definitions(${SMTP_TARGET} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=1)
+else()
+    target_compile_definitions(${SMTP_TARGET} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=0)
+endif()
 
 # 可选：安装规则（不强制）
 if(NOT BUILD_OBJECT_ONLY)

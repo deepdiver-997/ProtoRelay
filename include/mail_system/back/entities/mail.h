@@ -52,6 +52,7 @@ struct mail
     std::string header;         // 邮件头
     std::string body;           // 邮件正文
     std::string subject;        // 邮件主题
+    std::string source_message_id; // 上游MTA的Message-ID，用于幂等去重
     time_t send_time;           // 发送时间
     int box_id;                 // 邮件所属邮箱ID
     int status;                 // 邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除
@@ -59,6 +60,7 @@ struct mail
     std::vector<attachment> attachments; // 附件元数据列表
     mail_system::persist_storage::PersistStatus persist_status{mail_system::persist_storage::PersistStatus::PENDING}; // 持久化状态
     bool mail_over{false};    // 邮件内容是否完整（用于流式处理）
+    bool deduplicated_inbound{false}; // 是否被入站去重命中
     std::shared_future<bool> meta_future; // 附件元数据持久化返回的 future，可拷贝
     mail() = default;
     mail(const mail& other) {
@@ -69,6 +71,7 @@ struct mail
         header = other.header;
         body = other.body;
         subject = other.subject;
+        source_message_id = other.source_message_id;
         send_time = other.send_time;
         box_id = other.box_id;
         status = other.status;
@@ -76,6 +79,7 @@ struct mail
         persist_status = other.persist_status;
         body_path = other.body_path;
         mail_over = other.mail_over;
+        deduplicated_inbound = other.deduplicated_inbound;
     }
     mail(mail&& other) noexcept {
         id = other.id;
@@ -84,6 +88,7 @@ struct mail
         header = std::move(other.header);
         body = std::move(other.body);
         subject = std::move(other.subject);
+        source_message_id = std::move(other.source_message_id);
         send_time = other.send_time;
         box_id = other.box_id;
         status = other.status;
@@ -91,5 +96,6 @@ struct mail
         persist_status = other.persist_status;
         body_path = std::move(other.body_path);
         mail_over = other.mail_over;
+        deduplicated_inbound = other.deduplicated_inbound;
     }
 };

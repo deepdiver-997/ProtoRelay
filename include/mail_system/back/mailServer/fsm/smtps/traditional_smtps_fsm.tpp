@@ -103,7 +103,7 @@ void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
     transition_table_[std::make_pair(SmtpsState::INIT, SmtpsEvent::CONNECT)] = SmtpsState::GREETING;
     transition_table_[std::make_pair(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
     transition_table_[std::make_pair(SmtpsState::GREETING, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
-    if constexpr (!std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
+    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
         transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS)] = SmtpsState::INIT;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_USERNAME;
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_PASSWORD;
@@ -380,11 +380,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
             self->set_current_state(static_cast<int>(SmtpsState::INIT));
             auto server = self->get_server();
             auto tcp_sock = self->release_connection()->release_socket();
-            auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
-                std::move(*tcp_sock),
-                server->get_ssl_context()
-            );
-            server->pass_stream(std::move(ssl_stream));
+            server->handoff_starttls_socket(std::move(tcp_sock));
         }
     );
 }
@@ -817,7 +813,17 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 LOG_SMTP_DETAIL_ERROR("Mail persistence failed with status {}, closing session.", static_cast<int>(status));
                 smtp_session->check_mail_persist_status();
                 if (s) {
-                    s->close();
+                    SessionBase<ConnectionType>::do_async_write(std::move(s), "451 Requested action aborted: local processing error\r\n", [] (
+                        std::unique_ptr<SessionBase<ConnectionType>> failed_session,
+                        const boost::system::error_code& write_ec
+                    ) mutable {
+                        if (write_ec) {
+                            LOG_SMTP_DETAIL_ERROR("Failed to send 451 on persist failure: {}", write_ec.message());
+                        }
+                        if (failed_session) {
+                            failed_session->close();
+                        }
+                    });
                 }
                 return;
             }
@@ -830,7 +836,17 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         mail_ptr->persist_status = persist_storage::PersistStatus::CANCELLED;
         smtp_session->check_mail_persist_status();
         if (s) {
-            s->close();
+            SessionBase<ConnectionType>::do_async_write(std::move(s), "451 Requested action aborted: local processing timeout\r\n", [] (
+                std::unique_ptr<SessionBase<ConnectionType>> timeout_session,
+                const boost::system::error_code& write_ec
+            ) mutable {
+                if (write_ec) {
+                    LOG_SMTP_DETAIL_ERROR("Failed to send 451 on persist timeout: {}", write_ec.message());
+                }
+                if (timeout_session) {
+                    timeout_session->close();
+                }
+            });
         }
     }));
 }

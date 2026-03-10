@@ -112,10 +112,11 @@ $RECYCLE.BIN/
 # ==================== 测试和临时脚本 ====================
 # 测试脚本
 *.sh
-!smtp_test.sh  # 保留这个测试脚本
+smtp_test.sh  # 保留这个测试脚本
 !./test/cl.py
 !scripts/generate_dkim_keys.sh
 !build.sh
+.gitignore
 
 # 临时压缩包
 *.tar.gz

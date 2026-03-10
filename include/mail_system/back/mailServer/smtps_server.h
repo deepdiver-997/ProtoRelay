@@ -29,6 +29,7 @@ namespace mail_system {
            const boost::system::error_code& error) override;
         void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
            const boost::system::error_code& error) override;
+          void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) override;
 
         std::string get_free_client_ip();
         void post_to_client(size_t mail_id);
