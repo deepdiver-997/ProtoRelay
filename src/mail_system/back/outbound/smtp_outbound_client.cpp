@@ -821,6 +821,24 @@ void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record) {
                             return oss.str();
                         }());
 
+        if (target_hosts.empty()) {
+            DeliveryCompletion completion;
+            completion.outbox_id = record.id;
+            completion.mail_id = record.mail_id;
+            completion.dispatch_attempt_id = attempt_id;
+            completion.success = false;
+            completion.permanent_failure = false;
+            completion.retry_delay_seconds = kDefaultRetryDelaySeconds;
+            completion.error_message = "no routable SMTP target hosts resolved";
+            LOG_OUTBOUND_WARN("Outbound SMTP failed: outbox_id={}, attempt_id={}, permanent_failure={}, error={}",
+                            completion.outbox_id,
+                            completion.dispatch_attempt_id,
+                            completion.permanent_failure,
+                            completion.error_message);
+            push_completion(std::move(completion));
+            return;
+        }
+
         SmtpExecResult exec_result;
         bool delivered = false;
         for (const auto& host : target_hosts) {

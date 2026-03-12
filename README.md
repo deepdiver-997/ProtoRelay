@@ -87,9 +87,40 @@ Important knobs:
 }
 ```
 
-### TLS
-Use self-signed for tests:
+### Outbound Deliverability Baseline (2026-03)
+Recommended settings for direct MTA-to-MTA delivery:
+
+```json
+{
+  "system_domain": "mail.hgmail.xin",
+  "outbound_helo_domain": "mail.hgmail.xin",
+  "outbound_mail_from_domain": "mail.hgmail.xin",
+  "outbound_dkim_enabled": true,
+  "outbound_dkim_selector": "default",
+  "outbound_dkim_domain": "mail.hgmail.xin",
+  "outbound_ports": [25]
+}
+```
+
+Notes:
+- For internet MX delivery, use port 25 and upgrade with STARTTLS when offered.
+- Ports 465/587 are typically submission ports, not the default path for MTA-to-MTA relay.
+- DNS alignment checklist: SPF + DKIM + PTR (+ DMARC).
+
+Quick DNS checks:
 ```bash
+dig +short TXT mail.hgmail.xin
+dig +short TXT default._domainkey.mail.hgmail.xin
+dig +short TXT _dmarc.mail.hgmail.xin
+dig +short -x 8.134.123.121
+```
+
+### Demo Video
+QQ -> Mail System delivery demo recording:
+
+ External demo link (Release/Object Storage): `<replace-with-public-url>`
+
+### TLS
 mkdir -p config/crt
 openssl req -x509 -newkey rsa:4096 -keyout config/crt/server.key \
     -out config/crt/server.crt -days 365 -nodes -subj "/CN=localhost"

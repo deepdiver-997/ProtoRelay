@@ -122,6 +122,7 @@ smtp_test.sh  # 保留这个测试脚本
 *.tar.gz
 *.zip
 *.rar
+*.mov
 
 # 临时 SQL 文件
 test_*.sql

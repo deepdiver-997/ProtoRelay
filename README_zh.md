@@ -252,6 +252,42 @@ sudo chmod 644 config/crt/server.crt
 sudo chmod 600 config/crt/server.key
 ```
 
+### 5. 外发投递基线配置（2026-03）
+
+如果你要直连主流邮箱的 MX 进行外发投递（MTA -> MTA），建议使用如下配置：
+
+```json
+{
+      "system_domain": "mail.hgmail.xin",
+      "outbound_helo_domain": "mail.hgmail.xin",
+      "outbound_mail_from_domain": "mail.hgmail.xin",
+      "outbound_dkim_enabled": true,
+      "outbound_dkim_selector": "default",
+      "outbound_dkim_domain": "mail.hgmail.xin",
+      "outbound_ports": [25]
+}
+```
+
+说明：
+- 外网投递通常走 25 端口，若对端支持则 STARTTLS 升级 TLS。
+- 465/587 通常用于客户端提交（submission），不是 MTA 直连 MX 的默认端口。
+- 域名认证建议保持一致：SPF + DKIM + PTR（建议加 DMARC）。
+
+建议验证命令：
+```bash
+dig +short TXT mail.hgmail.xin
+dig +short TXT default._domainkey.mail.hgmail.xin
+dig +short TXT _dmarc.mail.hgmail.xin
+dig +short -x 8.134.123.121
+```
+
+### 6. 投递演示视频
+
+QQ 邮箱 -> 本邮件系统的演示视频：
+
+- 外链（Release/对象存储）：`<替换为公开视频URL>`
+
+
 ## 🎯 启动服务器
 
 ### 1. 创建必要的目录

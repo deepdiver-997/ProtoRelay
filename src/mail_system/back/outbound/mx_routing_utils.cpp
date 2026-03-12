@@ -63,16 +63,27 @@ std::vector<std::string> build_target_hosts(const OutboxRecord& record,
                 }
             }
         }
+
+        // RFC 5321 implicit MX fallback: when no MX hosts were found,
+        // treat the recipient domain itself as the mail host target.
+        if (hosts_v4.empty() && hosts_v6.empty()) {
+            auto addresses = resolver->resolve_host_addresses(domain);
+            for (const auto& addr : addresses) {
+                if (!addr.empty() && unique_hosts.insert(addr).second) {
+                    if (is_ipv6_literal(addr)) {
+                        hosts_v6.push_back(addr);
+                    } else {
+                        hosts_v4.push_back(addr);
+                    }
+                }
+            }
+        }
     }
 
     std::vector<std::string> hosts;
     hosts.reserve(hosts_v4.size() + hosts_v6.size());
     hosts.insert(hosts.end(), hosts_v4.begin(), hosts_v4.end());
     hosts.insert(hosts.end(), hosts_v6.begin(), hosts_v6.end());
-
-    if (hosts.empty()) {
-        hosts.push_back("127.0.0.1");
-    }
 
     return hosts;
 }
