@@ -118,7 +118,7 @@ dig +short -x 8.134.123.121
 ### Demo Video
 QQ -> Mail System delivery demo recording:
 
- External demo link (Release/Object Storage): `<replace-with-public-url>`
+ External demo link (Release/Object Storage): 'https://github.com/deepdiver-997/my-mail-system/releases/download/untagged-84194e441e1284d1b9bc/2026-03-10.14.15.08.mov'
 
 ### TLS
 mkdir -p config/crt

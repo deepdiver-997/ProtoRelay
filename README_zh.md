@@ -285,7 +285,7 @@ dig +short -x 8.134.123.121
 
 QQ 邮箱 -> 本邮件系统的演示视频：
 
-- 外链（Release/对象存储）：`<替换为公开视频URL>`
+- 外链（Release/对象存储）：'https://github.com/deepdiver-997/my-mail-system/releases/download/untagged-84194e441e1284d1b9bc/2026-03-10.14.15.08.mov'
 
 
 ## 🎯 启动服务器
