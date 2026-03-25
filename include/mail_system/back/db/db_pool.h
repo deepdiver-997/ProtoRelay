@@ -46,6 +46,22 @@ protected:
 
 // 数据库连接池配置
 struct DBPoolConfig {
+    struct NodeConfig {
+        std::string name;
+        std::string host;
+        std::string user;
+        std::string password;
+        std::string database;
+        unsigned int port;
+        size_t weight;
+        bool enabled;
+
+        NodeConfig()
+            : port(3306),
+              weight(1),
+              enabled(true) {}
+    };
+
     std::string achieve;
     std::string host;
     std::string user;
@@ -57,13 +73,16 @@ struct DBPoolConfig {
     size_t max_pool_size;
     unsigned int connection_timeout;
     unsigned int idle_timeout;
+    unsigned int distributed_node_retry_interval;
+    std::vector<NodeConfig> nodes;
 
     DBPoolConfig()
         : port(3306),
           initial_pool_size(5),
           max_pool_size(10),
           connection_timeout(5),
-          idle_timeout(60) {}
+          idle_timeout(60),
+          distributed_node_retry_interval(5) {}
     void show() const {
         std::cout << "DBPoolConfig: "
                   << "\n\tachieve = " << achieve
@@ -76,7 +95,20 @@ struct DBPoolConfig {
                   << "\n\tmax_pool_size = " << max_pool_size
                   << "\n\tconnection_timeout = " << connection_timeout
                   << "\n\tidle_timeout = " << idle_timeout
+                  << "\n\tdistributed_node_retry_interval = " << distributed_node_retry_interval
+                  << "\n\tnodes = " << nodes.size()
                   << std::endl;
+
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const auto& node = nodes[i];
+            std::cout << "\t[" << i << "] name=" << node.name
+                      << ", host=" << node.host
+                      << ", port=" << node.port
+                      << ", database=" << node.database
+                      << ", weight=" << node.weight
+                      << ", enabled=" << (node.enabled ? "true" : "false")
+                      << std::endl;
+        }
     }
 
     std::string resolve_path(const std::string& config_path, const std::string& relative_path) {
@@ -112,6 +144,31 @@ struct DBPoolConfig {
         max_pool_size = json.value("max_pool_size", max_pool_size);
         connection_timeout = json.value("connection_timeout", connection_timeout);
         idle_timeout = json.value("idle_timeout", idle_timeout);
+        distributed_node_retry_interval =
+            json.value("distributed_node_retry_interval", distributed_node_retry_interval);
+
+        if (json.contains("nodes") && json["nodes"].is_array()) {
+            nodes.clear();
+            for (const auto& item : json["nodes"]) {
+                if (!item.is_object()) {
+                    continue;
+                }
+
+                NodeConfig node;
+                node.name = item.value("name", std::string());
+                node.host = item.value("host", host);
+                node.user = item.value("user", user);
+                node.password = item.value("password", password);
+                node.database = item.value("database", database);
+                node.port = item.value("port", port);
+                node.weight = item.value("weight", static_cast<size_t>(1));
+                node.enabled = item.value("enabled", true);
+
+                if (!node.host.empty() && node.enabled) {
+                    nodes.push_back(node);
+                }
+            }
+        }
         return true;
     }
 };

@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.10)
-project(mail_system LANGUAGES CXX)
+project(ProtoRelay LANGUAGES CXX)
 
-# Set policy to use CMake's newer FindBoost behavior (suppress dev warning on newer CMake)
+set(PROTORELAY_VERSION "0.1.0-dev" CACHE STRING "ProtoRelay semantic version")
+
+# Prefer classic FindBoost module behavior to avoid Homebrew BoostConfig
+# component resolution issues on macOS.
 if(POLICY CMP0167)
-    cmake_policy(SET CMP0167 NEW)
+    cmake_policy(SET CMP0167 OLD)
 endif()
 
 # ===== 构建配置 =====
@@ -17,6 +20,53 @@ option(USE_SSL "Enable SSL/TLS support" ON)
 option(ENABLE_DEBUG_LOGS "Enable debug logs for all modules" OFF)
 option(BUILD_OBJECT_ONLY "Compile object files only and skip final executable link" OFF)
 option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check before DB insert" ON)
+option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage provider (requires libcurl)" ON)
+
+if(USE_SSL)
+    set(PROTORELAY_FEATURE_SSL 1)
+else()
+    set(PROTORELAY_FEATURE_SSL 0)
+endif()
+
+if(ENABLE_INBOUND_DEDUP_CHECK)
+    set(PROTORELAY_FEATURE_INBOUND_DEDUP 1)
+else()
+    set(PROTORELAY_FEATURE_INBOUND_DEDUP 0)
+endif()
+
+if(BUILD_OBJECT_ONLY)
+    set(PROTORELAY_FEATURE_OBJECT_ONLY 1)
+else()
+    set(PROTORELAY_FEATURE_OBJECT_ONLY 0)
+endif()
+
+if(ENABLE_HDFS_WEB_STORAGE)
+    set(PROTORELAY_FEATURE_HDFS_WEB 1)
+    add_compile_definitions(PROTORELAY_ENABLE_HDFS_WEB_STORAGE=1)
+else()
+    set(PROTORELAY_FEATURE_HDFS_WEB 0)
+    add_compile_definitions(PROTORELAY_ENABLE_HDFS_WEB_STORAGE=0)
+endif()
+
+string(TIMESTAMP PROTORELAY_BUILD_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(PROTORELAY_BUILD_TARGET "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+set(PROTORELAY_COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+execute_process(
+    COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short=12 HEAD
+    OUTPUT_VARIABLE PROTORELAY_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT PROTORELAY_GIT_COMMIT)
+    set(PROTORELAY_GIT_COMMIT "unknown")
+endif()
+
+configure_file(
+    "${CMAKE_SOURCE_DIR}/include/mail_system/back/version/build_info.h.in"
+    "${CMAKE_BINARY_DIR}/generated/build_info.h"
+    @ONLY
+)
 
 # Object-only artifacts are often linked on a different machine where libfmt
 # version may differ. Keep fmt implementation header-only to avoid ABI mismatch.
@@ -101,13 +151,17 @@ endif()
 # -----------------------------
 # 依赖查找（尽量自动化、跨平台）
 # -----------------------------
-# Object-only mode only needs headers at configure stage; full link libs are required otherwise.
-if(BUILD_OBJECT_ONLY)
-    find_package(Boost REQUIRED)
-else()
-    find_package(Boost REQUIRED COMPONENTS system thread)
-endif()
+# Homebrew Boost 1.90+ may ship BoostConfig without per-component config files
+# (e.g. boost_systemConfig.cmake), so prefer classic FindBoost module mode.
+set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "Disable BoostConfig package mode" FORCE)
+
+# This project uses Boost headers (asio/beast/etc.) and std::thread; avoid
+# requiring optional Boost binary components that may be absent in Homebrew.
+find_package(Boost REQUIRED)
 find_package(spdlog REQUIRED)
+if(ENABLE_HDFS_WEB_STORAGE)
+    find_package(CURL REQUIRED)
+endif()
 
 if(USE_SSL)
     if(BUILD_OBJECT_ONLY)
@@ -245,20 +299,30 @@ endif()
 # 源文件列表
 # -----------------------------
 set(COMMON_SRCS
+    src/mail_system/back/cli/help_text.cpp
+    src/mail_system/back/db/distributed_mysql_pool.cpp
     src/mail_system/back/db/mysql_pool.cpp
     src/mail_system/back/db/mysql_service.cpp
     src/mail_system/back/mailServer/server_base.cpp
     src/mail_system/back/thread_pool/boost_thread_pool.cpp
     src/mail_system/back/thread_pool/io_thread_pool.cpp
     src/mail_system/back/algorithm/snow.cpp
+    src/mail_system/back/storage/distributed_file_storage_provider.cpp
+    src/mail_system/back/storage/local_file_storage_provider.cpp
     src/mail_system/back/outbound/outbox_repository.cpp
     src/mail_system/back/outbound/smtp_outbound_client.cpp
     src/mail_system/back/outbound/outbound_utils.cpp
     src/mail_system/back/outbound/mx_routing_utils.cpp
     src/mail_system/back/outbound/cares_dns_resolver.cpp
-    src/smtp_utils.cpp
-    src/persistent_queue.cpp
+    src/mail_system/back/algorithm/smtp_utils.cpp
+    src/mail_system/back/persist_storage/persistent_queue.cpp
 )
+
+if(ENABLE_HDFS_WEB_STORAGE)
+    list(APPEND COMMON_SRCS
+        src/mail_system/back/storage/hdfs_web_storage_provider.cpp
+    )
+endif()
 
 set(SMTP_SRCS
     ${COMMON_SRCS}
@@ -300,6 +364,7 @@ endif()
 # -----------------------------
 # 项目头
 target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_BINARY_DIR}/generated")
 
 # spdlog
 if(spdlog_FOUND)
@@ -341,6 +406,10 @@ if(USE_SSL)
     endif()
 endif()
 
+if(ENABLE_HDFS_WEB_STORAGE AND CURL_FOUND)
+    target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${CURL_INCLUDE_DIRS})
+endif()
+
 # -----------------------------
 # 链接依赖（显式链接，避免 link_directories）
 # -----------------------------
@@ -357,7 +426,13 @@ if(NOT BUILD_OBJECT_ONLY AND NOT MYSQL_LIBRARIES)
 endif()
 
 # 根据SSL选项链接不同的库
-set(LINK_LIBRARIES ${Boost_LIBRARIES} Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} spdlog::spdlog)
+set(LINK_LIBRARIES Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} spdlog::spdlog)
+
+if(ENABLE_HDFS_WEB_STORAGE AND TARGET CURL::libcurl)
+    list(APPEND LINK_LIBRARIES CURL::libcurl)
+elseif(ENABLE_HDFS_WEB_STORAGE AND CURL_LIBRARIES)
+    list(APPEND LINK_LIBRARIES ${CURL_LIBRARIES})
+endif()
 
 # GCC < 9 may require explicit filesystem runtime library.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)

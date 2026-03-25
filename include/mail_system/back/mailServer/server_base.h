@@ -18,6 +18,7 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/outbound/smtp_outbound_client.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 // #include "mail_system/back/mailServer/session/session_base.h"
 
 // #include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
@@ -54,8 +55,6 @@ public:
     void stop(ServerState state = ServerState::Pausing);
     // 是否正在运行
     ServerState get_state() const;
-    // 发送异步响应
-    void send_async_response(std::weak_ptr<SessionBase> session, const std::string& response);
 
     void pass_stream(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket) {
         this->handle_accept(std::move(ssl_socket), boost::system::error_code());
@@ -75,20 +74,7 @@ protected:
     virtual void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket, const boost::system::error_code& error) = 0;
     // virtual void handle_ssl_connection() = 0;
     virtual void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket, const boost::system::error_code& error) = 0;
-    // 异步连接到指定服务器
-    void async_ssl_connect(
-        const std::string& host, 
-        int port, 
-        std::function<void(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&&, const boost::system::error_code&)> handler
-    );
-    // 转发邮件
-    void start_forward_email(std::shared_ptr<mail> email);
-    // 转发邮件（unique_ptr版本）
-    void start_forward_email(mail* email);
-    // 加载已知域名
-    void load_known_domains(const char* domain_file);
-    // 获取连接
-    // boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& get_connection();
+
 public:
     // 获取IO上下文
     std::shared_ptr<boost::asio::io_context> get_io_context();
@@ -108,6 +94,7 @@ public:
     std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;
     std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
     std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
+    std::shared_ptr<storage::IStorageProvider> m_storageProvider;
     // std::shared_ptr<ClientFSM> m_client_fsm;
     bool ssl_in_worker;
     std::string m_domain;

@@ -87,7 +87,7 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::unique_ptr<Sess
             timer->expires_after(std::chrono::milliseconds(100));
             timer->async_wait([s = std::move(s), timer](const boost::system::error_code& ec) mutable {
                 if (!ec) {
-                    LOG_SMTP_DETAIL_INFO("Closing connection after QUIT");
+                    LOG_SMTP_DETAIL_DEBUG("Closing connection after QUIT");
                     s->close();
                 }
             });
@@ -296,7 +296,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_init_connect(
                 return;
             }
             self->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
-            LOG_SMTP_DETAIL_INFO("Sent greeting, waiting for EHLO...");
+            LOG_SMTP_DETAIL_DEBUG("Sent greeting, waiting for EHLO...");
             SessionBase<ConnectionType>::do_async_read(std::move(self), [] (
                 std::unique_ptr<SessionBase<ConnectionType>> s,
                 const boost::system::error_code& error,
@@ -319,7 +319,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     const std::string& args
 ) {
     LOG_SMTP_DETAIL_DEBUG("Received EHLO: {}", args);
-    LOG_SMTP_DETAIL_INFO("EHLO accepted: state={}, args=[{}]",
+    LOG_SMTP_DETAIL_DEBUG("EHLO accepted: state={}, args=[{}]",
                          SmtpsFsm<ConnectionType>::get_state_name(
                              static_cast<SmtpsState>(session->get_current_state())),
                          args);
@@ -345,7 +345,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
                 LOG_SMTP_DETAIL_ERROR("Error sending EHLO response: {}", ec.message());
                 return;
             }
-            LOG_SMTP_DETAIL_INFO("EHLO response sent, switching to WAIT_AUTH");
+            LOG_SMTP_DETAIL_DEBUG("EHLO response sent, switching to WAIT_AUTH");
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
             SessionBase<ConnectionType>::do_async_read(std::move(s), [] (
                 std::unique_ptr<SessionBase<ConnectionType>> sss,
@@ -371,7 +371,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
     SessionBase<ConnectionType>::do_async_write(
         std::move(session),
         "220 Ready to start TLS\r\n",
-        [this](std::unique_ptr<SessionBase<ConnectionType>> self,
+        [](std::unique_ptr<SessionBase<ConnectionType>> self,
                  const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS response: {}", ec.message());
@@ -523,14 +523,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     std::unique_ptr<SessionBase<ConnectionType>> session,
     const std::string& args
 ) {
-    LOG_SMTP_DETAIL_INFO("MAIL FROM received: state={}, args=[{}]",
+    LOG_SMTP_DETAIL_DEBUG("MAIL FROM received: state={}, args=[{}]",
                          SmtpsFsm<ConnectionType>::get_state_name(
                              static_cast<SmtpsState>(session->get_current_state())),
                          args);
     std::regex mail_from_regex(R"(FROM:\s*<([^>]*)>)", std::regex_constants::icase);
     std::smatch matches;
     if (std::regex_search(args, matches, mail_from_regex) && matches.size() > 1) {
-        LOG_SMTP_DETAIL_INFO("MAIL FROM accepted: sender={}", matches[1].str());
+        LOG_SMTP_DETAIL_DEBUG("MAIL FROM accepted: sender={}", matches[1].str());
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         ctx->sender_address = matches[1];
         // New MAIL FROM starts/restarts the envelope transaction.
@@ -858,10 +858,19 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
 ) {
     LOG_SMTP_DETAIL_DEBUG("Entered handle_wait_quit_quit");
     auto client_ip = session->get_client_ip();
-    LOG_SMTP_DETAIL_INFO("QUIT from {}", client_ip);
-    // this->m_workerThreadPool->post(make_copyable([this, session = std::move(session)]() mutable {
-    //     persist_and_reply(std::move(session));
-    // }));
+    LOG_SMTP_DETAIL_DEBUG("QUIT from {}", client_ip);
+    SessionBase<ConnectionType>::do_async_write(
+        std::move(session),
+        "221 Bye\r\n",
+        [] (std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            if (ec) {
+                LOG_SMTP_DETAIL_ERROR("Error sending QUIT reply: {}", ec.message());
+            }
+            if (s) {
+                s->close();
+            }
+        }
+    );
 }
 
 template <typename ConnectionType>

@@ -32,5 +32,14 @@
   "max_auth_attempts": 3,
   
   "log_level": "info",
-  "log_file": "logs/server.log"
+  "log_file": "logs/server.log",
+  "storage_provider": "distributed",
+  "distributed_storage_replica_count": 2,
+  "distributed_storage_roots": [
+    "../mail_node_a",
+    "../mail_node_b",
+    "../mail_node_c"
+  ],
+  "mail_storage_path": "../mail/",
+  "attachment_storage_path": "../attachments/"
 }

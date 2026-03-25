@@ -24,6 +24,7 @@ struct OutboxRecord {
     std::uint64_t mail_id{0};
     std::string sender;
     std::string recipient;
+    std::string body_path;
     int attempt_count{0};
     int max_attempts{8};
 };

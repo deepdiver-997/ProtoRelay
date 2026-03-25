@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <unordered_map>
@@ -125,6 +126,125 @@ std::string normalize_body_simple(const std::string& body) {
     return oss.str();
 }
 
+std::string read_file_all(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        return {};
+    }
+
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+std::string normalize_for_smtp_data(const std::string& raw) {
+    if (raw.empty()) {
+        return {};
+    }
+
+    std::ostringstream out;
+    std::size_t i = 0;
+    while (i < raw.size()) {
+        std::size_t j = i;
+        while (j < raw.size() && raw[j] != '\n' && raw[j] != '\r') {
+            ++j;
+        }
+
+        std::string line = raw.substr(i, j - i);
+        if (!line.empty() && line.front() == '.') {
+            out << '.';
+        }
+        out << line << "\r\n";
+
+        if (j >= raw.size()) {
+            break;
+        }
+
+        if (raw[j] == '\r' && (j + 1) < raw.size() && raw[j + 1] == '\n') {
+            i = j + 2;
+        } else {
+            i = j + 1;
+        }
+    }
+
+    return out.str();
+}
+
+bool split_rfc5322_message(const std::string& raw,
+                          std::string& header_block,
+                          std::string& body_block) {
+    std::size_t split_pos = raw.find("\r\n\r\n");
+    std::size_t sep_len = 4;
+    if (split_pos == std::string::npos) {
+        split_pos = raw.find("\n\n");
+        sep_len = 2;
+    }
+    if (split_pos == std::string::npos) {
+        return false;
+    }
+
+    header_block = raw.substr(0, split_pos);
+    body_block = raw.substr(split_pos + sep_len);
+    return true;
+}
+
+std::unordered_map<std::string, std::string> parse_headers_relaxed_map(const std::string& header_block) {
+    std::unordered_map<std::string, std::string> headers;
+    std::istringstream iss(header_block);
+    std::string line;
+    std::string current_key;
+
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+            if (!current_key.empty()) {
+                headers[current_key] += " " + trim_ascii_ws(line);
+            }
+            continue;
+        }
+
+        const auto pos = line.find(':');
+        if (pos == std::string::npos) {
+            continue;
+        }
+
+        current_key = to_lower_copy(trim_ascii_ws(line.substr(0, pos)));
+        headers[current_key] = trim_ascii_ws(line.substr(pos + 1));
+    }
+
+    return headers;
+}
+
+std::vector<std::string> pick_present_headers_for_dkim(const std::unordered_map<std::string, std::string>& headers) {
+    static const std::vector<std::string> preferred = {
+        "from",
+        "to",
+        "subject",
+        "date",
+        "message-id",
+        "mime-version",
+        "content-type",
+        "content-transfer-encoding",
+        "reply-to",
+    };
+
+    std::vector<std::string> picked;
+    picked.reserve(preferred.size());
+    for (const auto& h : preferred) {
+        if (headers.find(h) != headers.end()) {
+            picked.push_back(h);
+        }
+    }
+    return picked;
+}
+
 std::string base64_encode(const unsigned char* data, std::size_t size) {
     if (size == 0) {
         return {};
@@ -222,7 +342,8 @@ std::string join_header_names_colon(const std::vector<std::string>& names) {
 std::string build_dkim_header(const std::unordered_map<std::string, std::string>& headers,
                               const std::string& canonical_body,
                               const OutboundIdentityConfig& identity_config,
-                              std::string& error_out) {
+                              std::string& error_out,
+                              const std::vector<std::string>* signed_headers_override = nullptr) {
     const std::string selector = trim_ascii_ws(identity_config.dkim_selector);
     const std::string domain = trim_ascii_ws(identity_config.dkim_domain);
     const std::string key_file = trim_ascii_ws(identity_config.dkim_private_key_file);
@@ -231,7 +352,7 @@ std::string build_dkim_header(const std::unordered_map<std::string, std::string>
         return {};
     }
 
-    static const std::vector<std::string> signed_headers = {
+    static const std::vector<std::string> default_signed_headers = {
         "from",
         "to",
         "subject",
@@ -242,6 +363,11 @@ std::string build_dkim_header(const std::unordered_map<std::string, std::string>
         "content-transfer-encoding",
         "reply-to",
     };
+
+    const std::vector<std::string>& signed_headers =
+        (signed_headers_override && !signed_headers_override->empty())
+            ? *signed_headers_override
+            : default_signed_headers;
 
     const std::string body_hash = sha256_base64(canonical_body);
     if (body_hash.empty()) {
@@ -285,12 +411,60 @@ std::string build_outbound_message(const OutboxRecord& record,
                                    const std::string& header_from,
                                    const OutboundIdentityConfig& identity_config,
                                    bool* dkim_applied,
-                                   std::string* dkim_error) {
+                                   std::string* dkim_error,
+                                   std::string* message_id_out) {
     if (dkim_applied) {
         *dkim_applied = false;
     }
     if (dkim_error) {
         dkim_error->clear();
+    }
+
+    const std::string raw_payload = read_file_all(record.body_path);
+    if (!raw_payload.empty()) {
+        std::string outbound_raw = raw_payload;
+
+        std::string header_block;
+        std::string body_block;
+        if (split_rfc5322_message(raw_payload, header_block, body_block)) {
+            auto raw_headers = parse_headers_relaxed_map(header_block);
+            if (message_id_out) {
+                auto it_mid = raw_headers.find("message-id");
+                if (it_mid != raw_headers.end()) {
+                    *message_id_out = it_mid->second;
+                }
+            }
+
+            if (identity_config.dkim_enabled) {
+                auto signed_headers = pick_present_headers_for_dkim(raw_headers);
+                if (raw_headers.find("from") == raw_headers.end()) {
+                    if (dkim_error) {
+                        *dkim_error = "missing header for DKIM signing: from";
+                    }
+                } else {
+                    std::string local_dkim_error;
+                    const std::string dkim_header = build_dkim_header(
+                        raw_headers,
+                        normalize_body_simple(body_block),
+                        identity_config,
+                        local_dkim_error,
+                        &signed_headers);
+                    if (!dkim_header.empty()) {
+                        if (dkim_applied) {
+                            *dkim_applied = true;
+                        }
+                        outbound_raw = dkim_header + header_block + "\r\n\r\n" + body_block;
+                    } else if (dkim_error) {
+                        *dkim_error = std::move(local_dkim_error);
+                    }
+                }
+            }
+        }
+
+        const std::string normalized_payload = normalize_for_smtp_data(outbound_raw);
+        if (!normalized_payload.empty()) {
+            return normalized_payload + ".\r\n";
+        }
     }
 
     const std::string subject = "Outbound relay test";
@@ -299,6 +473,9 @@ std::string build_outbound_message(const OutboxRecord& record,
     const std::string reply_to_value = "<" + record.sender + ">";
     const std::string date_value = format_rfc5322_date_utc();
     const std::string message_id = build_message_id(record);
+    if (message_id_out) {
+        *message_id_out = message_id;
+    }
     const std::string mime_version = "1.0";
     const std::string content_type = "text/plain; charset=UTF-8";
     const std::string content_transfer_encoding = "8bit";

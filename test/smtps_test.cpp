@@ -1,4 +1,5 @@
 #include "mail_system/back/mailServer/smtps_server.h"
+#include "mail_system/back/cli/help_text.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>
@@ -20,36 +21,56 @@ using namespace mail_system;
 namespace {
 constexpr const char* kDefaultConfigPath = "config/smtpsConfig.json";
 
-void print_usage(const char* program_name) {
-    std::cout << "Usage: " << program_name << " [config_path]\n"
-              << "       " << program_name << " -c <config_path>\n"
-              << "       " << program_name << " --config <config_path>\n";
-}
+struct CliOptions {
+    std::string config_path = kDefaultConfigPath;
+    bool show_help = false;
+    bool show_version = false;
+};
 
-bool resolve_config_path(int argc, char* argv[], std::string& config_path) {
-    config_path = kDefaultConfigPath;
-    if (argc <= 1) {
-        return true;
-    }
+bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string& error) {
+    bool positional_config_set = false;
 
-    const std::string first_arg = argv[1] ? argv[1] : "";
-    if (first_arg == "-h" || first_arg == "--help") {
-        print_usage(argv[0]);
-        return false;
-    }
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i] ? argv[i] : "";
+        if (arg.empty()) {
+            continue;
+        }
 
-    if (first_arg == "-c" || first_arg == "--config") {
-        if (argc < 3 || argv[2] == nullptr) {
-            std::cerr << "Missing config path after " << first_arg << "\n";
-            print_usage(argv[0]);
+        if (arg == "-h" || arg == "--help") {
+            options.show_help = true;
+            return true;
+        }
+
+        if (arg == "-V" || arg == "--version") {
+            options.show_version = true;
+            return true;
+        }
+
+        if (arg == "-c" || arg == "--config") {
+            if (i + 1 >= argc || argv[i + 1] == nullptr) {
+                error = "Missing config path after " + arg;
+                return false;
+            }
+            options.config_path = argv[++i];
+            positional_config_set = true;
+            continue;
+        }
+
+        if (!arg.empty() && arg[0] == '-') {
+            error = "Unknown option: " + arg;
             return false;
         }
-        config_path = argv[2];
-        return true;
+
+        if (positional_config_set) {
+            error = "Only one config path is allowed";
+            return false;
+        }
+
+        // Backward-compatible: first positional arg is config path.
+        options.config_path = arg;
+        positional_config_set = true;
     }
 
-    // Backward-compatible: treat the first positional arg as config path.
-    config_path = first_arg;
     return true;
 }
 }
@@ -67,6 +88,24 @@ void signal_handler(int signal) {
 }
 
 int main(int argc, char* argv[]) {
+    CliOptions options;
+    std::string parse_error;
+    if (!parse_cli_options(argc, argv, options, parse_error)) {
+        std::cerr << parse_error << "\n\n";
+        std::cerr << cli::render_help_text(argv[0]);
+        return 2;
+    }
+
+    if (options.show_help) {
+        std::cout << cli::render_help_text(argv[0]);
+        return 0;
+    }
+
+    if (options.show_version) {
+        std::cout << cli::render_version_text();
+        return 0;
+    }
+
     // 注册信号处理
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -75,13 +114,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Remember to execute 'sudo setcap 'cap_net_bind_service=+ep' " << argv[0] << "' to allow binding to privileged ports without running as root." << std::endl;
     #endif
 
-    std::cout << "SMTPS Server V7 Starting..." << std::endl;
+    std::cout << "ProtoRelay starting..." << std::endl;
 
     try {
-        std::string config_path;
-        if (!resolve_config_path(argc, argv, config_path)) {
-            return 1;
-        }
+        std::string config_path = options.config_path;
 
         // 加载配置
         ServerConfig config;
@@ -95,7 +131,9 @@ int main(int argc, char* argv[]) {
             config.log_file,
             1024 * 1024 * 5,
             3,
-            Logger::string_to_level(config.log_level)
+            Logger::string_to_level(config.log_level),
+            config.log_to_console,
+            config.log_to_file
         );
         LOG_SERVER_INFO("Loaded config file: {}", config_path);
         std::cout << "config:\n";

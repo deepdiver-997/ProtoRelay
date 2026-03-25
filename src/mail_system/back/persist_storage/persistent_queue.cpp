@@ -24,6 +24,36 @@ std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_inbound
 
 namespace {
 
+class ScopedMySQLConnection {
+public:
+    explicit ScopedMySQLConnection(const std::shared_ptr<DBPool>& pool)
+        : pool_(pool) {
+        if (pool_) {
+            raw_connection_ = pool_->get_connection();
+            mysql_connection_ = std::dynamic_pointer_cast<MySQLConnection>(raw_connection_);
+        }
+    }
+
+    ~ScopedMySQLConnection() {
+        if (pool_ && raw_connection_) {
+            pool_->release_connection(raw_connection_);
+        }
+    }
+
+    MySQLConnection* get() const {
+        return mysql_connection_.get();
+    }
+
+    bool is_valid() const {
+        return mysql_connection_ && mysql_connection_->is_connected();
+    }
+
+private:
+    std::shared_ptr<DBPool> pool_;
+    std::shared_ptr<IDBConnection> raw_connection_;
+    std::shared_ptr<MySQLConnection> mysql_connection_;
+};
+
 std::string extract_domain_lower(const std::string& email) {
     const auto at_pos = email.find('@');
     if (at_pos == std::string::npos || at_pos + 1 >= email.size()) {
@@ -49,7 +79,7 @@ int recipient_status_for_domain(const std::string& recipient,
 PersistentQueue::PersistentQueue(
     std::shared_ptr<DBPool> db_pool,
     std::shared_ptr<ThreadPoolBase> worker_pool
-) : db_pool_(db_pool), worker_pool_(worker_pool), shutdown_(false), current_task_count_(0) {
+) : db_pool_(db_pool), worker_pool_(worker_pool), current_task_count_(0), shutdown_(false) {
     // 启动工作线程
     worker_thread_ = std::thread(&PersistentQueue::worker_loop, this);
     LOG_PERSISTENT_QUEUE_INFO("PersistentQueue initialized and worker thread started");
@@ -126,10 +156,9 @@ void PersistentQueue::delete_task(mail* mail_data) {
         return;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    auto connection = mysql_pool->get_raii_connection();
-    auto conn = connection.get();
-    if (!conn || !conn->is_connected()) {
+    ScopedMySQLConnection connection(db_pool_);
+    auto* conn = connection.get();
+    if (!connection.is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for deleting mail ID {}", mail_data->id);
         return;
     }
@@ -152,7 +181,7 @@ void PersistentQueue::delete_task(mail* mail_data) {
         LOG_PERSISTENT_QUEUE_ERROR("Exception during delete_task for mail ID {}: {}", 
                                   mail_data->id, e.what());
     }
-    // RAIIConnection 析构时自动释放连接
+    // ScopedMySQLConnection 析构时自动释放连接
 }
 
 void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
@@ -160,10 +189,9 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
         return;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    auto connection = mysql_pool->get_raii_connection();
-    auto conn = connection.get();
-    if (!conn || !conn->is_connected()) {
+    ScopedMySQLConnection connection(db_pool_);
+    auto* conn = connection.get();
+    if (!connection.is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for batch delete");
         return;
     }
@@ -198,7 +226,7 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
     } catch (const std::exception& e) {
         LOG_PERSISTENT_QUEUE_ERROR("Exception during delete_multi_tasks: {}", e.what());
     }
-    // RAIIConnection 析构时自动释放连接
+    // ScopedMySQLConnection 析构时自动释放连接
 }
 
 size_t PersistentQueue::queue_size() const {
@@ -251,6 +279,24 @@ bool PersistentQueue::process_task() {
 
         mail_data->persist_status = PersistStatus::PROCESSING;
 
+        ScopedMySQLConnection scoped_conn(db_pool_);
+        auto* conn = scoped_conn.get();
+        if (!scoped_conn.is_valid()) {
+            mail_data->persist_status = PersistStatus::FAILED;
+            LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for message-id dedup check, mail_id={}",
+                                       mail_data->id);
+            return;
+        }
+
+        if (is_duplicate_by_source_message_id(mail_data, conn)) {
+            mail_data->deduplicated_inbound = true;
+            mail_data->persist_status = PersistStatus::SUCCESS;
+            LOG_PERSISTENT_QUEUE_INFO("Message-ID dedup hit, skip all persistence for mail_id={}, message_id=[{}]",
+                                     mail_data->id,
+                                     mail_data->source_message_id);
+            return;
+        }
+
         if (!batch_insert_attachments(mail_data, error)) {
             LOG_PERSISTENT_QUEUE_ERROR("Failed to insert attachments for mail ID {}: {}", mail_data->id, error);
             success = false;
@@ -284,26 +330,15 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error)
         return false;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    auto connection = mysql_pool->get_raii_connection();
-    auto conn = std::dynamic_pointer_cast<MySQLConnection>(connection.get());
-    if (!conn || !conn->is_connected()) {
+    ScopedMySQLConnection connection(db_pool_);
+    auto* conn = connection.get();
+    if (!connection.is_valid()) {
         error = "Failed to get database connection";
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for mail ID {}", mail_data->id);
         return false;
     }
 
     try {
-#if ENABLE_INBOUND_DEDUP_CHECK
-        if (is_probable_duplicate_mail(mail_data, conn.get())) {
-            mail_data->deduplicated_inbound = true;
-            LOG_PERSISTENT_QUEUE_INFO("Dedup hit before DB insert, mail_id={}, message_id=[{}]",
-                                     mail_data->id,
-                                     mail_data->source_message_id);
-            return true;
-        }
-#endif
-
         // 第一步：插入邮件元数据到 mails 表
         std::string mail_sql = "INSERT INTO mails (id, subject, body_path) VALUES (" +
                               std::to_string(mail_data->id) + ", '" +
@@ -318,13 +353,15 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error)
 
         // 第二步：插入邮件收发件人关系到 mail_recipients 表
         // 一份邮件可能有多个收件人，所以为每个收件人插入一条关系记录
-        std::string recipient_sql = "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status) VALUES";
+        std::string recipient_sql = "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status, source_message_id) VALUES";
+        const std::string source_message_id = conn->escape_string(mail_data->source_message_id);
         for (size_t i = 0; i < mail_data->to.size(); ++i) {
             recipient_sql += " (" + std::to_string(mail_data->ids[i]) + ", " +
                             std::to_string(mail_data->id) + ", '" +
                             conn->escape_string(mail_data->from) + "', '" +
                             conn->escape_string(mail_data->to[i]) +
-                            "', " + std::to_string(recipient_status_for_domain(mail_data->to[i], local_domain_)) + "),";
+                            "', " + std::to_string(recipient_status_for_domain(mail_data->to[i], local_domain_)) +
+                            ", '" + source_message_id + "'),";
         }
         recipient_sql[recipient_sql.size() - 1] = ';'; // 替换最后一个逗号为分号
         
@@ -346,7 +383,7 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, std::string& error)
                                   mail_data->id, e.what());
         return false;
     }
-    // RAIIConnection 析构时自动释放连接
+    // ScopedMySQLConnection 析构时自动释放连接
 }
 
 #if ENABLE_INBOUND_DEDUP_CHECK
@@ -443,15 +480,39 @@ bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, MySQLConnectio
 }
 #endif
 
+bool PersistentQueue::is_duplicate_by_source_message_id(mail* mail_data, MySQLConnection* conn) {
+    if (!mail_data || !conn || mail_data->source_message_id.empty() || mail_data->to.empty()) {
+        return false;
+    }
+
+    const std::string sender = conn->escape_string(mail_data->from);
+    const std::string message_id = conn->escape_string(mail_data->source_message_id);
+
+    for (const auto& recipient_raw : mail_data->to) {
+        const std::string recipient = conn->escape_string(recipient_raw);
+        const std::string sql =
+            "SELECT 1 FROM mail_recipients "
+            "WHERE sender='" + sender + "' "
+            "AND recipient='" + recipient + "' "
+            "AND source_message_id='" + message_id + "' "
+            "LIMIT 1";
+        auto result = conn->query(sql);
+        if (!(result && result->get_row_count() > 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool PersistentQueue::batch_insert_attachments(mail* mail_data, std::string& error) {
     if (!mail_data || mail_data->attachments.empty()) {
         return true; // 没有附件不算错误
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    auto connection = mysql_pool->get_raii_connection();
-    auto conn = std::dynamic_pointer_cast<MySQLConnection>(connection.get());
-    if (!conn || !conn->is_connected()) {
+    ScopedMySQLConnection connection(db_pool_);
+    auto* conn = connection.get();
+    if (!connection.is_valid()) {
         error = "Failed to get database connection for attachments";
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for attachments of mail ID {}", mail_data->id);
         return false;
@@ -488,7 +549,7 @@ bool PersistentQueue::batch_insert_attachments(mail* mail_data, std::string& err
                                   mail_data->id, e.what());
         return false;
     }
-    // RAIIConnection 析构时自动释放连接
+    // ScopedMySQLConnection 析构时自动释放连接
 }
 
 bool PersistentQueue::batch_delete_metadata(mail* mail_data, std::string& error) {
@@ -497,10 +558,9 @@ bool PersistentQueue::batch_delete_metadata(mail* mail_data, std::string& error)
         return false;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    auto connection = mysql_pool->get_raii_connection();
-    auto conn = std::dynamic_pointer_cast<MySQLConnection>(connection.get());
-    if (!conn || !conn->is_connected()) {
+    ScopedMySQLConnection connection(db_pool_);
+    auto* conn = connection.get();
+    if (!connection.is_valid()) {
         error = "Failed to get database connection for deleting metadata";
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for deleting metadata of mail ID {}", mail_data->id);
         return false;
@@ -529,7 +589,7 @@ bool PersistentQueue::batch_delete_metadata(mail* mail_data, std::string& error)
                                   mail_data->id, e.what());
         return false;
     }
-    // RAIIConnection 析构时自动释放连接
+    // ScopedMySQLConnection 析构时自动释放连接
 }
 
 bool PersistentQueue::batch_delete_attachments(mail* mail_data, std::string& error) {
@@ -537,10 +597,9 @@ bool PersistentQueue::batch_delete_attachments(mail* mail_data, std::string& err
         return true; // 没有附件不算错误
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    auto connection = mysql_pool->get_raii_connection();
-    auto conn = std::dynamic_pointer_cast<MySQLConnection>(connection.get());
-    if (!conn || !conn->is_connected()) {
+    ScopedMySQLConnection connection(db_pool_);
+    auto* conn = connection.get();
+    if (!connection.is_valid()) {
         error = "Failed to get database connection for deleting attachments";
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for deleting attachments of mail ID {}", mail_data->id);
         return false;
@@ -555,7 +614,7 @@ bool PersistentQueue::batch_delete_attachments(mail* mail_data, std::string& err
 
     LOG_PERSISTENT_QUEUE_INFO("Successfully deleted attachments for mail ID {}", mail_data->id);
     return true;
-    // RAIIConnection 析构时自动释放连接
+    // ScopedMySQLConnection 析构时自动释放连接
 }
 
 void PersistentQueue::worker_loop() {

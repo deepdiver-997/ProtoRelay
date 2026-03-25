@@ -100,7 +100,7 @@ void MySQLPool::execute_sql_script(const std::string& script_path) {
         }
     }
 
-    LOG_DATABASE_INFO("Total SQL statements to execute: {}", sql_statements.size());
+    LOG_DATABASE_DEBUG("Total SQL statements to execute: {}", sql_statements.size());
 
     // 获取一个连接并执行SQL语句
     auto connection = get_connection();
@@ -115,10 +115,10 @@ void MySQLPool::execute_sql_script(const std::string& script_path) {
     for (size_t i = 0; i < sql_statements.size(); ++i) {
         const auto& statement = sql_statements[i];
         try {
-            LOG_DATABASE_INFO("Executing statement #{}/{}", (i + 1), sql_statements.size());
+            LOG_DATABASE_DEBUG("Executing statement #{}/{}", (i + 1), sql_statements.size());
             if (connection->execute(statement)) {
                 success_count++;
-                LOG_DATABASE_INFO("Statement #{} executed successfully", (i + 1));
+                LOG_DATABASE_DEBUG("Statement #{} executed successfully", (i + 1));
             } else {
                 failed_count++;
                 LOG_DATABASE_ERROR("Statement #{} execution returned false", (i + 1));
@@ -160,7 +160,7 @@ void MySQLPool::initialize_pool() {
                     continue;
                 }
 
-                LOG_DATABASE_INFO("Initial connection #{} connected successfully", (i + 1));
+                LOG_DATABASE_DEBUG("Initial connection #{} connected successfully", (i + 1));
 
                 auto wrapper = std::make_shared<ConnectionWrapper>(connection);
                 m_connections.push_back(wrapper);
@@ -210,7 +210,7 @@ void MySQLPool::reconnect_pool_connections() {
         }
     }
 
-    LOG_DATABASE_INFO("Reconnect pool connections after schema init: success={}, failed={}",
+    LOG_DATABASE_DEBUG("Reconnect pool connections after schema init: success={}, failed={}",
                       success,
                       failed);
 }

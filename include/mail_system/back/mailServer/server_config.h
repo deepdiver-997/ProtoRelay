@@ -56,8 +56,18 @@ struct ServerConfig {
     // 日志配置
     std::string log_level;           // 日志级别
     std::string log_file;            // 日志文件路径
+    bool log_to_console;             // 是否输出到终端
+    bool log_to_file;                // 是否输出到文件
+    std::string storage_provider;    // 存储适配器类型：local/distributed
     std::string mail_storage_path;   // 邮件存储路径
     std::string attachment_storage_path; // 附件存储路径
+    std::vector<std::string> distributed_storage_roots; // 分布式存储节点根目录
+    size_t distributed_storage_replica_count; // 写入副本数
+    std::string hdfs_endpoint;       // WebHDFS NameNode HTTP endpoint
+    std::string hdfs_base_path;      // WebHDFS base path
+    std::string hdfs_user;           // WebHDFS user.name
+    uint32_t hdfs_timeout_ms;        // WebHDFS request timeout
+    size_t hdfs_replication;         // WebHDFS replication factor for CREATE
 
     // 系统标识与出站策略配置
     std::string system_name;         // 当前邮件系统名称
@@ -99,6 +109,15 @@ struct ServerConfig {
         , require_auth(true)
         , max_auth_attempts(3)
         , log_level("info")
+        , log_to_console(true)
+        , log_to_file(true)
+        , storage_provider("local")
+        , distributed_storage_replica_count(1)
+        , hdfs_endpoint("http://127.0.0.1:9870")
+        , hdfs_base_path("/mail-system")
+        , hdfs_user("hdfs")
+        , hdfs_timeout_ms(5000)
+        , hdfs_replication(1)
         , system_name("mail-system")
         , system_domain("example.com")
         , outbound_ports({25, 587, 465})
@@ -156,8 +175,17 @@ struct ServerConfig {
                   << "\nmax_auth_attempts = " << max_auth_attempts
                   << "\nlog_level = " << log_level
                   << "\nlog_file = " << log_file
+                  << "\nlog_to_console = " << (log_to_console ? "true" : "false")
+                  << "\nlog_to_file = " << (log_to_file ? "true" : "false")
+                  << "\nstorage_provider = " << storage_provider
                   << "\nmail_storage_path = " << mail_storage_path
                   << "\nattachment_storage_path = " << attachment_storage_path
+                  << "\ndistributed_storage_replica_count = " << distributed_storage_replica_count
+                  << "\nhdfs_endpoint = " << hdfs_endpoint
+                  << "\nhdfs_base_path = " << hdfs_base_path
+                  << "\nhdfs_user = " << hdfs_user
+                  << "\nhdfs_timeout_ms = " << hdfs_timeout_ms
+                  << "\nhdfs_replication = " << hdfs_replication
                   << "\nsystem_name = " << system_name
                   << "\nsystem_domain = " << system_domain
                   << "\noutbound_max_attempts = " << outbound_max_attempts
@@ -182,6 +210,17 @@ struct ServerConfig {
             }
         }
         std::cout << "]" << std::endl;
+
+        if (!distributed_storage_roots.empty()) {
+            std::cout << "distributed_storage_roots = [";
+            for (size_t i = 0; i < distributed_storage_roots.size(); ++i) {
+                std::cout << distributed_storage_roots[i];
+                if (i + 1 < distributed_storage_roots.size()) {
+                    std::cout << ", ";
+                }
+            }
+            std::cout << "]" << std::endl;
+        }
     }
     
     // 设置向后兼容的端口（非const方法）
@@ -227,6 +266,26 @@ struct ServerConfig {
         if (connection_timeout == 0 || read_timeout == 0 || write_timeout == 0) {
             std::cerr << "Error: Timeout values must be greater than 0" << std::endl;
             return false;
+        }
+
+        if (storage_provider == "distributed" && distributed_storage_roots.empty()) {
+            std::cerr << "Error: storage_provider=distributed requires distributed_storage_roots" << std::endl;
+            return false;
+        }
+
+        if (storage_provider == "hdfs_web") {
+#if !PROTORELAY_ENABLE_HDFS_WEB_STORAGE
+            std::cerr << "Error: storage_provider=hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON at build time" << std::endl;
+            return false;
+#endif
+            if (hdfs_endpoint.empty() || hdfs_base_path.empty() || hdfs_user.empty()) {
+                std::cerr << "Error: storage_provider=hdfs_web requires hdfs_endpoint/hdfs_base_path/hdfs_user" << std::endl;
+                return false;
+            }
+            if (hdfs_timeout_ms == 0 || hdfs_replication == 0) {
+                std::cerr << "Error: hdfs_timeout_ms and hdfs_replication must be greater than 0" << std::endl;
+                return false;
+            }
         }
         
         return true;
@@ -307,8 +366,32 @@ struct ServerConfig {
         max_auth_attempts = json_config.value("max_auth_attempts", max_auth_attempts);
         log_level = json_config.value("log_level", log_level);
         log_file = resolve_path(filename, json_config.value("log_file", log_file));
+        log_to_console = json_config.value("log_to_console", log_to_console);
+        log_to_file = json_config.value("log_to_file", log_to_file);
+        storage_provider = json_config.value("storage_provider", storage_provider);
         mail_storage_path = resolve_path(filename, json_config.value("mail_storage_path", mail_storage_path));
         attachment_storage_path = resolve_path(filename, json_config.value("attachment_storage_path", attachment_storage_path));
+        distributed_storage_replica_count =
+            json_config.value("distributed_storage_replica_count", distributed_storage_replica_count);
+        hdfs_endpoint = json_config.value("hdfs_endpoint", hdfs_endpoint);
+        hdfs_base_path = json_config.value("hdfs_base_path", hdfs_base_path);
+        hdfs_user = json_config.value("hdfs_user", hdfs_user);
+        hdfs_timeout_ms = json_config.value("hdfs_timeout_ms", hdfs_timeout_ms);
+        hdfs_replication = json_config.value("hdfs_replication", hdfs_replication);
+
+        if (json_config.contains("distributed_storage_roots") &&
+            json_config["distributed_storage_roots"].is_array()) {
+            distributed_storage_roots.clear();
+            for (const auto& item : json_config["distributed_storage_roots"]) {
+                if (!item.is_string()) {
+                    continue;
+                }
+                auto resolved = resolve_path(filename, item.get<std::string>());
+                if (!resolved.empty()) {
+                    distributed_storage_roots.push_back(std::move(resolved));
+                }
+            }
+        }
         system_name = json_config.value("system_name", system_name);
         system_domain = json_config.value("system_domain", system_domain);
         outbound_max_attempts = json_config.value("outbound_max_attempts", outbound_max_attempts);

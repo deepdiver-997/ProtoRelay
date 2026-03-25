@@ -141,20 +141,34 @@ void SmtpsSession<ConnectionType>::flush_buffer_to_disk() {
         return;
     }
 
-    std::ofstream out(this->get_mail()->body_path, std::ios::binary | std::ios::app);
-    if (!out.is_open()) {
-        LOG_SESSION_ERROR("Failed to open mail body file for writing: {}", this->get_mail()->body_path);
-        return;
-    }
+    std::string error;
+    if (this->m_server->m_storageProvider) {
+        if (!this->m_server->m_storageProvider->append_binary(this->get_mail()->body_path,
+                                                              buffer_.get(),
+                                                              buffer_used_,
+                                                              error)) {
+            LOG_SESSION_ERROR("Failed to write mail body via storage provider: {}, error={}",
+                              this->get_mail()->body_path,
+                              error);
+            return;
+        }
+    } else {
+        std::ofstream out(this->get_mail()->body_path, std::ios::binary | std::ios::app);
+        if (!out.is_open()) {
+            LOG_SESSION_ERROR("Failed to open mail body file for writing: {}", this->get_mail()->body_path);
+            return;
+        }
 
-    out.write(buffer_.get(), static_cast<std::streamsize>(buffer_used_));
-    if (!out.good()) {
-        LOG_SESSION_ERROR("Failed to write mail body to file: {}", this->get_mail()->body_path);
+        out.write(buffer_.get(), static_cast<std::streamsize>(buffer_used_));
+        if (!out.good()) {
+            LOG_SESSION_ERROR("Failed to write mail body to file: {}", this->get_mail()->body_path);
+            out.close();
+            return;
+        }
+
         out.close();
-        return;
     }
 
-    out.close();
     LOG_SESSION_DEBUG("Flushed {} bytes to mail body file", buffer_used_);
     LOG_SESSION_INFO("Synchronous flush completed for mail {}, buffer_used_={}", this->get_mail()->id, buffer_used_);
     buffer_used_ = 0;
@@ -199,20 +213,31 @@ void SmtpsSession<ConnectionType>::async_flush_buffer_to_disk() {
 
     auto future = this->m_server->m_workerThreadPool->submit([this, body_path, buffer_data]() -> bool {
         try {
-            std::ofstream out(body_path, std::ios::binary | std::ios::app);
-            if (!out.is_open()) {
-                LOG_SESSION_ERROR("Failed to open file for async write: {}", body_path);
-                return false;
-            }
+            if (this->m_server->m_storageProvider) {
+                std::string error;
+                if (!this->m_server->m_storageProvider->append_binary(body_path,
+                                                                      buffer_data.data(),
+                                                                      buffer_data.size(),
+                                                                      error)) {
+                    LOG_SESSION_ERROR("Failed async write via storage provider: {}, error={}", body_path, error);
+                    return false;
+                }
+            } else {
+                std::ofstream out(body_path, std::ios::binary | std::ios::app);
+                if (!out.is_open()) {
+                    LOG_SESSION_ERROR("Failed to open file for async write: {}", body_path);
+                    return false;
+                }
 
-            out.write(buffer_data.data(), static_cast<std::streamsize>(buffer_data.size()));
-            if (!out.good()) {
-                LOG_SESSION_ERROR("Failed to write data to file: {}", body_path);
+                out.write(buffer_data.data(), static_cast<std::streamsize>(buffer_data.size()));
+                if (!out.good()) {
+                    LOG_SESSION_ERROR("Failed to write data to file: {}", body_path);
+                    out.close();
+                    return false;
+                }
+
                 out.close();
-                return false;
             }
-
-            out.close();
             LOG_SESSION_DEBUG("Async write {} bytes to file: {}", buffer_data.size(), body_path);
             return true;
         } catch (const std::exception& e) {
@@ -256,12 +281,24 @@ void SmtpsSession<ConnectionType>::append_to_buffer(const char* data, size_t siz
 
         if (size > buffer_size_) {
             if (this->get_mail()) {
-                std::ofstream out(this->get_mail()->body_path, std::ios::binary | std::ios::app);
-                if (out.is_open()) {
-                    out.write(data, static_cast<std::streamsize>(size));
-                    out.close();
+                if (this->m_server->m_storageProvider) {
+                    std::string error;
+                    if (!this->m_server->m_storageProvider->append_binary(this->get_mail()->body_path,
+                                                                          data,
+                                                                          size,
+                                                                          error)) {
+                        LOG_SESSION_ERROR("Failed direct write via storage provider: {}, error={}",
+                                          this->get_mail()->body_path,
+                                          error);
+                    }
                 } else {
-                    LOG_SESSION_ERROR("Failed to open mail body file for direct write: {}", this->get_mail()->body_path);
+                    std::ofstream out(this->get_mail()->body_path, std::ios::binary | std::ios::app);
+                    if (out.is_open()) {
+                        out.write(data, static_cast<std::streamsize>(size));
+                        out.close();
+                    } else {
+                        LOG_SESSION_ERROR("Failed to open mail body file for direct write: {}", this->get_mail()->body_path);
+                    }
                 }
             }
             return;
@@ -294,12 +331,16 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     this->get_mail()->subject = "(无主题)";
     this->get_mail()->persist_status = persist_storage::PersistStatus::PENDING;
 
-    std::string body_path = this->m_server->m_config.mail_storage_path;
-    if (!body_path.empty() && body_path.back() != '/' && body_path.back() != '\\') {
-        body_path.push_back('/');
+    if (this->m_server->m_storageProvider) {
+        this->get_mail()->body_path = this->m_server->m_storageProvider->build_mail_body_key(this->get_mail()->id);
+    } else {
+        std::string body_path = this->m_server->m_config.mail_storage_path;
+        if (!body_path.empty() && body_path.back() != '/' && body_path.back() != '\\') {
+            body_path.push_back('/');
+        }
+        body_path += std::to_string(this->get_mail()->id);
+        this->get_mail()->body_path = body_path;
     }
-    body_path += std::to_string(this->get_mail()->id);
-    this->get_mail()->body_path = body_path;
 
     LOG_SESSION_INFO("Created mail {} on DATA command, from: {}, recipients: {}",
         this->get_mail()->id, this->get_mail()->from, this->get_mail()->to.size());
@@ -390,7 +431,14 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
     }
 
     if (!mail_ptr->body_path.empty()) {
-        if (std::remove(mail_ptr->body_path.c_str()) == 0) {
+        if (this->m_server->m_storageProvider) {
+            std::string error;
+            if (this->m_server->m_storageProvider->remove_object(mail_ptr->body_path, error)) {
+                LOG_SESSION_INFO("Deleted mail body file: {}", mail_ptr->body_path);
+            } else {
+                LOG_SESSION_WARN("Failed to delete mail body file: {}, error={}", mail_ptr->body_path, error);
+            }
+        } else if (std::remove(mail_ptr->body_path.c_str()) == 0) {
             LOG_SESSION_INFO("Deleted mail body file: {}", mail_ptr->body_path);
         } else {
             LOG_SESSION_WARN("Failed to delete mail body file: {}", mail_ptr->body_path);
@@ -399,7 +447,14 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
 
     for (const auto& att : mail_ptr->attachments) {
         if (!att.filepath.empty()) {
-            if (std::remove(att.filepath.c_str()) == 0) {
+            if (this->m_server->m_storageProvider) {
+                std::string error;
+                if (this->m_server->m_storageProvider->remove_object(att.filepath, error)) {
+                    LOG_SESSION_INFO("Deleted attachment file: {}", att.filepath);
+                } else {
+                    LOG_SESSION_WARN("Failed to delete attachment file: {}, error={}", att.filepath, error);
+                }
+            } else if (std::remove(att.filepath.c_str()) == 0) {
                 LOG_SESSION_INFO("Deleted attachment file: {}", att.filepath);
             } else {
                 LOG_SESSION_WARN("Failed to delete attachment file: {}", att.filepath);
@@ -516,20 +571,34 @@ void SmtpsSession<ConnectionType>::flush_attachment_buffer_to_disk() {
     }
 
     try {
-        std::ofstream out(context_.current_attachment_path, std::ios::binary | std::ios::app);
-        if (!out.is_open()) {
-            LOG_SESSION_ERROR("Failed to open attachment file for writing: {}", context_.current_attachment_path);
-            return;
-        }
+        if (this->m_server->m_storageProvider) {
+            std::string error;
+            if (!this->m_server->m_storageProvider->append_binary(context_.current_attachment_path,
+                                                                  context_.attachment_buffer.get(),
+                                                                  context_.attachment_buffer_used,
+                                                                  error)) {
+                LOG_SESSION_ERROR("Failed to write attachment via storage provider: {}, error={}",
+                                  context_.current_attachment_path,
+                                  error);
+                return;
+            }
+        } else {
+            std::ofstream out(context_.current_attachment_path, std::ios::binary | std::ios::app);
+            if (!out.is_open()) {
+                LOG_SESSION_ERROR("Failed to open attachment file for writing: {}", context_.current_attachment_path);
+                return;
+            }
 
-        out.write(context_.attachment_buffer.get(), static_cast<std::streamsize>(context_.attachment_buffer_used));
-        if (!out.good()) {
-            LOG_SESSION_ERROR("Failed to write data to attachment file: {}", context_.current_attachment_path);
+            out.write(context_.attachment_buffer.get(), static_cast<std::streamsize>(context_.attachment_buffer_used));
+            if (!out.good()) {
+                LOG_SESSION_ERROR("Failed to write data to attachment file: {}", context_.current_attachment_path);
+                out.close();
+                return;
+            }
+
             out.close();
-            return;
         }
 
-        out.close();
         context_.current_attachment_size += context_.attachment_buffer_used;
         context_.attachment_buffer_used = 0;
         LOG_SESSION_DEBUG("Flushed {} bytes to attachment file", context_.current_attachment_size);
@@ -550,20 +619,33 @@ void SmtpsSession<ConnectionType>::async_flush_attachment_buffer_to_disk() {
 
     auto future = this->m_server->m_workerThreadPool->submit([this, attachment_path, buffer_data]() -> bool {
         try {
-            std::ofstream out(attachment_path, std::ios::binary | std::ios::app);
-            if (!out.is_open()) {
-                LOG_SESSION_ERROR("Failed to open attachment file for async write: {}", attachment_path);
-                return false;
-            }
+            if (this->m_server->m_storageProvider) {
+                std::string error;
+                if (!this->m_server->m_storageProvider->append_binary(attachment_path,
+                                                                      buffer_data.data(),
+                                                                      buffer_data.size(),
+                                                                      error)) {
+                    LOG_SESSION_ERROR("Failed async attachment write via storage provider: {}, error={}",
+                                      attachment_path,
+                                      error);
+                    return false;
+                }
+            } else {
+                std::ofstream out(attachment_path, std::ios::binary | std::ios::app);
+                if (!out.is_open()) {
+                    LOG_SESSION_ERROR("Failed to open attachment file for async write: {}", attachment_path);
+                    return false;
+                }
 
-            out.write(buffer_data.data(), static_cast<std::streamsize>(buffer_data.size()));
-            if (!out.good()) {
-                LOG_SESSION_ERROR("Failed to write data to attachment file: {}", attachment_path);
+                out.write(buffer_data.data(), static_cast<std::streamsize>(buffer_data.size()));
+                if (!out.good()) {
+                    LOG_SESSION_ERROR("Failed to write data to attachment file: {}", attachment_path);
+                    out.close();
+                    return false;
+                }
+
                 out.close();
-                return false;
             }
-
-            out.close();
             LOG_SESSION_DEBUG("Async write {} bytes to attachment file: {}", buffer_data.size(), attachment_path);
             return true;
         } catch (const std::exception& e) {
@@ -578,6 +660,21 @@ void SmtpsSession<ConnectionType>::async_flush_attachment_buffer_to_disk() {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data, size_t size) {
+    if (context_.current_attachment_path.empty() && this->get_mail() && context_.current_part_is_attachment) {
+        if (this->m_server->m_storageProvider) {
+            context_.current_attachment_path = this->m_server->m_storageProvider->build_attachment_key(
+                this->get_mail()->id,
+                context_.current_attachment_filename);
+        } else {
+            std::string attachment_path = this->m_server->m_config.attachment_storage_path;
+            if (!attachment_path.empty() && attachment_path.back() != '/' && attachment_path.back() != '\\') {
+                attachment_path.push_back('/');
+            }
+            attachment_path += std::to_string(this->get_mail()->id) + "_" + context_.current_attachment_filename;
+            context_.current_attachment_path = attachment_path;
+        }
+    }
+
     if (!context_.attachment_buffer) {
         context_.attachment_buffer_size = INITIAL_BUFFER_SIZE;
         context_.attachment_buffer = std::make_unique<char[]>(INITIAL_BUFFER_SIZE);
@@ -594,11 +691,25 @@ void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data,
 
         if (size > context_.attachment_buffer_size) {
             try {
-                std::ofstream out(context_.current_attachment_path, std::ios::binary | std::ios::app);
-                if (out.is_open()) {
-                    out.write(data, size);
-                    context_.current_attachment_size += size;
-                    out.close();
+                if (this->m_server->m_storageProvider) {
+                    std::string error;
+                    if (this->m_server->m_storageProvider->append_binary(context_.current_attachment_path,
+                                                                          data,
+                                                                          size,
+                                                                          error)) {
+                        context_.current_attachment_size += size;
+                    } else {
+                        LOG_SESSION_ERROR("Failed direct attachment write via storage provider: {}, error={}",
+                                          context_.current_attachment_path,
+                                          error);
+                    }
+                } else {
+                    std::ofstream out(context_.current_attachment_path, std::ios::binary | std::ios::app);
+                    if (out.is_open()) {
+                        out.write(data, static_cast<std::streamsize>(size));
+                        context_.current_attachment_size += size;
+                        out.close();
+                    }
                 }
             } catch (const std::exception& e) {
                 LOG_SESSION_ERROR("Exception writing large attachment data: {}", e.what());
@@ -636,10 +747,10 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
             return;
         }
 
-        LOG_SESSION_INFO("Handling data: {}", line);
+        LOG_SESSION_DEBUG("Handling data: {}", line);
     } else {
         trimmed = algorithm::trim(data);
-        LOG_SESSION_INFO("Handling data: {}", data);
+        LOG_SESSION_DEBUG("Handling data: {}", data);
     }
 
     if (state_ == SmtpsState::IN_MESSAGE) {
@@ -683,7 +794,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
         }
 
         if (fsm_) {
-            LOG_SESSION_INFO("IN_MESSAGE next_event_: {}", fsm_->get_event_name(next_event_));
+            LOG_SESSION_DEBUG("IN_MESSAGE next_event_: {}", fsm_->get_event_name(next_event_));
         }
         return;
     }
@@ -694,7 +805,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
         next_event_ = SmtpsEvent::AUTH;
         last_command_args_ = trimmed;
         if (fsm_) {
-            LOG_SESSION_INFO("AUTH next_event_: {}", fsm_->get_event_name(next_event_));
+            LOG_SESSION_DEBUG("AUTH next_event_: {}", fsm_->get_event_name(next_event_));
         }
         return;
     }
@@ -723,7 +834,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
 
     last_command_args_ = args;
 
-    LOG_SESSION_INFO("command: {}, args: {}", command, args);
+    LOG_SESSION_DEBUG("command: {}, args: {}", command, args);
 
     if (command == "EHLO" || command == "HELO") {
         next_event_ = SmtpsEvent::EHLO;
@@ -745,7 +856,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
     }
 
     if (fsm_) {
-        LOG_SESSION_INFO("next_event_: {}", fsm_->get_event_name(next_event_));
+        LOG_SESSION_DEBUG("next_event_: {}", fsm_->get_event_name(next_event_));
     }
 }
 

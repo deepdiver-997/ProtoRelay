@@ -1,0 +1,25 @@
+[Unit]
+Description=ProtoRelay SMTP Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=protorelay
+Group=protorelay
+WorkingDirectory=/opt/protorelay
+ExecStart=/opt/protorelay/smtpsServer --config /opt/protorelay/config/smtpsConfig.json
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65535
+Environment=TZ=UTC
+
+# Optional hardening (tune as needed)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/protorelay/logs /opt/protorelay/mail /opt/protorelay/attachments
+
+[Install]
+WantedBy=multi-user.target

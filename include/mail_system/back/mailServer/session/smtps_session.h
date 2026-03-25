@@ -44,11 +44,11 @@ public:
     void* get_fsm() const override;
     void* get_context() override;
 
-    void set_current_state(int state);
-    void set_next_event(int event);
-    int get_current_state() const;
-    int get_next_event() const;
-    std::string get_last_command_args() const;
+    void set_current_state(int state) override;
+    void set_next_event(int event) override;
+    int get_current_state() const override;
+    int get_next_event() const override;
+    std::string get_last_command_args() const override;
 
     void create_mail_on_data_command();
     void submit_mail_to_queue();

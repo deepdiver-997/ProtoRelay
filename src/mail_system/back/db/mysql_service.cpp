@@ -164,7 +164,7 @@ bool MySQLConnection::connect() {
             0
         ) != nullptr) {
         m_connected = true;
-        LOG_DATABASE_INFO("Successfully connected to MySQL server and database");
+        LOG_DATABASE_DEBUG("Successfully connected to MySQL server and database");
         return true;
     }
 
@@ -196,7 +196,7 @@ bool MySQLConnection::connect() {
                 0
             ) != nullptr) {
             m_connected = true;
-            LOG_DATABASE_INFO("Successfully connected to MySQL server (without database)");
+            LOG_DATABASE_DEBUG("Successfully connected to MySQL server (without database)");
             return true;
         }
     }
@@ -252,7 +252,7 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql) {
             LOG_DB_QUERY_WARN("No database selected, trying USE {} and retry query", m_database);
             if (mysql_select_db(m_mysql, m_database.c_str()) == 0 &&
                 mysql_query(m_mysql, sql.c_str()) == 0) {
-                LOG_DB_QUERY_INFO("Retry query succeeded after selecting database {}", m_database);
+                LOG_DB_QUERY_DEBUG("Retry query succeeded after selecting database {}", m_database);
             } else {
                 LOG_DB_QUERY_ERROR("MySQL query error: {} (errno: {})",
                                    mysql_error(m_mysql), mysql_errno(m_mysql));
@@ -404,7 +404,7 @@ bool MySQLConnection::execute(const std::string& sql) {
             LOG_DB_QUERY_WARN("No database selected, trying USE {} and retry execute", m_database);
             if (mysql_select_db(m_mysql, m_database.c_str()) == 0 &&
                 mysql_query(m_mysql, sql.c_str()) == 0) {
-                LOG_DB_QUERY_INFO("Retry execute succeeded after selecting database {}", m_database);
+                LOG_DB_QUERY_DEBUG("Retry execute succeeded after selecting database {}", m_database);
                 return true;
             }
         }
@@ -561,7 +561,7 @@ std::shared_ptr<IDBConnection> MySQLService::create_connection(
     const std::string& database,
     unsigned int port
 ) {
-    LOG_DATABASE_INFO("MySQLService::create_connection() called.");
+    LOG_DATABASE_DEBUG("MySQLService::create_connection() called.");
     auto connection = std::make_shared<MySQLConnection>();
     connection->set_connection_params(host, user, password, database, port);
     return connection;

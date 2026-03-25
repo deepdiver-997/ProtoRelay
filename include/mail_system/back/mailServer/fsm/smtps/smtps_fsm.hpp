@@ -154,8 +154,8 @@ public:
              std::shared_ptr<DBPool> db_pool)
         : m_ioThreadPool(io_thread_pool),
           m_workerThreadPool(worker_thread_pool),
-          m_persistentQueue(persistent_queue),
-          m_dbPool(db_pool) {}
+                    m_dbPool(db_pool),
+                    m_persistentQueue(persistent_queue) {}
     virtual ~SmtpsFsm() = default;
 
     // 处理事件
@@ -301,7 +301,7 @@ public:
                 mysql_connection->escape_string(mail_data.subject) + "', '" +
                 mysql_connection->escape_string(body_path) + "', " +
                 std::to_string(mail_data.status) + ")";
-            LOG_DATABASE_INFO("Executing SQL: {}", mail_sql);
+            LOG_DATABASE_DEBUG("Executing SQL: {}", mail_sql);
             if (!mysql_connection->execute(mail_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", mysql_connection->get_last_error());
                 return false;
@@ -309,18 +309,19 @@ public:
 
             // 第二步：插入邮件收发件人关系到 mail_recipients 表
             // 一份邮件可能有多个收件人，所以为每个收件人插入一条关系记录
-            std::string recipient_sql = "INSERT INTO mail_recipients (mail_id, sender, recipient) VALUES ";
+            std::string recipient_sql = "INSERT INTO mail_recipients (mail_id, sender, recipient, source_message_id) VALUES ";
             for (size_t i = 0; i < mail_data.to.size(); ++i) {
                 recipient_sql += "(" + std::to_string(mail_data.id) + ", '";
                 recipient_sql += mysql_connection->escape_string(mail_data.from) + "', '";
-                recipient_sql += mysql_connection->escape_string(mail_data.to[i]) + "')";
+                recipient_sql += mysql_connection->escape_string(mail_data.to[i]) + "', '";
+                recipient_sql += mysql_connection->escape_string(mail_data.source_message_id) + "')";
                 
                 if (i < mail_data.to.size() - 1) {
                     recipient_sql += ", ";
                 }
             }
             recipient_sql += ";";
-            LOG_DATABASE_INFO("Executing SQL: {}", recipient_sql);
+            LOG_DATABASE_DEBUG("Executing SQL: {}", recipient_sql);
             if (!mysql_connection->execute(recipient_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", mysql_connection->get_last_error());
                 // 如果插入收件人失败，删除已插入的邮件元数据
@@ -337,7 +338,7 @@ public:
                     mysql_connection->escape_string(att.filepath) + "', " +
                     std::to_string(att.file_size) + ", '" +
                     mysql_connection->escape_string(att.mime_type) + "')";
-                LOG_DATABASE_INFO("Executing SQL: {}", att_sql);
+                LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
                 if (!mysql_connection->execute(att_sql)) {
                     LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
                     success = false;
@@ -380,7 +381,7 @@ public:
                 std::to_string(att.file_size) + ", '" +
                 mysql_connection->escape_string(att.mime_type) + "', " +
                 std::to_string(att.upload_time) + ")";
-            LOG_DATABASE_INFO("Executing SQL: {}", att_sql);
+            LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
             if (!mysql_connection->execute(att_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
                 return false;
@@ -415,7 +416,7 @@ public:
             return false;
         }
 
-        LOG_FILE_IO_INFO("Saving mail body to file: {}, body size: {}", file_path, data->body.size());
+        LOG_FILE_IO_DEBUG("Saving mail body to file: {}, body size: {}", file_path, data->body.size());
 
         std::ofstream out(file_path);
         if (!out.is_open()) {
@@ -426,12 +427,12 @@ public:
         if (data->body.empty()) {
             out << data->header;
             out.close();
-            LOG_FILE_IO_INFO("Mail body is empty, only header saved to file: {}", file_path);
+            LOG_FILE_IO_DEBUG("Mail body is empty, only header saved to file: {}", file_path);
             return true;
         }
         out << data->body;
         out.close();
-        LOG_FILE_IO_INFO("Mail body saved successfully to file: {}", file_path);
+        LOG_FILE_IO_DEBUG("Mail body saved successfully to file: {}", file_path);
         return true;
     }
 
@@ -446,7 +447,7 @@ public:
         att.filepath = file_path;
         att.file_size = att.content.size();
         att.content.clear(); // 释放内存
-        LOG_FILE_IO_INFO("Attachment saved to file: {}", file_path);
+        LOG_FILE_IO_DEBUG("Attachment saved to file: {}", file_path);
         return true;
     }
 

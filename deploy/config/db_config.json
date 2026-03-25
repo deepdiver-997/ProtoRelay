@@ -1,0 +1,13 @@
+{
+  "achieve": "mysql",
+  "host": "host.docker.internal",
+  "user": "mail_test",
+  "password": "abjskKA09qjf",
+  "database": "mail",
+  "initialize_script": "sql/create_tables.sql",
+  "port": 3306,
+  "initial_pool_size": 5,
+  "max_pool_size": 20,
+  "connection_timeout": 5,
+  "idle_timeout": 60
+}

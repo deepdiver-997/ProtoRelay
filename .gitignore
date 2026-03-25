@@ -1,6 +1,7 @@
 # ==================== 编译产物 ====================
 # CMake 构建目录
 build/
+build_nohdfs/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -40,7 +41,9 @@ attachments/*.*
 *.tmp
 *.temp
 *.cache
-d*
+.gitignore
+.dockerignore
+dump.md
 
 # ==================== 敏感配置文件 ====================
 # 数据库配置（包含密码）
@@ -48,6 +51,7 @@ config/db_config.json
 config/db_config_mail2.json
 config/db_config_local.json
 config/*_local.json
+smtps_test.sh
 
 # SSL 证书和私钥
 config/crt/*.key
@@ -117,6 +121,7 @@ smtp_test.sh  # 保留这个测试脚本
 !scripts/generate_dkim_keys.sh
 !build.sh
 .gitignore
+.dockerignore
 
 # 临时压缩包
 *.tar.gz
@@ -131,6 +136,7 @@ temp_*.sql
 # ==================== 文档草稿 ====================
 docs/*_draft.md
 docs/*_wip.md
+docs/byte-ads-second-round-project-script.md
 
 # ==================== 性能分析 ====================
 *.prof

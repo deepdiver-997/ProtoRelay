@@ -1,0 +1,69 @@
+services:
+  hdfs-namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-namenode
+    environment:
+      CLUSTER_NAME: mail-hdfs
+      CORE_CONF_fs_defaultFS: hdfs://hdfs-namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs_namenode:/hadoop/dfs/name
+    networks:
+      - mail-net
+
+  hdfs-datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-datanode
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://hdfs-namenode:9000
+      SERVICE_PRECONDITION: hdfs-namenode:9870
+    ports:
+      - "9864:9864"
+    volumes:
+      - hdfs_datanode:/hadoop/dfs/data
+    depends_on:
+      - hdfs-namenode
+    networks:
+      - mail-net
+
+  mail-system:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: mail-system:v8-hdfs
+    container_name: mail-system
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      NO_PROXY: "localhost,127.0.0.1,hdfs-namenode,hdfs-datanode,mail-system,host.docker.internal"
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      no_proxy: "localhost,127.0.0.1,hdfs-namenode,hdfs-datanode,mail-system,host.docker.internal"
+    depends_on:
+      - hdfs-namenode
+      - hdfs-datanode
+    command: ["-c", "/app/config/smtpsConfig_hdfs_web.json"]
+    ports:
+      - "25:25"
+      - "465:465"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../deploy/config:/app/config:ro
+      - ../deploy/certs:/app/certs:ro
+      - ../deploy/logs:/app/logs
+      - ../deploy/mail:/app/mail
+      - ../deploy/attachments:/app/attachments
+    networks:
+      - mail-net
+
+volumes:
+  hdfs_namenode:
+  hdfs_datanode:
+
+networks:
+  mail-net:

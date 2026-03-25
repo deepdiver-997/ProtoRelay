@@ -8,6 +8,7 @@ BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${SCRIPT_DIR}/artifacts}"
 EXTRA_CMAKE_ARGS_STR="${EXTRA_CMAKE_ARGS:-}"
 GENERATOR="${CMAKE_GENERATOR:-}"
+USE_BOOST_LEGACY_FIND="${USE_BOOST_LEGACY_FIND:-ON}"
 
 # 颜色输出
 GREEN='\033[0;32m'
@@ -27,6 +28,29 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+cleanup_root_cmake_artifacts() {
+    local root_artifacts=(
+        "${SCRIPT_DIR}/CMakeCache.txt"
+        "${SCRIPT_DIR}/cmake_install.cmake"
+        "${SCRIPT_DIR}/Makefile"
+        "${SCRIPT_DIR}/CMakeFiles"
+    )
+
+    local found=0
+    for path in "${root_artifacts[@]}"; do
+        if [ -e "$path" ]; then
+            found=1
+            break
+        fi
+    done
+
+    if [ "$found" -eq 1 ]; then
+        print_warning "Found in-source CMake generated files at project root; cleaning them..."
+        rm -rf "${root_artifacts[@]}"
+        print_info "Root CMake artifacts cleaned. Build outputs will stay under: ${BUILD_DIR}"
+    fi
+}
+
 # 使用方法
 if [ "$#" -lt 1 ]; then
     echo "Usage: $0 <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64]"
@@ -44,7 +68,8 @@ if [ "$#" -lt 1 ]; then
     echo "  $0 Release clean 1 cross-x64 object-only  # 交叉编译到 Linux x86_64（推荐）"
     echo ""
     echo "Env override: BUILD_JOBS=<n>, EXTRA_CMAKE_ARGS='<...>'"
-    echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
+        echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
+        echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
     echo ""
     exit 1
 fi
@@ -120,8 +145,44 @@ if [ "$CLEAN_BUILD" = "clean" ]; then
 fi
 
 # 创建构建目录
+cleanup_root_cmake_artifacts
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
+
+# 自动修复：如果 build 目录里的 CMakeCache 来自其它源码目录，清理后重新配置。
+if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+    CACHED_SOURCE_DIR="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$BUILD_DIR/CMakeCache.txt" | head -n1)"
+    if [ -n "$CACHED_SOURCE_DIR" ] && [ "$CACHED_SOURCE_DIR" != "$SCRIPT_DIR" ]; then
+        print_warning "Detected stale CMake cache from: $CACHED_SOURCE_DIR"
+        print_info "Auto-cleaning build directory due to source mismatch..."
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+        cd "$BUILD_DIR"
+    fi
+fi
+
+# 自动修复：跨平台模式切换时，若缓存目标平台/编译器与当前模式不一致，清理并重新配置。
+if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+    CACHED_SYSTEM_NAME="$(sed -n 's/^CMAKE_SYSTEM_NAME[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | head -n1)"
+    CACHED_CXX_COMPILER="$(sed -n 's/^CMAKE_CXX_COMPILER:FILEPATH=//p' "$BUILD_DIR/CMakeCache.txt" | head -n1)"
+
+    CACHE_MODE="host"
+    if [[ "$CACHED_SYSTEM_NAME" == "Linux" ]] || [[ "$CACHED_CXX_COMPILER" == *"x86_64-linux-gnu"* ]]; then
+        CACHE_MODE="cross"
+    fi
+
+    EXPECTED_MODE="host"
+    if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
+        EXPECTED_MODE="cross"
+    fi
+
+    if [[ "$CACHE_MODE" != "$EXPECTED_MODE" ]]; then
+        print_warning "Detected stale CMake cache mode: ${CACHE_MODE}; expected: ${EXPECTED_MODE}. Auto-cleaning build directory..."
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+        cd "$BUILD_DIR"
+    fi
+fi
 
 detect_cpu_count() {
     if command -v nproc >/dev/null 2>&1; then
@@ -218,6 +279,10 @@ cmake_args=(
     -DBUILD_OBJECT_ONLY="$BUILD_OBJECT_ONLY"
 )
 
+if [[ "$USE_BOOST_LEGACY_FIND" == "ON" ]]; then
+    cmake_args+=( -DBoost_NO_BOOST_CMAKE=ON )
+fi
+
 if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
     CROSS_SYSROOT="$($CROSS_CXX -print-sysroot 2>/dev/null || true)"
     cmake_args+=(
@@ -225,6 +290,21 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
         -DCMAKE_SYSTEM_PROCESSOR=x86_64
         -DCMAKE_CXX_COMPILER="$CROSS_CXX"
     )
+
+    # Cross mode commonly lacks target libcurl development files on macOS hosts.
+    # Default to OFF unless user explicitly overrides via EXTRA_CMAKE_ARGS.
+    if [[ "$EXTRA_CMAKE_ARGS_STR" != *"ENABLE_HDFS_WEB_STORAGE="* ]]; then
+        print_info "cross-x64 mode: forcing -DENABLE_HDFS_WEB_STORAGE=OFF (override via EXTRA_CMAKE_ARGS if needed)"
+        cmake_args+=( -DENABLE_HDFS_WEB_STORAGE=OFF )
+    fi
+
+    # Cross artifacts are usually used for production deployment; keep debug logs OFF
+    # unless the user explicitly opts in.
+    if [[ "$EXTRA_CMAKE_ARGS_STR" != *"ENABLE_DEBUG_LOGS="* ]]; then
+        print_info "cross-x64 mode: forcing -DENABLE_DEBUG_LOGS=OFF (override via EXTRA_CMAKE_ARGS if needed)"
+        cmake_args+=( -DENABLE_DEBUG_LOGS=OFF )
+    fi
+
     if [ -n "$CROSS_SYSROOT" ]; then
         cmake_args+=( -DCMAKE_SYSROOT="$CROSS_SYSROOT" )
     fi

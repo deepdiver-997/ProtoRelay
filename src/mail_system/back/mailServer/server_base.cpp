@@ -2,6 +2,12 @@
 #include "mail_system/back/outbound/cares_dns_resolver.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/db/distributed_mysql_pool.h"
+#include "mail_system/back/storage/distributed_file_storage_provider.h"
+#if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
+#include "mail_system/back/storage/hdfs_web_storage_provider.h"
+#endif
+#include "mail_system/back/storage/local_file_storage_provider.h"
 #include <iostream>
 #include <fstream>
 
@@ -34,19 +40,54 @@ try {
         //         }
         //     }
         // }
-        Logger::get_instance().init(config.log_file, Logger::string_to_level(config.log_level));
+        Logger::get_instance().init(
+            config.log_file,
+            1024 * 1024 * 5,
+            3,
+            Logger::string_to_level(config.log_level),
+            config.log_to_console,
+            config.log_to_file
+        );
         LOG_SERVER_INFO("Logger initialized with level: {}", config.log_level);
 
-        // check mail and attachment storage path and create if not exists
-        if (!std::filesystem::exists(config.mail_storage_path)) {
-            if (!std::filesystem::create_directories(config.mail_storage_path)) {
-                throw std::runtime_error("Failed to create mail storage directory: " + config.mail_storage_path);
+        if (config.storage_provider == "distributed") {
+            m_storageProvider = std::make_shared<storage::DistributedFileStorageProvider>(
+                config.distributed_storage_roots,
+                config.distributed_storage_replica_count);
+        } else if (config.storage_provider == "hdfs_web") {
+#if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
+            m_storageProvider = std::make_shared<storage::HdfsWebStorageProvider>(
+                config.hdfs_endpoint,
+                config.hdfs_base_path,
+                config.hdfs_user,
+                config.hdfs_replication,
+                static_cast<long>(config.hdfs_timeout_ms));
+#else
+            throw std::runtime_error(
+                "storage_provider=hdfs_web requested but this binary was built without HDFS web support "
+                "(ENABLE_HDFS_WEB_STORAGE=OFF)");
+#endif
+        } else {
+            // check mail and attachment storage path and create if not exists
+            if (!std::filesystem::exists(config.mail_storage_path)) {
+                if (!std::filesystem::create_directories(config.mail_storage_path)) {
+                    throw std::runtime_error("Failed to create mail storage directory: " + config.mail_storage_path);
+                }
             }
+            if (!std::filesystem::exists(config.attachment_storage_path)) {
+                if (!std::filesystem::create_directories(config.attachment_storage_path)) {
+                    throw std::runtime_error("Failed to create attachment storage directory: " + config.attachment_storage_path);
+                }
+            }
+
+            m_storageProvider = std::make_shared<storage::LocalFileStorageProvider>(
+                config.mail_storage_path,
+                config.attachment_storage_path);
         }
-        if (!std::filesystem::exists(config.attachment_storage_path)) {
-            if (!std::filesystem::create_directories(config.attachment_storage_path)) {
-                throw std::runtime_error("Failed to create attachment storage directory: " + config.attachment_storage_path);
-            }
+
+        std::string storage_error;
+        if (!m_storageProvider->ensure_ready(storage_error)) {
+            throw std::runtime_error("Failed to initialize storage provider: " + storage_error);
         }
 
         if(config.io_thread_count > 0 && m_ioThreadPool == nullptr) {
@@ -62,7 +103,8 @@ try {
         }
 
         if (config.use_database && m_dbPool == nullptr) {
-            if (config.db_pool_config.achieve == "mysql") {
+            if (config.db_pool_config.achieve == "mysql" ||
+                config.db_pool_config.achieve == "mysql_distributed") {
                 // initialize DB pool asynchronously with timeout, to avoid blocking server startup
                 // will be improved in future versions and support sync initialization with better error handling
                 // auto fut = std::async(std::launch::async, [&]() {
@@ -74,9 +116,15 @@ try {
                 
                 // 临时改为同步初始化，以便调试
                 try {
-                    m_dbPool = MySQLPoolFactory::get_instance().create_pool(
-                        config.db_pool_config,
-                        std::make_shared<MySQLService>());
+                    if (config.db_pool_config.achieve == "mysql_distributed") {
+                        m_dbPool = DistributedMySQLPoolFactory::get_instance().create_pool(
+                            config.db_pool_config,
+                            std::make_shared<MySQLService>());
+                    } else {
+                        m_dbPool = MySQLPoolFactory::get_instance().create_pool(
+                            config.db_pool_config,
+                            std::make_shared<MySQLService>());
+                    }
                 } catch (const std::exception& e) {
                     LOG_SERVER_ERROR("Failed to create MySQL pool: {}", e.what());
                     m_dbPool = nullptr;
@@ -398,65 +446,6 @@ void ServerBase::stop(ServerState next_state) {
             LOG_SERVER_ERROR("Error stopping server: {}", e.what());
         }
     }
-}
-
-void ServerBase::start_forward_email(mail* email) {
-    if (!email) {
-        LOG_SERVER_ERROR("Error: null mail pointer in start_forward_email");
-        return;
-    }
-    
-    // 创建临时shared_ptr，但注意这里email的生命周期由调用者管理
-    // 这是一个临时解决方案，更好的方法是重构整个架构
-    auto email_shared = std::shared_ptr<mail>(email, [](mail*) {
-        // 空删除器，因为email的生命周期由外部管理
-    });
-    
-    start_forward_email(email_shared);
-}
-
-void ServerBase::start_forward_email(std::shared_ptr<mail> email) {
-    // std::sort(email->to.begin(), email->to.end(), [](const std::string& a, const std::string& b) {
-    //     auto pos_a = a.find('@');
-    //     auto pos_b = b.find('@');
-    //     if (pos_a != std::string::npos && pos_b != std::string::npos) {
-    //         return a.substr(pos_a + 1) < b.substr(pos_b + 1);
-    //     }
-    // });
-    std::map<std::string, std::vector<std::string>> remote_domains;
-    for (const auto& recipient : email->to) {
-        auto pos = recipient.find('@');
-        if (pos != std::string::npos && pos + 1 < recipient.size() && recipient.substr(pos + 1) != m_domain) {
-            remote_domains[recipient.substr(pos + 1)].push_back(recipient);
-        }
-    }
-    if (remote_domains.empty()) {
-        return;
-    }
-    for (const auto& [domain, recipients] : remote_domains) {
-        // 这里可以添加实际的邮件转发代码
-        boost::asio::ip::tcp::endpoint edp;
-        if (m_known_domains.find(domain) == m_known_domains.end()) {
-            edp = *m_resolver->resolve(domain, "smtp").begin();
-        } else {
-            edp = boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address(m_known_domains[domain]), 465);
-        }
-        // 创建新的TCP socket和SSL流
-        auto socket = std::make_unique<boost::asio::ip::tcp::socket>(std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
-        auto ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(*socket), m_sslContext);
-        ssl_socket->lowest_layer().async_connect(edp, [this, ssl_socket = std::move(ssl_socket), recipients, edp, email](const boost::system::error_code& error) mutable {
-            if (!error) {
-                // 连接成功，进行邮件转发
-                // m_client_fsm->start(std::dynamic_pointer_cast<mail_system::SessionBase>(std::make_shared<ClientSession>(email, std::move(ssl_socket), this, m_client_fsm, recipients)));
-            } else {
-                LOG_SERVER_ERROR("Error connecting to {}: {}", edp.address().to_string(), error.message());
-            }
-        });
-    }
-}
-
-void ServerBase::load_known_domains(const char* domain_file) {
-    // 这里可以添加加载已知域名的代码
 }
 
 ServerState ServerBase::get_state() const {

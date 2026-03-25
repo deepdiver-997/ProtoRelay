@@ -153,7 +153,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                 result.error_message = "read greeting failed: " + error;
                 return result;
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -167,7 +167,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
             break;
 
         case SmtpStep::SendEhlo:
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=EHLO {}",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, request=EHLO {}",
                             record.id,
                             smtp_step_name(step),
                             helo_domain);
@@ -179,7 +179,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                 result.error_message = "read EHLO response failed: " + error;
                 return result;
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -198,7 +198,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                     result.error_message = "read HELO fallback response failed: " + error;
                     return result;
                 }
-                LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step=SendHeloFallback, code={}, response=[{}]",
+                LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step=SendHeloFallback, code={}, response=[{}]",
                                 record.id,
                                 code,
                                 response);
@@ -210,7 +210,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
             }
 
             if (allow_starttls_upgrade && response.find("STARTTLS") != std::string::npos) {
-                LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step=SendStartTls, request=STARTTLS",
+                LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step=SendStartTls, request=STARTTLS",
                                 record.id);
                 if (!send_smtp_line(stream, "STARTTLS", should_continue, error)) {
                     result.error_message = "send STARTTLS failed: " + error;
@@ -220,7 +220,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                     result.error_message = "read STARTTLS response failed: " + error;
                     return result;
                 }
-                LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step=SendStartTls, code={}, response=[{}]",
+                LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step=SendStartTls, code={}, response=[{}]",
                                 record.id,
                                 code,
                                 response);
@@ -238,7 +238,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
             break;
 
         case SmtpStep::SendMailFrom:
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=MAIL FROM:<{}>",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, request=MAIL FROM:<{}>",
                             record.id,
                             smtp_step_name(step),
                             envelope_sender);
@@ -258,7 +258,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                     return result;
                 }
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -272,7 +272,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
             break;
 
         case SmtpStep::SendRcptTo:
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=RCPT TO:<{}>",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, request=RCPT TO:<{}>",
                             record.id,
                             smtp_step_name(step),
                             record.recipient);
@@ -284,7 +284,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                 result.error_message = "read RCPT TO response failed: " + error;
                 return result;
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -298,7 +298,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
             break;
 
         case SmtpStep::SendData:
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=DATA",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, request=DATA",
                             record.id,
                             smtp_step_name(step));
             if (!send_smtp_line(stream, "DATA", should_continue, error)) {
@@ -319,7 +319,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                     response = std::move(next_response);
                 }
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -335,11 +335,13 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
         case SmtpStep::SendBody: {
             bool dkim_applied = false;
             std::string dkim_error;
+            std::string message_id;
             const std::string wire_message = build_outbound_message(record,
                                                                     header_from,
                                                                     identity_config,
                                                                     &dkim_applied,
-                                                                    &dkim_error);
+                                                                    &dkim_error,
+                                                                    &message_id);
             if (identity_config.dkim_enabled && !dkim_applied && !dkim_error.empty()) {
                 LOG_OUTBOUND_WARN("Outbound DKIM disabled for this message: outbox_id={}, reason={}",
                                 record.id,
@@ -349,14 +351,15 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
                 result.error_message = "send message body failed: " + error;
                 return result;
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=<message body>",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, message_id={}, request=<message body>",
                             record.id,
-                            smtp_step_name(step));
+                            smtp_step_name(step),
+                            message_id);
             if (!read_smtp_response(stream, buffer, code, response, should_continue, error)) {
                 result.error_message = "read final DATA response failed: " + error;
                 return result;
             }
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, code={}, response=[{}]",
                             record.id,
                             smtp_step_name(step),
                             code,
@@ -372,7 +375,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
         }
 
         case SmtpStep::SendQuit:
-            LOG_OUTBOUND_INFO("Outbound SMTP step: outbox_id={}, step={}, request=QUIT",
+            LOG_OUTBOUND_DEBUG("Outbound SMTP step: outbox_id={}, step={}, request=QUIT",
                             record.id,
                             smtp_step_name(step));
             (void)send_smtp_line(stream, "QUIT", should_continue, error);
@@ -408,12 +411,12 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
         return result;
     }
 
-    LOG_OUTBOUND_INFO("Outbound SMTP start: outbox_id={}, mail_id={}, recipient={}, target_host={}, ports=[{}]",
-                    record.id,
-                    record.mail_id,
-                    record.recipient,
-                    target_host,
-                    join_ports(outbound_ports));
+    LOG_OUTBOUND_DEBUG("Outbound SMTP start: outbox_id={}, mail_id={}, recipient={}, target_host={}, ports=[{}]",
+                     record.id,
+                     record.mail_id,
+                     record.recipient,
+                     target_host,
+                     join_ports(outbound_ports));
 
     const std::string helo_domain = identity_config.helo_domain.empty() ? "outbound.local" : identity_config.helo_domain;
     const std::string envelope_sender = rewrite_sender_domain(record.sender, identity_config.mail_from_domain);
@@ -661,16 +664,16 @@ bool SmtpOutboundClient::accept_mail_ownership(std::unique_ptr<mail> mail_ptr) {
     }
 
     if (!has_external_recipient(*mail_ptr, local_domain_)) {
-        std::cout << "[OUTBOUND_FLOW_SKIP] mail_id=" << mail_ptr->id
-                  << " reason=no-external-recipient local_domain=" << local_domain_
-                  << std::endl;
+        LOG_OUTBOUND_DEBUG("Outbound flow skip: mail_id={}, reason=no-external-recipient, local_domain={}",
+                         mail_ptr->id,
+                         local_domain_);
         return true;
     }
 
     {
         std::lock_guard<std::mutex> lock(notify_mutex_);
         ownership_queue_.push(std::move(mail_ptr));
-        std::cout << "[OUTBOUND_FLOW_OK] Accepted mail ownership, mail_id=" << ownership_queue_.back()->id << std::endl;
+        LOG_OUTBOUND_DEBUG("Outbound flow accepted ownership: mail_id={}", ownership_queue_.back()->id);
     }
     notify_cv_.notify_one();
     return true;
@@ -799,27 +802,27 @@ void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record) {
             return;
         }
 
-        std::cout << "[OUTBOUND_FLOW_OK] mail_id=" << record.mail_id
-                  << " outbox_id=" << record.id
-                  << " attempt_id=" << attempt_id
-                  << " attempt_count=" << record.attempt_count
-                  << std::endl;
+        LOG_OUTBOUND_DEBUG("Outbound flow dispatch: mail_id={}, outbox_id={}, attempt_id={}, attempt_count={}",
+                 record.mail_id,
+                 record.id,
+                 attempt_id,
+                 record.attempt_count);
 
         // Resolve MX targets for recipient domain before SMTP delivery.
         auto target_hosts = build_target_hosts(record, dns_resolver_.get());
-        LOG_OUTBOUND_INFO("Outbound DNS targets: outbox_id={}, recipient={}, hosts=[{}]",
-                        record.id,
-                        record.recipient,
-                        [&target_hosts]() {
-                            std::ostringstream oss;
-                            for (std::size_t i = 0; i < target_hosts.size(); ++i) {
-                                oss << target_hosts[i];
-                                if (i + 1 < target_hosts.size()) {
-                                    oss << ",";
-                                }
-                            }
-                            return oss.str();
-                        }());
+        LOG_OUTBOUND_DEBUG("Outbound DNS targets: outbox_id={}, recipient={}, hosts=[{}]",
+                         record.id,
+                         record.recipient,
+                         [&target_hosts]() {
+                             std::ostringstream oss;
+                             for (std::size_t i = 0; i < target_hosts.size(); ++i) {
+                                 oss << target_hosts[i];
+                                 if (i + 1 < target_hosts.size()) {
+                                     oss << ",";
+                                 }
+                             }
+                             return oss.str();
+                         }());
 
         if (target_hosts.empty()) {
             DeliveryCompletion completion;

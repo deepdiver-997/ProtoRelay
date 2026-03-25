@@ -39,7 +39,7 @@ def worker(idx, args, senders, recipients, subjects, bodies, stats):
 
 def main():
     parser = argparse.ArgumentParser(description="SMTP stress tester")
-    parser.add_argument("--host", default="localhost")
+    parser.add_argument("--host", default="mail.hgmail.xin")
     parser.add_argument("--port", type=int, default=25)
     parser.add_argument("--user", default=None)
     parser.add_argument("--password", default=None)
@@ -53,8 +53,8 @@ def main():
     args = parser.parse_args()
 
     # Customize these lists as needed
-    senders = [f"user{i}@example.com" for i in range(10)]
-    recipients = [f"dest{i}@example.net" for i in range(10)]
+    senders = [f"user{i}@mail.hgmail.xin" for i in range(10)]
+    recipients = [f"dest{i}@mail.hgmail.xin" for i in range(10)]
     subjects = [
         "Load test",
         "Throughput check",

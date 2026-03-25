@@ -138,43 +138,43 @@ std::string decode_base64(const std::string& input) {
 // ========== 邮件解析函数实现 ==========
 
 void analyze_top_header(SmtpsContext& ctx) {
-    LOG_SESSION_INFO("analyze_top_header: header_buffer=[{}]", ctx.header_buffer.substr(0, 200));
+    LOG_SESSION_DEBUG("analyze_top_header: header_buffer=[{}]", ctx.header_buffer.substr(0, 200));
     auto headers = parse_headers_map(ctx.header_buffer);
     ctx.parsed_subject = get_header_value(headers, "subject");
     ctx.source_message_id = get_header_value(headers, "message-id");
 
     if (!ctx.parsed_subject.empty()) {
-        LOG_SESSION_INFO("analyze_top_header: subject=[{}]", ctx.parsed_subject);
+        LOG_SESSION_DEBUG("analyze_top_header: subject=[{}]", ctx.parsed_subject);
     }
     if (!ctx.source_message_id.empty()) {
-        LOG_SESSION_INFO("analyze_top_header: message-id=[{}]", ctx.source_message_id);
+        LOG_SESSION_DEBUG("analyze_top_header: message-id=[{}]", ctx.source_message_id);
     }
 
     auto it = headers.find("content-type");
     if (it != headers.end()) {
-        LOG_SESSION_INFO("analyze_top_header: content-type raw=[{}]", it->second);
+        LOG_SESSION_DEBUG("analyze_top_header: content-type raw=[{}]", it->second);
         std::string lower = to_lower(it->second);
-        LOG_SESSION_INFO("analyze_top_header: content-type lower=[{}]", lower);
+        LOG_SESSION_DEBUG("analyze_top_header: content-type lower=[{}]", lower);
         ctx.boundary = extract_boundary(lower);
-        LOG_SESSION_INFO("analyze_top_header: extracted boundary=[{}]", ctx.boundary);
+        LOG_SESSION_DEBUG("analyze_top_header: extracted boundary=[{}]", ctx.boundary);
         if (lower.find("multipart/") != std::string::npos && !ctx.boundary.empty()) {
             ctx.multipart = true;
             ctx.streaming_enabled = true;
-            LOG_SESSION_INFO("Multipart detected, boundary: {}", ctx.boundary);
+            LOG_SESSION_DEBUG("Multipart detected, boundary: {}", ctx.boundary);
         } else {
-            LOG_SESSION_INFO("Not multipart or no boundary, content-type: {}", lower);
+            LOG_SESSION_DEBUG("Not multipart or no boundary, content-type: {}", lower);
         }
     }
 }
 
 void handle_part_header_parsed(SmtpsContext& ctx) {
-    LOG_SESSION_INFO("handle_part_header_parsed: headers=[{}]", ctx.current_part_headers);
+    LOG_SESSION_DEBUG("handle_part_header_parsed: headers=[{}]", ctx.current_part_headers);
     auto headers = parse_headers_map(ctx.current_part_headers);
     std::string disp = to_lower(headers["content-disposition"]);
     ctx.current_part_encoding = to_lower(headers["content-transfer-encoding"]);
     ctx.current_part_mime = to_lower(headers["content-type"]);
 
-    LOG_SESSION_INFO("handle_part_header_parsed: disposition=[{}], mime=[{}], encoding=[{}]",
+    LOG_SESSION_DEBUG("handle_part_header_parsed: disposition=[{}], mime=[{}], encoding=[{}]",
                      disp, ctx.current_part_mime, ctx.current_part_encoding);
 
     ctx.current_part_is_attachment = disp.find("attachment") != std::string::npos || disp.find("filename") != std::string::npos;
@@ -190,7 +190,7 @@ void handle_part_header_parsed(SmtpsContext& ctx) {
             filename = "attachment";
         }
         ctx.current_attachment_filename = sanitize_filename(filename);
-        LOG_SESSION_INFO("Part detected as attachment: {}", ctx.current_attachment_filename);
+        LOG_SESSION_DEBUG("Part detected as attachment: {}", ctx.current_attachment_filename);
     } else {
         ctx.current_attachment_filename.clear();
         ctx.current_attachment_path.clear();
@@ -203,7 +203,7 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
     }
 
     if (!ctx.multipart || ctx.boundary.empty()) {
-        LOG_SESSION_INFO("Multipart disabled or no boundary, appending to mail_data");
+        LOG_SESSION_DEBUG("Multipart disabled or no boundary, appending to mail_data");
         ctx.mail_data += line + "\r\n";
         return;
     }
@@ -212,18 +212,18 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
     std::string boundary_end = boundary_marker + "--";
     std::string line_lower = to_lower(line);
 
-    LOG_SESSION_INFO("Checking line: [{}] vs boundary_marker: [{}]", line_lower, boundary_marker);
+    LOG_SESSION_DEBUG("Checking line: [{}] vs boundary_marker: [{}]", line_lower, boundary_marker);
 
     if (line_lower == boundary_marker || line_lower == boundary_end) {
-        LOG_SESSION_INFO("Boundary detected: [{}]", line_lower);
+        LOG_SESSION_DEBUG("Boundary detected: [{}]", line_lower);
         // finalize_part will be called by caller
         if (line_lower == boundary_end) {
-            LOG_SESSION_INFO("Multipart end detected");
+            LOG_SESSION_DEBUG("Multipart end detected");
             ctx.in_part_header = false;
             ctx.current_part_headers.clear();
             return;
         }
-        LOG_SESSION_INFO("New part starting");
+        LOG_SESSION_DEBUG("New part starting");
         ctx.in_part_header = true;
         ctx.current_part_headers.clear();
         return;
@@ -231,14 +231,14 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
 
     if (ctx.in_part_header) {
         if (line.empty()) {
-            LOG_SESSION_INFO("Part header complete, processing headers: [{}]", ctx.current_part_headers.substr(0, 100));
+            LOG_SESSION_DEBUG("Part header complete, processing headers: [{}]", ctx.current_part_headers.substr(0, 100));
             ctx.in_part_header = false;
             handle_part_header_parsed(ctx);
-            LOG_SESSION_INFO("After handle_part_header: mime=[{}], is_attachment={}, filename=[{}]",
+            LOG_SESSION_DEBUG("After handle_part_header: mime=[{}], is_attachment={}, filename=[{}]",
                              ctx.current_part_mime, ctx.current_part_is_attachment, 
                              ctx.current_attachment_filename);
         } else {
-            LOG_SESSION_INFO("Part header line: [{}]", line);
+            LOG_SESSION_DEBUG("Part header line: [{}]", line);
             ctx.current_part_headers += line + "\r\n";
         }
         return;
@@ -247,7 +247,7 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
     if (ctx.current_part_is_attachment) {
         // 附件内容行处理，写入附件缓冲区
         // 由 SmtpsSession 处理缓冲区写入
-        LOG_SESSION_INFO("Attachment body line (will be written to buffer): [{}]", line.substr(0, 60));
+        LOG_SESSION_DEBUG("Attachment body line (will be written to buffer): [{}]", line.substr(0, 60));
         return;
     }
 
@@ -255,7 +255,7 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
     size_t added = line.size() + 2;
     const size_t MAX_BODY_BYTES = 10 * 1024 * 1024;
     if (ctx.text_body_size + added > MAX_BODY_BYTES) {
-        LOG_SESSION_INFO("Body size exceeds limit, marking as exceeded");
+        LOG_SESSION_DEBUG("Body size exceeds limit, marking as exceeded");
         return;
     }
     ctx.text_body_size += added;
@@ -268,7 +268,7 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
 
 void process_message_data(SmtpsContext& ctx, const std::string& data) {
     ctx.line_buffer += data;
-    LOG_SESSION_INFO("process_message_data: buffer size={}, streaming_enabled={}",
+    LOG_SESSION_DEBUG("process_message_data: buffer size={}, streaming_enabled={}",
                      ctx.line_buffer.size(), ctx.streaming_enabled);
 
     while (true) {
@@ -288,21 +288,21 @@ void process_message_data(SmtpsContext& ctx, const std::string& data) {
             if (line.empty()) {
                 ctx.header_parsed = true;
                 analyze_top_header(ctx);
-                LOG_SESSION_INFO("Header parsing complete, multipart={}, boundary=[{}], streaming={}",
+                LOG_SESSION_DEBUG("Header parsing complete, multipart={}, boundary=[{}], streaming={}",
                                  ctx.multipart, ctx.boundary, ctx.streaming_enabled);
             }
             continue;
         }
 
         if (ctx.streaming_enabled) {
-            LOG_SESSION_INFO("Processing body line (streaming): [{}]", line.substr(0, 60));
+            LOG_SESSION_DEBUG("Processing body line (streaming): [{}]", line.substr(0, 60));
             handle_multipart_line(ctx, line);
         } else {
-            LOG_SESSION_INFO("Processing body line (buffered): [{}]", line.substr(0, 60));
+            LOG_SESSION_DEBUG("Processing body line (buffered): [{}]", line.substr(0, 60));
             const size_t MAX_BODY_BYTES = 10 * 1024 * 1024;
             ctx.buffered_body_size += line.size() + 2;
             if (ctx.buffered_body_size > MAX_BODY_BYTES) {
-                LOG_SESSION_INFO("Buffered body size exceeds limit");
+                LOG_SESSION_DEBUG("Buffered body size exceeds limit");
                 ctx.body_limit_exceeded = true;
             } else {
                 ctx.mail_data += line + "\r\n";
@@ -314,7 +314,7 @@ void process_message_data(SmtpsContext& ctx, const std::string& data) {
 void finalize_part(SmtpsContext& ctx, const std::string& attachment_storage_path) {
     // 如果当前有待处理的附件数据（通过缓冲区），需要刷新到文件
     if (ctx.current_part_is_attachment && !ctx.current_attachment_filename.empty()) {
-        LOG_SESSION_INFO("Finalizing attachment: filename=[{}], filepath=[{}], size={} bytes",
+        LOG_SESSION_DEBUG("Finalizing attachment: filename=[{}], filepath=[{}], size={} bytes",
                         ctx.current_attachment_filename, ctx.current_attachment_path,
                         ctx.current_attachment_size);
         

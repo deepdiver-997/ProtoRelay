@@ -1,0 +1,34 @@
+{
+  "achieve": "mysql_distributed",
+  "host": "127.0.0.1",
+  "user": "mail_user",
+  "password": "mail_pass",
+  "database": "mail_system",
+  "initialize_script": "sql/create_tables.sql",
+  "port": 3306,
+  "initial_pool_size": 3,
+  "max_pool_size": 10,
+  "connection_timeout": 5,
+  "idle_timeout": 60,
+  "distributed_node_retry_interval": 5,
+  "nodes": [
+    {
+      "name": "primary",
+      "host": "10.0.0.10",
+      "port": 3306,
+      "user": "mail_user",
+      "password": "mail_pass",
+      "database": "mail_system",
+      "enabled": true
+    },
+    {
+      "name": "replica-a",
+      "host": "10.0.0.11",
+      "port": 3306,
+      "user": "mail_user",
+      "password": "mail_pass",
+      "database": "mail_system",
+      "enabled": true
+    }
+  ]
+}

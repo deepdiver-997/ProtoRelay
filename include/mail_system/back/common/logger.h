@@ -46,28 +46,41 @@ public:
     void init(const std::string& log_file = "logs/mail_system.log",
               size_t max_file_size = 1024 * 1024 * 5,  // 5MB
               size_t max_files = 3,
-              spdlog::level::level_enum level = spdlog::level::info) {
+              spdlog::level::level_enum level = spdlog::level::info,
+              bool enable_console_sink = true,
+              bool enable_file_sink = true) {
         if (m_initialized) {
             return;
         }
 
         try {
-            // 确保日志目录存在
-            std::filesystem::path log_dir(log_file);
-            if (!std::filesystem::exists(log_dir.parent_path())) {
-                std::filesystem::create_directories(log_dir.parent_path());
+            // 避免配置错误导致完全无日志
+            if (!enable_console_sink && !enable_file_sink) {
+                enable_console_sink = true;
             }
-            // 创建多 sink：终端 + 文件
-            auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-            console_sink->set_level(level);
-            console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] [%n] %v");
 
-            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                log_file, max_file_size, max_files);
-            file_sink->set_level(level);
-            file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%n] %v");
+            std::vector<spdlog::sink_ptr> sinks;
 
-            std::vector<spdlog::sink_ptr> sinks {console_sink, file_sink};
+            if (enable_console_sink) {
+                auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+                console_sink->set_level(level);
+                console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] [%n] %v");
+                sinks.push_back(console_sink);
+            }
+
+            if (enable_file_sink) {
+                // 确保日志目录存在
+                std::filesystem::path log_dir(log_file);
+                if (!log_dir.parent_path().empty() && !std::filesystem::exists(log_dir.parent_path())) {
+                    std::filesystem::create_directories(log_dir.parent_path());
+                }
+
+                auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                    log_file, max_file_size, max_files);
+                file_sink->set_level(level);
+                file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%n] %v");
+                sinks.push_back(file_sink);
+            }
 
             // 创建各模块 logger
             m_loggers[static_cast<size_t>(LogModule::SERVER)] =
@@ -98,6 +111,7 @@ public:
             // 设置默认 logger
             spdlog::set_default_logger(m_loggers[static_cast<size_t>(LogModule::SERVER)]);
             spdlog::set_level(level);
+            spdlog::flush_on(spdlog::level::warn);
 
             m_initialized = true;
             spdlog::info("Logger initialized");
@@ -189,18 +203,42 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
 // ==================== 模块化日志宏控制 ====================
 
 // 定义各模块是否启用调试日志的宏（默认都关闭，需要时开启）
+#ifndef ENABLE_SERVER_DEBUG_LOG
 #define ENABLE_SERVER_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_NETWORK_DEBUG_LOG
 #define ENABLE_NETWORK_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_DATABASE_DEBUG_LOG
 #define ENABLE_DATABASE_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_DATABASE_QUERY_DEBUG_LOG
 #define ENABLE_DATABASE_QUERY_DEBUG_LOG 0    // 数据库查询详细日志（通常关闭）
+#endif
+#ifndef ENABLE_SMTP_DEBUG_LOG
 #define ENABLE_SMTP_DEBUG_LOG 0
-#define ENABLE_SMTP_DETAIL_DEBUG_LOG 1      // SMTP 状态机详细日志（通常关闭）
-#define ENABLE_SESSION_DEBUG_LOG 1
+#endif
+#ifndef ENABLE_SMTP_DETAIL_DEBUG_LOG
+#define ENABLE_SMTP_DETAIL_DEBUG_LOG 0      // SMTP 状态机详细日志（通常关闭）
+#endif
+#ifndef ENABLE_SESSION_DEBUG_LOG
+#define ENABLE_SESSION_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_THREAD_POOL_DEBUG_LOG
 #define ENABLE_THREAD_POOL_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_FILE_IO_DEBUG_LOG
 #define ENABLE_FILE_IO_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_AUTH_DEBUG_LOG
 #define ENABLE_AUTH_DEBUG_LOG 0
-#define ENABLE_PERSISTENT_QUEUE_DEBUG_LOG 1
-#define ENABLE_OUTBOUND_DEBUG_LOG 1
+#endif
+#ifndef ENABLE_PERSISTENT_QUEUE_DEBUG_LOG
+#define ENABLE_PERSISTENT_QUEUE_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_OUTBOUND_DEBUG_LOG
+#define ENABLE_OUTBOUND_DEBUG_LOG 0
+#endif
 
 // ==================== 模块化日志宏定义 ====================
 
@@ -309,7 +347,7 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
     }
 #define LOG_SMTP_DETAIL_INFO(...) \
     if constexpr (ENABLE_SMTP_DETAIL_DEBUG_LOG) { \
-        mail_system::log(mail_system::LogModule::SMTP_DETAIL)->info(__VA_ARGS__); \
+        mail_system::log(mail_system::LogModule::SMTP_DETAIL)->debug(__VA_ARGS__); \
     }
 #define LOG_SMTP_DETAIL_WARN(...) \
     if constexpr (ENABLE_SMTP_DETAIL_DEBUG_LOG) { \
@@ -330,7 +368,7 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
         mail_system::log(mail_system::LogModule::SESSION)->debug(__VA_ARGS__); \
     }
 #define LOG_SESSION_INFO(...) \
-    mail_system::log(mail_system::LogModule::SESSION)->info(__VA_ARGS__)
+    mail_system::log(mail_system::LogModule::SESSION)->debug(__VA_ARGS__)
 #define LOG_SESSION_WARN(...) \
     mail_system::log(mail_system::LogModule::SESSION)->warn(__VA_ARGS__)
 #define LOG_SESSION_ERROR(...) \

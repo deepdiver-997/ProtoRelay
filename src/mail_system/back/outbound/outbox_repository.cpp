@@ -138,12 +138,14 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(const std::string& worke
     }
 
     std::ostringstream select_sql;
-    select_sql << "SELECT id, mail_id, sender, recipient, attempt_count, max_attempts FROM mail_outbox "
+    select_sql << "SELECT o.id, o.mail_id, o.sender, o.recipient, o.attempt_count, o.max_attempts, m.body_path "
+               << "FROM mail_outbox o "
+               << "LEFT JOIN mails m ON m.id = o.mail_id "
                << "WHERE (status = " << static_cast<int>(OutboxStatus::PENDING)
                << " OR status = " << static_cast<int>(OutboxStatus::RETRY) << ") "
                << "AND next_attempt_at <= NOW() "
                << "AND (lease_until IS NULL OR lease_until <= NOW()) "
-               << "ORDER BY priority DESC, id ASC LIMIT " << limit;
+               << "ORDER BY o.priority DESC, o.id ASC LIMIT " << limit;
 
     auto result = conn->query(select_sql.str());
     if (!result || result->get_row_count() == 0) {
@@ -190,6 +192,7 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(const std::string& worke
         item.recipient = row.count("recipient") ? row.at("recipient") : std::string{};
         item.attempt_count = row.count("attempt_count") ? (std::stoi(row.at("attempt_count")) + 1) : 1;
         item.max_attempts = row.count("max_attempts") ? std::stoi(row.at("max_attempts")) : kDefaultMaxAttempts;
+        item.body_path = row.count("body_path") ? row.at("body_path") : std::string{};
         claimed.push_back(std::move(item));
     }
 

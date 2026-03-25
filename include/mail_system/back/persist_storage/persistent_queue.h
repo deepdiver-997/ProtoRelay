@@ -68,6 +68,8 @@ public:
     bool is_probable_duplicate_mail(mail* mail_data, MySQLConnection* conn);
 #endif
 
+    bool is_duplicate_by_source_message_id(mail* mail_data, MySQLConnection* conn);
+
     bool batch_delete_metadata(mail* mail_data, std::string& error);
 
     // 批量插入附件元数据到数据库

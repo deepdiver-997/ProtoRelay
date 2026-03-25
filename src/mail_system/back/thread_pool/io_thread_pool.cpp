@@ -19,7 +19,7 @@ void IOThreadPool::start() {
     std::cout << "Starting IOThreadPool..." << std::endl;
 
     m_work_guards.reserve(m_thread_count);
-    for(int i = 0;i < m_thread_count; ++i)
+    for (size_t i = 0; i < m_thread_count; ++i)
         m_work_guards.emplace_back(boost::asio::make_work_guard(
             m_io_contexts[i]->get_executor()));
 
