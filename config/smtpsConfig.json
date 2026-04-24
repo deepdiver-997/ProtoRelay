@@ -35,10 +35,15 @@
   "outbound_poll_backoff_shift_cap": 6,
   "outbound_ports": [25],
   "outbound_max_attempts": 8,
+  "inbound_persist_wait_timeout_ms": 5000,
+  "persist_max_inflight_mails": 2048,
+  "persist_min_available_memory_mb": 256,
+  "persist_min_db_available_connections": 1,
   "log_level": "info",
   "log_to_console": true,
   "log_to_file": true,
   "log_file": "../logs/server.log",
   "mail_storage_path": "../mail/",
-  "attachment_storage_path": "../attachments/"
+  "attachment_storage_path": "../attachments/",
+  "inbound_ack_mode": "after_enqueue"
 }

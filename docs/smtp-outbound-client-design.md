@@ -2,7 +2,7 @@
 
 ## 1. 设计范围
 
-本文档定义 Mail System V7 的出站投递模块（SMTP Client）的最小可行设计（MVP）。
+本文档定义 Mail System V8 的出站投递模块（SMTP Client）的最小可行设计（MVP）。
 
 目标：
 - 将系统内邮件可靠投递到外部 SMTP 服务器
@@ -38,8 +38,9 @@
 | `Push + Poll` 混合 | 高 | 高 | 中 | 推荐 |
 
 推荐落地：
-- 内部函数入口（双轨）：`notifyNewOutboxItem(std::shared_ptr<mail> mail_ptr, outbox_id)`
-- 快路径优先使用内存对象，慢路径（重启恢复/对象失效）使用 `outbox_id -> DB` 读取
+- 内部函数入口（双轨）：`notifyNewOutboxItem(std::unique_ptr<mail> mail_ptr, reserved_outbox_records)`
+- 快路径优先使用进程内已持有的邮件对象与已保留租约的 outbox 记录
+- 慢路径（重启恢复/热路径失败）继续通过 `claim_batch()` 从数据库接管
 - 保留定时轮询作为兜底（通知丢失或进程重启恢复）
 
 ## 4. 运行时线程模型（v1）
@@ -150,7 +151,7 @@
 | 接口 | 说明 |
 |------|------|
 | `enqueueOutbox(mail_id, priority)` | 创建出站任务 |
-| `notifyNewOutboxItem(mail_ptr, outbox_id)` | 进程内快速唤醒（内存快路径 + DB 慢路径） |
+| `notifyNewOutboxItem(mail_ptr, reserved_records)` | 进程内快速唤醒（内存快路径 + DB 慢路径） |
 | `pollAndDispatch(limit)` | 定时轮询兜底 |
 | `claimBatch(worker_id, limit, lease_sec)` | 原子抢占任务 |
 | `drainCompletionQueue(max_items)` | 主线程收敛投递完成事件 |
@@ -170,7 +171,7 @@
 - 接口和存储抽象可兼容后续对象存储迁移
 - 数据库更新可异步批量执行，不阻塞主线程轮询
 
-## 12. 当前实现对照（2026-03）
+## 12. 当前实现对照（2026-04）
 
 本节用于回答“当前代码到底怎么跑”的问题，避免设计与实现偏差。
 
@@ -186,16 +187,45 @@
 
 ### 12.2 `mail_outbox` 何时写入
 
-- 当前实现中，`mail_outbox` 已在持久化阶段写入：
-	- `PersistentQueue::process_task()` 先落库 `mails/mail_recipients/attachments`
-	- 成功后调用 `enqueue_outbox_tasks(mail_data)`
-	- `enqueue_outbox_tasks()` 内部执行 `OutboxRepository::enqueue_from_mail(...)` 写入 `mail_outbox`
-	- 写入后再 `notify_outbox_ready()` 唤醒 outbound client
+- 当前实现中，`mail_outbox` 与 `mails/mail_recipients/attachments` 已处于同一个事务边界：
+	- `PersistentQueue::process_task()` 判断是否存在外域收件人，以及当前节点是否可以做本地热投递
+	- `persist_mail_transactional(...)` 开启单个 DB 事务
+	- 事务内依次写入：
+		- `mails`
+		- `mail_recipients`
+		- `attachments`
+		- `mail_outbox`
+	- 只有事务提交成功后，才会把 `unique_ptr<mail>` 和预留的 outbox 记录交给本地 `SmtpOutboundClient`
+- 如果当前节点具备热投递条件：
+	- `mail_outbox` 会直接插入为 `SENDING`
+	- 同时写入本机 `lease_owner` 和短期 `lease_until`
+	- 这样其他节点在租约过期前不会抢走这批任务
+- 如果当前节点不做热投递：
+	- `mail_outbox` 正常以 `PENDING` 写入
+	- 后续由各节点通过 `claim_batch()` 竞争获取
 - 结论：
-	- 不是“client 先读出要补写的 outbox 再写回”
-	- 你的判断是对的：在持久化阶段直接写 `mail_outbox` 更好，可减少竞争窗口
+	- 不是“持久化完再补写 outbox”
+	- 也不是“先本地投递，再决定要不要落 outbox”
+	- 当前实现已经满足“持久化元数据和出站任务记录一起提交”
 
-### 12.3 `mail_recipients.status` 当前语义
+### 12.3 本地热投递到底做了什么
+
+- 当前热投递优先解决的是“本机先拿到投递权”：
+	- `PersistentQueue` 在事务里直接为本机写入短租约
+	- 事务提交后把 `mail` 所有权和对应的 reserved outbox records 交给本地 `SmtpOutboundClient`
+	- `SmtpOutboundClient` 直接调度这些 reserved records，不必再走一次 `claim_batch()`
+- 如果本地接管失败：
+	- `PersistentQueue` 会释放这些本地租约
+	- 对应 outbox 记录回到 `PENDING`
+	- 其他节点随后可以正常抢占，不会永久卡死
+- 当前热投递还没有做到“完全不读文件”：
+	- `build_outbound_message(...)` 仍然通过 `record.body_path` 读取正文
+	- 也就是说，热路径目前节省的是跨节点竞争和一次 DB claim，不是完全绕开正文文件 I/O
+- 真正的“纯内存热投递”需要进一步改造：
+	- 让出站构造逻辑优先消费 `hot_mail_cache_` 里的正文/附件视图
+	- 只有缓存缺失时才退回 `body_path` 读取
+
+### 12.4 `mail_recipients.status` 当前语义
 
 - 当前表注释语义：`1=未读，2=未送达`
 - 当前代码按“是否本域”决定状态，但本地判断实现仍较粗糙（示例逻辑是固定比较），后续应统一为：
@@ -233,6 +263,6 @@
 
 ## 14. 推荐落地调整（下一步）
 
-1. 在 `SmtpOutboundClient::run_loop` 增加自适应 backoff（替代固定 `kLoopWaitMs`）。
+1. 让 `build_outbound_message(...)` 优先从 `hot_mail_cache_` 构造 MIME 数据，真正打通“纯内存热投递”。
 2. 将本域判定统一封装，修正 `mail_recipients.status` 赋值逻辑，避免硬编码比较。
-3. 将 `enqueue_outbox_tasks` 与邮件元数据写入置于同一事务边界（可选增强），进一步降低边界竞争与不一致风险。
+3. 评估是否需要把“本机保留租约时长”配置化，以便在多机房和慢链路环境下更细调优。

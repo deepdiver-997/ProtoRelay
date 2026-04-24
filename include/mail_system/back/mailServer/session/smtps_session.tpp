@@ -347,10 +347,12 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::submit_mail_to_queue() {
+persist_storage::SubmitOwnedMailResult SmtpsSession<ConnectionType>::submit_mail_to_queue() {
+    persist_storage::SubmitOwnedMailResult result;
     if (!this->get_mail()) {
+        result.error = "no current mail";
         LOG_SESSION_WARN("No mail to submit");
-        return;
+        return result;
     }
 
     if (!context_.parsed_subject.empty()) {
@@ -366,45 +368,51 @@ void SmtpsSession<ConnectionType>::submit_mail_to_queue() {
     }
 
     if (persistent_queue_) {
-        if (!persistent_queue_->submit_mail(this->get_mail())) {
-            LOG_SESSION_ERROR("Failed to submit mail {} to persistent queue", this->get_mail()->id);
-            return;
+        auto owned_mail = this->get_mail_ptr();
+        result = persistent_queue_->submit_owned_mail(std::move(owned_mail));
+        if (!result.accepted) {
+            this->mail_ = std::move(result.rejected_mail);
+            LOG_SESSION_ERROR("Failed to submit mail {} to persistent queue: {}",
+                              this->get_mail() ? this->get_mail()->id : 0,
+                              result.error);
+            return result;
         }
-        LOG_SESSION_INFO("Submitted mail {} to persistent queue", this->get_mail()->id);
+        pending_submission_ = result.ticket;
+        LOG_SESSION_INFO("Submitted mail {} to persistent queue", pending_submission_.mail_id);
     } else {
+        result.error = "persistent queue is null";
         LOG_SESSION_ERROR("Persistent queue is null, cannot submit mail");
-        return;
+        return result;
     }
+
+    return result;
 }
 
 template <typename ConnectionType>
 bool SmtpsSession<ConnectionType>::check_mail_persist_status() {
-    if (!this->get_mail()) {
-        LOG_SESSION_WARN("No current mail to check persist status");
+    if (!has_pending_mail_submission()) {
+        LOG_SESSION_WARN("No pending mail submission to check persist status");
         return false;
     }
 
-    mail* mail_ptr = this->get_mail();
-    auto status = mail_ptr->persist_status;
+    auto status = get_pending_mail_persist_status();
 
     if (status == persist_storage::PersistStatus::SUCCESS) {
-        this->flush_buffer_to_disk();
-        LOG_SESSION_INFO("Mail {} persisted successfully", mail_ptr->id);
+        LOG_SESSION_INFO("Mail {} persisted successfully", pending_submission_.mail_id);
         return true;
     }
 
     if (status == persist_storage::PersistStatus::PENDING ||
         status == persist_storage::PersistStatus::PROCESSING) {
         // 仍在处理中，调用方应继续等待
-        LOG_SESSION_DEBUG("Mail {} still processing (status {})", mail_ptr->id, static_cast<int>(status));
+        LOG_SESSION_DEBUG("Mail {} still processing (status {})",
+                          pending_submission_.mail_id,
+                          static_cast<int>(status));
         return false;
     }
 
-    LOG_SESSION_ERROR("Mail {} persist failed with status {}, cleaning up",
-        mail_ptr->id, static_cast<int>(status));
-    std::string error;
-    this->persistent_queue_->batch_delete_metadata(mail_ptr, error);
-    this->cleanup_mail_files(mail_ptr);
+    LOG_SESSION_ERROR("Mail {} persist failed with status {}",
+        pending_submission_.mail_id, static_cast<int>(status));
     return false;
 }
 
@@ -422,6 +430,40 @@ void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
     if (!this->m_server->m_outboundClient->accept_mail_ownership(std::move(owned_mail))) {
         LOG_SESSION_WARN("Failed to transfer mail ownership to outbound client");
     }
+}
+
+template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::discard_current_mail() {
+    if (!this->get_mail()) {
+        return;
+    }
+    cleanup_mail_files(this->get_mail());
+    reset_mail_state();
+}
+
+template <typename ConnectionType>
+bool SmtpsSession<ConnectionType>::has_pending_mail_submission() const {
+    return pending_submission_.valid();
+}
+
+template <typename ConnectionType>
+persist_storage::PersistStatus SmtpsSession<ConnectionType>::get_pending_mail_persist_status() const {
+    if (!pending_submission_.valid()) {
+        return persist_storage::PersistStatus::CANCELLED;
+    }
+    return pending_submission_.status.load();
+}
+
+template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::cancel_pending_mail_submission() {
+    if (pending_submission_.valid()) {
+        pending_submission_.request_cancel();
+    }
+}
+
+template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::clear_pending_mail_submission() {
+    pending_submission_ = persist_storage::PersistSubmissionTicket{};
 }
 
 template <typename ConnectionType>
@@ -479,6 +521,7 @@ void SmtpsSession<ConnectionType>::reset_mail_state() {
     buffer_used_ = 0;
     buffer_expand_count_ = 0;
     async_write_futures_.clear();
+    clear_pending_mail_submission();
 
     context_.mail_data.clear();
     context_.header_buffer.clear();

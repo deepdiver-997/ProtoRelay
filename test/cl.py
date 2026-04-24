@@ -39,7 +39,7 @@ def worker(idx, args, senders, recipients, subjects, bodies, stats):
 
 def main():
     parser = argparse.ArgumentParser(description="SMTP stress tester")
-    parser.add_argument("--host", default="mail.hgmail.xin")
+    parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=25)
     parser.add_argument("--user", default=None)
     parser.add_argument("--password", default=None)

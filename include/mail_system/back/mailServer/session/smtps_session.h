@@ -51,11 +51,16 @@ public:
     std::string get_last_command_args() const override;
 
     void create_mail_on_data_command();
-    void submit_mail_to_queue();
+    persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
     bool check_mail_persist_status();
     void transfer_mail_ownership_to_outbound();
     void flush_body_and_wait();
     void reset_mail_state();
+    void discard_current_mail();
+    bool has_pending_mail_submission() const;
+    persist_storage::PersistStatus get_pending_mail_persist_status() const;
+    void cancel_pending_mail_submission();
+    void clear_pending_mail_submission();
 
     void process_message_data(const std::string& data);
     void handle_multipart_line_and_write_attachment(const std::string& line);
@@ -121,6 +126,7 @@ private:
 
     std::vector<std::future<bool>> async_write_futures_;
     std::shared_ptr<persist_storage::PersistentQueue> persistent_queue_;
+    persist_storage::PersistSubmissionTicket pending_submission_;
 };
 
 using TcpSmtpsSession = SmtpsSession<TcpConnection>;

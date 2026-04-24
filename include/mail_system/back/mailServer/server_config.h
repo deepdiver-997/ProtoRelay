@@ -13,6 +13,28 @@
 
 namespace mail_system {
 
+enum class InboundAckMode : int {
+    AFTER_PERSIST = 0,
+    AFTER_ENQUEUE = 1,
+};
+
+inline const char* inbound_ack_mode_to_string(InboundAckMode mode) {
+    switch (mode) {
+    case InboundAckMode::AFTER_ENQUEUE:
+        return "after_enqueue";
+    case InboundAckMode::AFTER_PERSIST:
+    default:
+        return "after_persist";
+    }
+}
+
+inline InboundAckMode inbound_ack_mode_from_string(const std::string& raw_mode) {
+    if (raw_mode == "after_enqueue") {
+        return InboundAckMode::AFTER_ENQUEUE;
+    }
+    return InboundAckMode::AFTER_PERSIST;
+}
+
 // 服务器配置类
 struct ServerConfig {
     // 网络配置
@@ -79,6 +101,13 @@ struct ServerConfig {
     uint32_t outbound_poll_backoff_max_ms;  // 空闲轮询回退上限
     uint32_t outbound_poll_backoff_shift_cap; // 指数回退最大移位次数
 
+    // 入站确认与持久化背压配置
+    InboundAckMode inbound_ack_mode;   // DATA_END 后是等持久化成功再 ACK，还是入队即 ACK
+    uint32_t inbound_persist_wait_timeout_ms; // after_persist 模式下等待持久化完成的超时时间
+    size_t persist_max_inflight_mails; // 持久化层总在途邮件数上限，0 表示不启用
+    size_t persist_min_available_memory_mb; // 可用内存低于该阈值时拒绝新异步入队，0 表示不启用
+    size_t persist_min_db_available_connections; // DB 空闲连接低于该阈值时拒绝入队，0 表示不启用
+
     // 出站投递身份与 DKIM 配置
     std::string outbound_helo_domain;      // EHLO/HELO 使用的域名
     std::string outbound_mail_from_domain; // 若非空，改写 envelope MAIL FROM 域名
@@ -126,6 +155,11 @@ struct ServerConfig {
         , outbound_poll_backoff_base_ms(50)
         , outbound_poll_backoff_max_ms(1200)
         , outbound_poll_backoff_shift_cap(6)
+        , inbound_ack_mode(InboundAckMode::AFTER_PERSIST)
+        , inbound_persist_wait_timeout_ms(5000)
+        , persist_max_inflight_mails(2048)
+        , persist_min_available_memory_mb(256)
+        , persist_min_db_available_connections(1)
         , outbound_helo_domain("outbound.local")
         , outbound_mail_from_domain("")
         , outbound_rewrite_header_from(true)
@@ -193,6 +227,11 @@ struct ServerConfig {
                   << "\noutbound_poll_backoff_base_ms = " << outbound_poll_backoff_base_ms
                   << "\noutbound_poll_backoff_max_ms = " << outbound_poll_backoff_max_ms
                   << "\noutbound_poll_backoff_shift_cap = " << outbound_poll_backoff_shift_cap
+                  << "\ninbound_ack_mode = " << inbound_ack_mode_to_string(inbound_ack_mode)
+                  << "\ninbound_persist_wait_timeout_ms = " << inbound_persist_wait_timeout_ms
+                  << "\npersist_max_inflight_mails = " << persist_max_inflight_mails
+                  << "\npersist_min_available_memory_mb = " << persist_min_available_memory_mb
+                  << "\npersist_min_db_available_connections = " << persist_min_db_available_connections
                   << "\noutbound_helo_domain = " << outbound_helo_domain
                   << "\noutbound_mail_from_domain = " << outbound_mail_from_domain
                   << "\noutbound_rewrite_header_from = " << (outbound_rewrite_header_from ? "true" : "false")
@@ -265,6 +304,10 @@ struct ServerConfig {
         // 超时配置验证
         if (connection_timeout == 0 || read_timeout == 0 || write_timeout == 0) {
             std::cerr << "Error: Timeout values must be greater than 0" << std::endl;
+            return false;
+        }
+        if (inbound_persist_wait_timeout_ms == 0) {
+            std::cerr << "Error: inbound_persist_wait_timeout_ms must be greater than 0" << std::endl;
             return false;
         }
 
@@ -399,6 +442,16 @@ struct ServerConfig {
         outbound_poll_backoff_base_ms = json_config.value("outbound_poll_backoff_base_ms", outbound_poll_backoff_base_ms);
         outbound_poll_backoff_max_ms = json_config.value("outbound_poll_backoff_max_ms", outbound_poll_backoff_max_ms);
         outbound_poll_backoff_shift_cap = json_config.value("outbound_poll_backoff_shift_cap", outbound_poll_backoff_shift_cap);
+        inbound_ack_mode = inbound_ack_mode_from_string(
+            json_config.value("inbound_ack_mode", std::string(inbound_ack_mode_to_string(inbound_ack_mode))));
+        inbound_persist_wait_timeout_ms =
+            json_config.value("inbound_persist_wait_timeout_ms", inbound_persist_wait_timeout_ms);
+        persist_max_inflight_mails =
+            json_config.value("persist_max_inflight_mails", persist_max_inflight_mails);
+        persist_min_available_memory_mb =
+            json_config.value("persist_min_available_memory_mb", persist_min_available_memory_mb);
+        persist_min_db_available_connections =
+            json_config.value("persist_min_db_available_connections", persist_min_db_available_connections);
         outbound_helo_domain = json_config.value("outbound_helo_domain", outbound_helo_domain);
         outbound_mail_from_domain = json_config.value("outbound_mail_from_domain", outbound_mail_from_domain);
         outbound_rewrite_header_from = json_config.value("outbound_rewrite_header_from", outbound_rewrite_header_from);

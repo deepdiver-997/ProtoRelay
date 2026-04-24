@@ -40,6 +40,49 @@ Example:
 ./test/smtpsServer --config config/smtpsConfig.json
 ```
 
+## Inbound ACK and Persistence Tuning
+
+Inbound SMTP acceptance is now configurable at runtime:
+
+- `inbound_ack_mode=after_persist`: reply `250 OK` only after persistence succeeds.
+- `inbound_ack_mode=after_enqueue`: reply `250 OK` as soon as the message is accepted by the persistence queue.
+
+Related tuning fields:
+
+- `inbound_persist_wait_timeout_ms`: max wait time in `after_persist` mode before returning timeout failure.
+- `persist_max_inflight_mails`: cap for total owned messages in persistence pipeline.
+- `persist_min_available_memory_mb`: reject enqueue below free-memory threshold.
+- `persist_min_db_available_connections`: reject enqueue when DB pool is under pressure.
+
+Example:
+
+```json
+{
+  "inbound_ack_mode": "after_enqueue",
+  "inbound_persist_wait_timeout_ms": 5000,
+  "persist_max_inflight_mails": 2048,
+  "persist_min_available_memory_mb": 256,
+  "persist_min_db_available_connections": 1
+}
+```
+
+Operational note:
+
+- `after_enqueue` improves throughput and tail latency, but `250 OK` no longer guarantees durable persistence.
+- `after_persist` is safer for durability, but throughput is bounded by persistence completion latency.
+- Local benchmark note: on this MacBook Pro, `after_enqueue` small-mail tests with `uv run ./test/cl.py` reached roughly 1.9k-3.0k msg/s, with 1000 messages at 2976.9 msg/s and 10000 messages at 2147.5 msg/s under `--concurrency 100`.
+- These are single-machine throughput figures under the current test workload, not a production SLA.
+
+## Current Outbound Hot-Dispatch Semantics
+
+The persistence queue now writes `mail_outbox` in the same DB transaction as `mails`, `mail_recipients`, and `attachments`.
+
+- If the local node can immediately own outbound delivery, it inserts those `mail_outbox` rows as locally leased `SENDING`
+- After commit, it hands `unique_ptr<mail>` plus the reserved outbox records to the local outbound client
+- If local handoff fails, the reservations are released back to `PENDING` so other nodes can claim them
+
+This hot path currently optimizes for local ownership and one less DB claim round. MIME construction still falls back to reading `body_path`, so it is not yet a fully file-free in-memory outbound path.
+
 ## Build-Time Version Injection
 
 Version/build metadata is generated during CMake configure and injected into the binary, including:

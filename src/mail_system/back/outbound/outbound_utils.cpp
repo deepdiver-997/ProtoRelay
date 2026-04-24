@@ -407,7 +407,20 @@ std::string build_dkim_header(const std::unordered_map<std::string, std::string>
 
 } // namespace
 
+bool ensure_mail_raw_payload_loaded(mail& mail_data) {
+    if (!mail_data.body.empty()) {
+        return true;
+    }
+    if (mail_data.body_path.empty()) {
+        return false;
+    }
+
+    mail_data.body = read_file_all(mail_data.body_path);
+    return !mail_data.body.empty();
+}
+
 std::string build_outbound_message(const OutboxRecord& record,
+                                   const mail* hot_mail,
                                    const std::string& header_from,
                                    const OutboundIdentityConfig& identity_config,
                                    bool* dkim_applied,
@@ -420,7 +433,12 @@ std::string build_outbound_message(const OutboxRecord& record,
         dkim_error->clear();
     }
 
-    const std::string raw_payload = read_file_all(record.body_path);
+    std::string raw_payload;
+    if (hot_mail && !hot_mail->body.empty()) {
+        raw_payload = hot_mail->body;
+    } else {
+        raw_payload = read_file_all(record.body_path);
+    }
     if (!raw_payload.empty()) {
         std::string outbound_raw = raw_payload;
 

@@ -2,6 +2,7 @@
 
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/mysql_pool.h"
+#include "mail_system/back/outbound/outbound_utils.h"
 #include <algorithm>
 #include <chrono>
 #include <sstream>
@@ -197,6 +198,139 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(const std::string& worke
     }
 
     return claimed;
+}
+
+std::unique_ptr<mail> OutboxRepository::load_mail(std::uint64_t mail_id) {
+    if (!db_pool_) {
+        return nullptr;
+    }
+
+    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
+    if (!mysql_pool) {
+        return nullptr;
+    }
+
+    auto raii_conn = mysql_pool->get_raii_connection();
+    auto conn = raii_conn.get();
+    if (!conn || !conn->is_connected()) {
+        return nullptr;
+    }
+
+    std::ostringstream mail_sql;
+    mail_sql << "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time_epoch "
+             << "FROM mails WHERE id = " << mail_id << " LIMIT 1";
+    auto mail_result = conn->query(mail_sql.str());
+    if (!mail_result || mail_result->get_row_count() == 0) {
+        return nullptr;
+    }
+
+    auto mail_row = mail_result->get_row(0);
+    auto loaded_mail = std::make_unique<mail>();
+    loaded_mail->id = mail_id;
+    loaded_mail->subject = mail_row.count("subject") ? mail_row.at("subject") : std::string{};
+    loaded_mail->body_path = mail_row.count("body_path") ? mail_row.at("body_path") : std::string{};
+    if (mail_row.count("send_time_epoch") && !mail_row.at("send_time_epoch").empty()) {
+        loaded_mail->send_time = static_cast<time_t>(std::stoll(mail_row.at("send_time_epoch")));
+    }
+    loaded_mail->mail_over = true;
+    (void)ensure_mail_raw_payload_loaded(*loaded_mail);
+
+    std::ostringstream rcpt_sql;
+    rcpt_sql << "SELECT id, sender, recipient, status, source_message_id, UNIX_TIMESTAMP(send_time) AS send_time_epoch "
+             << "FROM mail_recipients WHERE mail_id = " << mail_id << " ORDER BY id ASC";
+    auto rcpt_result = conn->query(rcpt_sql.str());
+    if (rcpt_result) {
+        const auto rows = rcpt_result->get_all_rows();
+        for (const auto& row : rows) {
+            if (row.count("id") && !row.at("id").empty()) {
+                loaded_mail->ids.push_back(static_cast<std::size_t>(std::stoull(row.at("id"))));
+            }
+            if (loaded_mail->from.empty() && row.count("sender")) {
+                loaded_mail->from = row.at("sender");
+            }
+            if (row.count("recipient")) {
+                loaded_mail->to.push_back(row.at("recipient"));
+            }
+            if (row.count("status") && !row.at("status").empty()) {
+                loaded_mail->status = std::stoi(row.at("status"));
+            }
+            if (loaded_mail->source_message_id.empty() &&
+                row.count("source_message_id") &&
+                !row.at("source_message_id").empty()) {
+                loaded_mail->source_message_id = row.at("source_message_id");
+            }
+            if (row.count("send_time_epoch") && !row.at("send_time_epoch").empty()) {
+                loaded_mail->send_time = static_cast<time_t>(std::stoll(row.at("send_time_epoch")));
+            }
+        }
+    }
+
+    std::ostringstream att_sql;
+    att_sql << "SELECT id, filename, filepath, file_size, mime_type, UNIX_TIMESTAMP(upload_time) AS upload_time_epoch "
+            << "FROM attachments WHERE mail_id = " << mail_id << " ORDER BY id ASC";
+    auto att_result = conn->query(att_sql.str());
+    if (att_result) {
+        const auto rows = att_result->get_all_rows();
+        for (const auto& row : rows) {
+            attachment att;
+            att.mail_id = static_cast<std::size_t>(mail_id);
+            if (row.count("id") && !row.at("id").empty()) {
+                att.id = static_cast<std::size_t>(std::stoull(row.at("id")));
+            }
+            if (row.count("filename")) {
+                att.filename = row.at("filename");
+            }
+            if (row.count("filepath")) {
+                att.filepath = row.at("filepath");
+            }
+            if (row.count("file_size") && !row.at("file_size").empty()) {
+                att.file_size = static_cast<std::size_t>(std::stoull(row.at("file_size")));
+            }
+            if (row.count("mime_type")) {
+                att.mime_type = row.at("mime_type");
+            }
+            if (row.count("upload_time_epoch") && !row.at("upload_time_epoch").empty()) {
+                att.upload_time = static_cast<time_t>(std::stoll(row.at("upload_time_epoch")));
+            }
+            loaded_mail->attachments.push_back(std::move(att));
+        }
+    }
+
+    return loaded_mail;
+}
+
+bool OutboxRepository::release_local_reservations(const std::vector<std::uint64_t>& outbox_ids) {
+    if (outbox_ids.empty() || !db_pool_) {
+        return true;
+    }
+
+    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
+    if (!mysql_pool) {
+        return false;
+    }
+
+    auto raii_conn = mysql_pool->get_raii_connection();
+    auto conn = raii_conn.get();
+    if (!conn || !conn->is_connected()) {
+        return false;
+    }
+
+    std::ostringstream id_list;
+    for (std::size_t i = 0; i < outbox_ids.size(); ++i) {
+        id_list << outbox_ids[i];
+        if (i + 1 < outbox_ids.size()) {
+            id_list << ",";
+        }
+    }
+
+    std::ostringstream sql;
+    sql << "UPDATE mail_outbox SET status = " << static_cast<int>(OutboxStatus::PENDING)
+        << ", attempt_count = GREATEST(attempt_count - 1, 0)"
+        << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
+        << " WHERE id IN (" << id_list.str() << ")"
+        << " AND status = " << static_cast<int>(OutboxStatus::SENDING);
+
+    return conn->execute(sql.str());
 }
 
 bool OutboxRepository::mark_sent(std::uint64_t outbox_id, const std::string& smtp_response) {

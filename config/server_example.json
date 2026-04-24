@@ -27,6 +27,11 @@
   "connection_timeout": 300,
   "read_timeout": 60,
   "write_timeout": 60,
+  "inbound_ack_mode": "after_persist",
+  "inbound_persist_wait_timeout_ms": 5000,
+  "persist_max_inflight_mails": 2048,
+  "persist_min_available_memory_mb": 256,
+  "persist_min_db_available_connections": 1,
   
   "require_auth": true,
   "max_auth_attempts": 3,

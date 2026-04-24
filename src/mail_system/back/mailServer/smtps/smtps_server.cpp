@@ -15,8 +15,16 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
     // ServerBase may already create and wire PersistentQueue with outbound client.
     // Avoid overriding it here, otherwise outbox enqueue/notify wiring can be lost.
     if (!m_persistentQueue && m_dbPool) {
-        m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(m_dbPool, m_workerThreadPool);
+        m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(
+            m_dbPool,
+            m_workerThreadPool,
+            m_storageProvider);
         m_persistentQueue->set_local_domain(m_domain);
+        persist_storage::PersistentQueuePressureConfig pressure_config;
+        pressure_config.max_inflight_mails = m_config.persist_max_inflight_mails;
+        pressure_config.min_available_memory_mb = m_config.persist_min_available_memory_mb;
+        pressure_config.min_db_available_connections = m_config.persist_min_db_available_connections;
+        m_persistentQueue->set_pressure_config(pressure_config);
         if (m_outboundClient) {
             m_persistentQueue->set_outbound_client(m_outboundClient);
         }

@@ -6,7 +6,7 @@
 SMTP_SERVER="${SMTP_SERVER:-localhost}"
 SMTP_PORT="${SMTP_PORT:-25}"
 MAIL_FROM="${MAIL_FROM:-xxx@mail.hgmail.xin}"
-RCPT_TO="${RCPT_TO:-abc@qq.com}"
+RCPT_TO="${RCPT_TO:-abc@mail.hgmail.xin}"
 MAIL_SUBJECT="${MAIL_SUBJECT:-SMTP Test Mail}"
 
 # 颜色输出

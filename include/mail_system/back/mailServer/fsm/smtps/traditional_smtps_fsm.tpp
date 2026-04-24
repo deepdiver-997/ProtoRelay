@@ -743,18 +743,58 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         return;
     }
 
-    // 将邮件提交到持久化队列，确保正文写入后再检查状态
-    if (auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get())) {
-        smtp_session->flush_body_and_wait();
-        smtp_session->submit_mail_to_queue();
-    } else {
+    auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+    if (!smtp_session) {
         LOG_SMTP_DETAIL_ERROR("Failed to cast to SmtpsSession before persistence");
         session->close();
         return;
     }
 
-    // 检查邮件持久化状态并回复客户端
-    // 在后台线程轮询持久化结果，等待 SUCCESS 或失败/超时
+    smtp_session->flush_body_and_wait();
+    auto submit_result = smtp_session->submit_mail_to_queue();
+    if (!submit_result.accepted) {
+        smtp_session->discard_current_mail();
+        SessionBase<ConnectionType>::do_async_write(
+            std::move(session),
+            "451 Requested action aborted: insufficient storage or backend pressure\r\n",
+            [] (std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
+                if (s) {
+                    s->close();
+                }
+            }
+        );
+        return;
+    }
+
+    const bool ack_after_enqueue =
+        session->get_server()->m_config.inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
+    if (ack_after_enqueue) {
+        session->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
+        smtp_session->reset_mail_state();
+        SessionBase<ConnectionType>::do_async_write(std::move(session), "250 OK\r\n", [] (
+            std::unique_ptr<SessionBase<ConnectionType>> s,
+            const boost::system::error_code& error
+        ) mutable {
+            if (error) {
+                LOG_SMTP_DETAIL_ERROR("Error writing immediate 250 OK after enqueue: {}", error.message());
+                return;
+            }
+            SessionBase<ConnectionType>::do_async_read(std::move(s), [] (
+                std::unique_ptr<SessionBase<ConnectionType>> sss,
+                const boost::system::error_code& read_error,
+                std::size_t bytes_transferred
+            ) mutable {
+                if (read_error) {
+                    LOG_SMTP_DETAIL_ERROR("Error reading after immediate enqueue ack: {}", read_error.message());
+                    return;
+                }
+                auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                fsm->auto_process_event(std::move(sss));
+            });
+        });
+        return;
+    }
+
     auto pool = session->get_server()->m_workerThreadPool;
     pool->post(make_copyable([s = std::move(session)]() mutable {
         auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(s.get());
@@ -766,23 +806,23 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             return;
         }
 
-        auto* mail_ptr = smtp_session->get_mail();
-        if (!mail_ptr) {
-            LOG_SMTP_DETAIL_ERROR("No mail found during persistence check");
+        if (!smtp_session->has_pending_mail_submission()) {
+            LOG_SMTP_DETAIL_ERROR("No pending mail submission found during persistence check");
             if (s) {
                 s->close();
             }
             return;
         }
 
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        const auto wait_timeout =
+            std::chrono::milliseconds(s->get_server()->m_config.inbound_persist_wait_timeout_ms);
+        auto deadline = std::chrono::steady_clock::now() + wait_timeout;
         auto backoff = std::chrono::milliseconds(50);
         while (std::chrono::steady_clock::now() < deadline) {
-            auto status = mail_ptr->persist_status;
+            auto status = smtp_session->get_pending_mail_persist_status();
             if (status == persist_storage::PersistStatus::SUCCESS) {
                 // 成功则回复 250 OK 并继续
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
-                smtp_session->transfer_mail_ownership_to_outbound();
                 smtp_session->reset_mail_state();
                 SessionBase<ConnectionType>::do_async_write(std::move(s), "250 OK\r\n", [] (
                     std::unique_ptr<SessionBase<ConnectionType>> sss,
@@ -811,7 +851,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             if (status == persist_storage::PersistStatus::FAILED ||
                 status == persist_storage::PersistStatus::CANCELLED) {
                 LOG_SMTP_DETAIL_ERROR("Mail persistence failed with status {}, closing session.", static_cast<int>(status));
-                smtp_session->check_mail_persist_status();
+                smtp_session->clear_pending_mail_submission();
                 if (s) {
                     SessionBase<ConnectionType>::do_async_write(std::move(s), "451 Requested action aborted: local processing error\r\n", [] (
                         std::unique_ptr<SessionBase<ConnectionType>> failed_session,
@@ -833,8 +873,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         }
 
         LOG_SMTP_DETAIL_ERROR("Mail persistence check timed out, closing session.");
-        mail_ptr->persist_status = persist_storage::PersistStatus::CANCELLED;
-        smtp_session->check_mail_persist_status();
+        smtp_session->cancel_pending_mail_submission();
+        smtp_session->clear_pending_mail_submission();
         if (s) {
             SessionBase<ConnectionType>::do_async_write(std::move(s), "451 Requested action aborted: local processing timeout\r\n", [] (
                 std::unique_ptr<SessionBase<ConnectionType>> timeout_session,

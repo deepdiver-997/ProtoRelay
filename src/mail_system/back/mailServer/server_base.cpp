@@ -136,8 +136,16 @@ try {
                     LOG_SERVER_ERROR("Failed to initialize database pool");
                     return;
                 }
-                m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(m_dbPool, m_workerThreadPool);
+                m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(
+                    m_dbPool,
+                    m_workerThreadPool,
+                    m_storageProvider);
                 m_persistentQueue->set_local_domain(m_domain);
+                persist_storage::PersistentQueuePressureConfig pressure_config;
+                pressure_config.max_inflight_mails = m_config.persist_max_inflight_mails;
+                pressure_config.min_available_memory_mb = m_config.persist_min_available_memory_mb;
+                pressure_config.min_db_available_connections = m_config.persist_min_db_available_connections;
+                m_persistentQueue->set_pressure_config(pressure_config);
                 m_outboundInterruptFlag = std::make_shared<std::atomic<bool>>(true);
                 outbound::OutboundIdentityConfig outbound_identity;
                 outbound_identity.helo_domain = m_config.outbound_helo_domain;

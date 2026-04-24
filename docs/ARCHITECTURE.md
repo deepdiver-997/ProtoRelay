@@ -155,6 +155,20 @@ Recommended production profile under systemd:
 
 Primary runtime config is JSON-based and loaded by `ServerConfig`.
 
+Notable SMTP ingest policy knobs:
+
+- `inbound_ack_mode`
+  - `after_persist`: durable-style acknowledgment after persistence success
+  - `after_enqueue`: queue-accept acknowledgment with weaker durability guarantee
+- `inbound_persist_wait_timeout_ms`
+  - upper bound for waiting on persistence completion in `after_persist`
+- `persist_max_inflight_mails`
+  - total owned messages allowed in persistence pipeline
+- `persist_min_available_memory_mb`
+  - admission backpressure based on free system memory
+- `persist_min_db_available_connections`
+  - admission backpressure based on DB pool pressure
+
 Startup sequence (simplified):
 
 1. Parse config file and resolve relative paths.
@@ -167,6 +181,15 @@ Failure policy:
 
 - Invalid critical config causes immediate startup failure.
 - Feature mismatch (for example, `hdfs_web` with build-time OFF) fails early and explicitly.
+
+Local benchmark note:
+
+- On this MacBook Pro, `after_enqueue` small-mail tests with `uv run ./test/cl.py` reached roughly 1.9k-3.0k msg/s depending on batch size and concurrency.
+- Sample runs:
+  - 100 messages: 1906.4 msg/s
+  - 1000 messages: 2976.9 msg/s
+  - 10000 messages with `--concurrency 100`: 2147.5 msg/s
+- These numbers describe single-machine throughput under the current test workload, not an end-to-end production SLA or a universal concurrency guarantee.
 
 ## 7. Build-Time Feature Model
 
@@ -202,6 +225,7 @@ Implemented now:
 - Message persistence and outbound queue processing.
 - Configurable storage providers and optional WebHDFS.
 - Service-manager-friendly operation.
+- Transactional outbox creation with local lease-first hot dispatch.
 
 Expected extension directions:
 
@@ -209,6 +233,7 @@ Expected extension directions:
 - Richer policy engine (rate limits, ACL, anti-abuse hooks).
 - Metrics/trace export for observability stacks.
 - Certificate hot-reload and rolling restart ergonomics.
+- File-free in-memory outbound MIME construction for the hot-dispatch path.
 
 ## 10. Related Docs
 

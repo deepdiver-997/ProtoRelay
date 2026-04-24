@@ -128,6 +128,7 @@ template <typename StreamType>
 SmtpExecResult execute_smtp_transaction(StreamType& stream,
                                         boost::asio::streambuf& buffer,
                                         const OutboxRecord& record,
+                                        const mail* hot_mail,
                                         const std::string& helo_domain,
                                         const std::string& envelope_sender,
                                         const std::string& header_from,
@@ -337,6 +338,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
             std::string dkim_error;
             std::string message_id;
             const std::string wire_message = build_outbound_message(record,
+                                                                    hot_mail,
                                                                     header_from,
                                                                     identity_config,
                                                                     &dkim_applied,
@@ -396,6 +398,7 @@ SmtpExecResult execute_smtp_transaction(StreamType& stream,
 }
 
 SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
+                                   const mail* hot_mail,
                                    const std::vector<std::uint16_t>& outbound_ports,
                                    const OutboundIdentityConfig& identity_config,
                                    const std::string& target_host,
@@ -491,6 +494,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
             result = execute_smtp_transaction(tls_stream,
                                               tls_buffer,
                                               record,
+                                              hot_mail,
                                               helo_domain,
                                               envelope_sender,
                                               header_from,
@@ -503,6 +507,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
             result = execute_smtp_transaction(socket,
                                               plain_buffer,
                                               record,
+                                              hot_mail,
                                               helo_domain,
                                               envelope_sender,
                                               header_from,
@@ -544,6 +549,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                 result = execute_smtp_transaction(tls_stream,
                                                   tls_buffer,
                                                   record,
+                                                  hot_mail,
                                                   helo_domain,
                                                   envelope_sender,
                                                   header_from,
@@ -659,6 +665,11 @@ void SmtpOutboundClient::stop() {
 }
 
 bool SmtpOutboundClient::accept_mail_ownership(std::unique_ptr<mail> mail_ptr) {
+    return accept_reserved_mail_ownership(std::move(mail_ptr), {});
+}
+
+bool SmtpOutboundClient::accept_reserved_mail_ownership(std::unique_ptr<mail> mail_ptr,
+                                                        std::vector<OutboxRecord> reserved_records) {
     if (!mail_ptr) {
         return false;
     }
@@ -670,17 +681,20 @@ bool SmtpOutboundClient::accept_mail_ownership(std::unique_ptr<mail> mail_ptr) {
         return true;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(notify_mutex_);
-        ownership_queue_.push(std::move(mail_ptr));
-        LOG_OUTBOUND_DEBUG("Outbound flow accepted ownership: mail_id={}", ownership_queue_.back()->id);
+    if (!running_.load()) {
+        LOG_OUTBOUND_WARN("Outbound flow rejected ownership because client is not running, mail_id={}", mail_ptr->id);
+        return false;
     }
-    notify_cv_.notify_one();
-    return true;
+
+    return try_enqueue_hot_dispatch(mail_ptr, reserved_records);
 }
 
 void SmtpOutboundClient::notify_outbox_ready() {
     notify_cv_.notify_one();
+}
+
+int SmtpOutboundClient::local_reservation_lease_seconds() const {
+    return kLeaseSeconds;
 }
 
 void SmtpOutboundClient::run_loop() {
@@ -691,23 +705,28 @@ void SmtpOutboundClient::run_loop() {
         drain_completion_queue();
         repository_.requeue_expired_leases();
 
-        auto records = repository_.claim_batch(worker_id_, kClaimBatchSize, kLeaseSeconds);
-        if (!records.empty()) {
+        const auto hot_dispatched = drain_hot_records();
+        if (hot_dispatched > 0) {
             empty_claim_rounds = 0;
         } else {
-            ++empty_claim_rounds;
-        }
-
-        for (const auto& record : records) {
-            dispatch_delivery_task(record);
+            auto records = repository_.claim_batch(worker_id_, kClaimBatchSize, kLeaseSeconds);
+            if (!records.empty()) {
+                empty_claim_rounds = 0;
+                schedule_claimed_records(std::move(records));
+            } else {
+                ++empty_claim_rounds;
+            }
         }
 
         std::unique_lock<std::mutex> lock(notify_mutex_);
-        const auto wait_duration = compute_adaptive_wait(polling_config_, empty_claim_rounds, !ownership_queue_.empty());
+        const auto wait_duration =
+            compute_adaptive_wait(polling_config_,
+                                  empty_claim_rounds,
+                                  !ownership_queue_.empty() || !hot_record_queue_.empty());
         notify_cv_.wait_for(lock,
                             wait_duration,
                             [this]() {
-                                if (!running_.load() || !ownership_queue_.empty()) {
+                                if (!running_.load() || !ownership_queue_.empty() || !hot_record_queue_.empty()) {
                                     return true;
                                 }
                                 std::lock_guard<std::mutex> completion_lock(completion_mutex_);
@@ -720,20 +739,89 @@ void SmtpOutboundClient::run_loop() {
 }
 
 void SmtpOutboundClient::drain_notifications() {
-    std::queue<std::unique_ptr<mail>> local_queue;
+    std::queue<HotMailDispatch> local_queue;
     {
         std::lock_guard<std::mutex> lock(notify_mutex_);
         std::swap(local_queue, ownership_queue_);
     }
 
     while (!local_queue.empty()) {
-        auto mail_ptr = std::move(local_queue.front());
+        auto dispatch = std::move(local_queue.front());
         local_queue.pop();
 
-        if (!mail_ptr) {
+        if (!dispatch.mail_ptr) {
             continue;
         }
-        hot_mail_cache_[mail_ptr->id] = std::move(mail_ptr);
+        auto hot_mail = std::shared_ptr<mail>(dispatch.mail_ptr.release());
+        if (!hot_mail) {
+            continue;
+        }
+        const auto mail_id = hot_mail->id;
+        hot_mail_cache_[mail_id] = hot_mail;
+        hot_mail_pending_dispatch_counts_[mail_id] += dispatch.reserved_records.size();
+        for (auto& record : dispatch.reserved_records) {
+            HotDeliveryTask task;
+            task.record = std::move(record);
+            task.mail_ctx = hot_mail;
+            hot_record_queue_.push(std::move(task));
+        }
+    }
+}
+
+std::size_t SmtpOutboundClient::drain_hot_records() {
+    std::size_t dispatched = 0;
+    while (!hot_record_queue_.empty()) {
+        auto task = std::move(hot_record_queue_.front());
+        hot_record_queue_.pop();
+        dispatch_delivery_task(task.record, std::move(task.mail_ctx));
+        ++dispatched;
+    }
+    return dispatched;
+}
+
+void SmtpOutboundClient::schedule_claimed_records(std::vector<OutboxRecord> claimed_records) {
+    if (claimed_records.empty()) {
+        return;
+    }
+
+    std::unordered_map<std::uint64_t, std::vector<OutboxRecord>> grouped_records;
+    std::vector<std::uint64_t> group_order;
+    grouped_records.reserve(claimed_records.size());
+    group_order.reserve(claimed_records.size());
+
+    for (auto& record : claimed_records) {
+        auto [it, inserted] = grouped_records.try_emplace(record.mail_id);
+        if (inserted) {
+            group_order.push_back(record.mail_id);
+        }
+        it->second.push_back(std::move(record));
+    }
+
+    for (auto mail_id : group_order) {
+        auto it = grouped_records.find(mail_id);
+        if (it == grouped_records.end()) {
+            continue;
+        }
+
+        auto mail_ptr = repository_.load_mail(mail_id);
+        if (!mail_ptr) {
+            LOG_OUTBOUND_WARN("Outbound flow failed to hydrate mail from DB, fallback to direct dispatch, mail_id={}, claimed_records={}",
+                              mail_id,
+                              it->second.size());
+            for (const auto& record : it->second) {
+                dispatch_delivery_task(record);
+            }
+            continue;
+        }
+
+        if (!try_enqueue_hot_dispatch(mail_ptr, it->second)) {
+            LOG_OUTBOUND_WARN("Outbound flow failed to enqueue claimed records as hot dispatch, fallback to direct dispatch, mail_id={}, claimed_records={}",
+                              mail_id,
+                              it->second.size());
+            for (const auto& record : it->second) {
+                dispatch_delivery_task(record);
+            }
+        }
     }
 }
 
@@ -767,21 +855,64 @@ void SmtpOutboundClient::drain_completion_queue() {
 
         // 保守策略：当前实现在完成一次状态回写后释放缓存对象。
         auto cache_it = hot_mail_cache_.find(completion.mail_id);
+        auto pending_it = hot_mail_pending_dispatch_counts_.find(completion.mail_id);
         if (cache_it != hot_mail_cache_.end()) {
             if (completion.success) {
                 cache_it->second->status = 1;
             } else {
                 cache_it->second->status = 2;
             }
+        }
+        if (pending_it != hot_mail_pending_dispatch_counts_.end()) {
+            if (pending_it->second > 0) {
+                --pending_it->second;
+            }
+            if (pending_it->second == 0) {
+                hot_mail_pending_dispatch_counts_.erase(pending_it);
+                if (cache_it != hot_mail_cache_.end()) {
+                    hot_mail_cache_.erase(cache_it);
+                }
+            }
+        } else if (cache_it != hot_mail_cache_.end()) {
             hot_mail_cache_.erase(cache_it);
         }
     }
 }
 
-void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record) {
+bool SmtpOutboundClient::try_enqueue_hot_dispatch(std::unique_ptr<mail>& mail_ptr,
+                                                  std::vector<OutboxRecord>& reserved_records) {
+    if (!mail_ptr) {
+        return false;
+    }
+
+    if (!running_.load()) {
+        LOG_OUTBOUND_WARN("Outbound flow rejected hot dispatch because client is not running, mail_id={}", mail_ptr->id);
+        return false;
+    }
+
+    (void)ensure_mail_raw_payload_loaded(*mail_ptr);
+
+    const auto mail_id = mail_ptr->id;
+    const auto record_count = reserved_records.size();
+    {
+        std::lock_guard<std::mutex> lock(notify_mutex_);
+        HotMailDispatch dispatch;
+        dispatch.mail_ptr = std::move(mail_ptr);
+        dispatch.reserved_records = std::move(reserved_records);
+        ownership_queue_.push(std::move(dispatch));
+    }
+    LOG_OUTBOUND_DEBUG("Outbound flow accepted hot dispatch: mail_id={}, reserved_records={}",
+                       mail_id,
+                       record_count);
+    notify_cv_.notify_one();
+    return true;
+}
+
+void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record,
+                                                std::shared_ptr<mail> hot_mail_ctx) {
     const auto attempt_id = ++g_dispatch_attempt_seq;
 
-    auto task = [this, record, attempt_id]() mutable {
+    auto task = [this, record, attempt_id, hot_mail_ctx = std::move(hot_mail_ctx)]() mutable {
         const auto should_continue = [this]() {
             if (!running_.load()) {
                 return false;
@@ -852,7 +983,12 @@ void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record) {
                 break;
             }
 
-            exec_result = run_plain_smtp_flow(record, outbound_ports_, identity_config_, host, should_continue);
+            exec_result = run_plain_smtp_flow(record,
+                                              hot_mail_ctx.get(),
+                                              outbound_ports_,
+                                              identity_config_,
+                                              host,
+                                              should_continue);
             if (exec_result.success) {
                 delivered = true;
                 break;

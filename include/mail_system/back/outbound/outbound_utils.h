@@ -8,8 +8,11 @@
 namespace mail_system {
 namespace outbound {
 
+bool ensure_mail_raw_payload_loaded(mail& mail_data);
+
 // Build RFC5322 wire message and optionally include DKIM-Signature.
 std::string build_outbound_message(const OutboxRecord& record,
+                                   const mail* hot_mail,
                                    const std::string& header_from,
                                    const OutboundIdentityConfig& identity_config,
                                    bool* dkim_applied,

@@ -4,6 +4,7 @@
 #include<string>
 #include<vector>
 #include<ctime>
+#include <atomic>
 #include <fstream>
 #include <unordered_map>
 #include <future>
@@ -16,6 +17,45 @@ enum class PersistStatus : int {
     SUCCESS = 2,
     FAILED = 3,
     CANCELLED = 4
+};
+
+class SharedPersistStatus {
+public:
+    SharedPersistStatus()
+        : value_(std::make_shared<std::atomic<int>>(static_cast<int>(PersistStatus::PENDING))) {}
+
+    SharedPersistStatus(const SharedPersistStatus&) = default;
+    SharedPersistStatus(SharedPersistStatus&&) noexcept = default;
+    SharedPersistStatus& operator=(const SharedPersistStatus&) = default;
+    SharedPersistStatus& operator=(SharedPersistStatus&&) noexcept = default;
+
+    SharedPersistStatus& operator=(PersistStatus status) {
+        store(status);
+        return *this;
+    }
+
+    operator PersistStatus() const {
+        return load();
+    }
+
+    explicit operator int() const {
+        return static_cast<int>(load());
+    }
+
+    PersistStatus load() const {
+        return static_cast<PersistStatus>(value_->load(std::memory_order_acquire));
+    }
+
+    void store(PersistStatus status) const {
+        value_->store(static_cast<int>(status), std::memory_order_release);
+    }
+
+    std::shared_ptr<std::atomic<int>> share() const {
+        return value_;
+    }
+
+private:
+    std::shared_ptr<std::atomic<int>> value_;
 };
 }
 }
@@ -58,7 +98,7 @@ struct mail
     int status;                 // 邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除
     std::string body_path;      // 邮件正文存储路径（使用文件存储）
     std::vector<attachment> attachments; // 附件元数据列表
-    mail_system::persist_storage::PersistStatus persist_status{mail_system::persist_storage::PersistStatus::PENDING}; // 持久化状态
+    mail_system::persist_storage::SharedPersistStatus persist_status{}; // 持久化状态
     bool mail_over{false};    // 邮件内容是否完整（用于流式处理）
     bool deduplicated_inbound{false}; // 是否被入站去重命中
     std::shared_future<bool> meta_future; // 附件元数据持久化返回的 future，可拷贝
@@ -85,6 +125,7 @@ struct mail
         id = other.id;
         ids = std::move(other.ids);
         from = std::move(other.from);
+        to = std::move(other.to);
         header = std::move(other.header);
         body = std::move(other.body);
         subject = std::move(other.subject);

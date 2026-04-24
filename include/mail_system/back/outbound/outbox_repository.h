@@ -41,6 +41,10 @@ public:
                                           std::size_t limit,
                                           int lease_seconds);
 
+    std::unique_ptr<mail> load_mail(std::uint64_t mail_id);
+
+    bool release_local_reservations(const std::vector<std::uint64_t>& outbox_ids);
+
     bool mark_sent(std::uint64_t outbox_id, const std::string& smtp_response);
     bool mark_retry(std::uint64_t outbox_id,
                     const std::string& error_message,

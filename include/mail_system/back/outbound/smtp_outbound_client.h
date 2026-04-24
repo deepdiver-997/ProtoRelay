@@ -54,6 +54,16 @@ struct OutboundPollingConfig {
     std::size_t backoff_shift_cap{6};
 };
 
+struct HotMailDispatch {
+    std::unique_ptr<mail> mail_ptr;
+    std::vector<OutboxRecord> reserved_records;
+};
+
+struct HotDeliveryTask {
+    OutboxRecord record;
+    std::shared_ptr<mail> mail_ctx;
+};
+
 class SmtpOutboundClient {
 public:
     SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
@@ -73,14 +83,23 @@ public:
     void stop();
 
     bool accept_mail_ownership(std::unique_ptr<mail> mail_ptr);
+    bool accept_reserved_mail_ownership(std::unique_ptr<mail> mail_ptr,
+                                        std::vector<OutboxRecord> reserved_records);
     void notify_outbox_ready();
+    const std::string& worker_id() const { return worker_id_; }
+    int local_reservation_lease_seconds() const;
 
 private:
     void run_loop();
     void drain_notifications();
+    std::size_t drain_hot_records();
+    void schedule_claimed_records(std::vector<OutboxRecord> claimed_records);
     void drain_completion_queue();
-    void dispatch_delivery_task(const OutboxRecord& record);
+    void dispatch_delivery_task(const OutboxRecord& record,
+                                std::shared_ptr<mail> hot_mail_ctx = nullptr);
     void push_completion(DeliveryCompletion completion);
+    bool try_enqueue_hot_dispatch(std::unique_ptr<mail>& mail_ptr,
+                                  std::vector<OutboxRecord>& reserved_records);
 
 private:
     std::shared_ptr<DBPool> db_pool_;
@@ -101,8 +120,10 @@ private:
 
     std::mutex notify_mutex_;
     std::condition_variable notify_cv_;
-    std::queue<std::unique_ptr<mail>> ownership_queue_;
-    std::unordered_map<std::uint64_t, std::unique_ptr<mail>> hot_mail_cache_;
+    std::queue<HotMailDispatch> ownership_queue_;
+    std::queue<HotDeliveryTask> hot_record_queue_;
+    std::unordered_map<std::uint64_t, std::shared_ptr<mail>> hot_mail_cache_;
+    std::unordered_map<std::uint64_t, std::size_t> hot_mail_pending_dispatch_counts_;
 
     std::mutex completion_mutex_;
     std::queue<DeliveryCompletion> completion_queue_;
