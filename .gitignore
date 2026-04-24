@@ -119,6 +119,7 @@ $RECYCLE.BIN/
 smtps_test.sh  # 保留这个测试脚本
 !./test/cl.py
 !scripts/generate_dkim_keys.sh
+!scripts/clear_mysql_mail_data.sh
 !build.sh
 .gitignore
 .dockerignore
