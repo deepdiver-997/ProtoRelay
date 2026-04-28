@@ -8,6 +8,7 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/entities/usr.h"
 #include <boost/asio.hpp>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -82,6 +83,10 @@ public:
         }
 
         closed_ = true;
+
+        if (m_server) {
+            m_server->decrement_connection_count();
+        }
 
         try {
             if (connection_ && connection_->is_open()) {
@@ -304,8 +309,11 @@ public:
         auto payload = std::make_shared<std::string>(data);
         auto write_buffer = boost::asio::buffer(*payload);
 
-        conn->async_write(
+        auto delay = self->compute_reply_delay();
+
+        conn->async_write_with_delay(
             write_buffer,
+            delay,
             make_copyable([self = std::move(self), cb = std::move(callback), payload](
                 const boost::system::error_code& error,
                 std::size_t
@@ -333,6 +341,9 @@ public:
     // 纯虚函数，由派生类实现
     virtual void handle_read(const std::string& data) = 0;
     virtual void process_read(std::unique_ptr<SessionBase<ConnectionType>> self) = 0;
+
+    // 计算当前回复延迟（子类根据负载实现，0ms = 无延迟）
+    virtual std::chrono::milliseconds compute_reply_delay() const = 0;
 
     // 状态机相关接口（纯虚函数，由派生类实现）
     virtual void set_current_state(int state) = 0;

@@ -62,6 +62,11 @@ void SmtpsSession<ConnectionType>::handle_read(const std::string& data) {
 }
 
 template <typename ConnectionType>
+std::chrono::milliseconds SmtpsSession<ConnectionType>::compute_reply_delay() const {
+    return std::chrono::milliseconds(0);
+}
+
+template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<ConnectionType>> self) {
     if (ignore_current_command_) {
         ignore_current_command_ = false;

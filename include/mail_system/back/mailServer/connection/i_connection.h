@@ -3,6 +3,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -27,11 +28,35 @@ public:
         ReadHandler handler
     ) = 0;
 
+    // 获取 executor，用于创建定时器等
+    virtual boost::asio::any_io_executor get_executor() = 0;
+
     // 异步写入
     virtual void async_write(
         boost::asio::const_buffer buffer,
         WriteHandler handler
     ) = 0;
+
+    // 异步延时写入（用 steady_timer 实现非阻塞延时）
+    virtual void async_write_with_delay(
+        boost::asio::const_buffer buffer,
+        std::chrono::milliseconds delay,
+        WriteHandler handler)
+    {
+        if (delay.count() == 0) {
+            async_write(buffer, std::move(handler));
+            return;
+        }
+        auto timer = std::make_shared<boost::asio::steady_timer>(get_executor());
+        timer->expires_after(delay);
+        timer->async_wait([this, buffer, handler = std::move(handler), timer](const boost::system::error_code& ec) mutable {
+            if (ec) {
+                handler(ec, 0);
+                return;
+            }
+            async_write(buffer, std::move(handler));
+        });
+    }
 
     // SSL 握手（TCP 连接直接调用成功回调）
     virtual void async_handshake(

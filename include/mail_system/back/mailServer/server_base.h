@@ -100,6 +100,17 @@ public:
     std::string m_domain;
     ServerConfig m_config;
 
+    // 连接负载门控
+    std::atomic<size_t> active_connections_{0};
+
+    void increment_connection_count() {
+        active_connections_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void decrement_connection_count() {
+        active_connections_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
 protected:
     // 加载SSL证书
     void load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file = "");
@@ -122,6 +133,9 @@ protected:
     // 配置标志
     bool m_enable_ssl;
     bool m_enable_tcp;
+    // 判断是否应该拒绝新连接（纯虚函数，由子类实现具体负载检查逻辑）
+    virtual bool should_reject_connection(std::string& reason) const = 0;
+
     // 是否正在运行
     std::atomic<bool> has_listener_thread;
     // 监听线程

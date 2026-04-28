@@ -35,6 +35,11 @@ public:
         stream_->async_read_some(buffer, handler);
     }
 
+    // 获取 executor
+    boost::asio::any_io_executor get_executor() override {
+        return stream_->get_executor();
+    }
+
     // 异步写入
     void async_write(
         boost::asio::const_buffer buffer,

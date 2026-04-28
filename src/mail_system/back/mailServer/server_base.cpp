@@ -276,10 +276,16 @@ void ServerBase::accept_ssl_connection() {
         lowest_socket,
         [this, ssl_socket = std::move(ssl_socket)](const boost::system::error_code& ec) mutable {
             if (!ec) {
-                LOG_NETWORK_INFO("New SSL connection accepted");
-                LOG_NETWORK_DEBUG("Start handling SSL connection");
-                // 会话已建立
-                handle_accept(std::move(ssl_socket), ec);
+                std::string reject_reason;
+                if (should_reject_connection(reject_reason)) {
+                    LOG_NETWORK_WARN("Rejecting new SSL connection: {}", reject_reason);
+                    boost::system::error_code ignored;
+                    ssl_socket->lowest_layer().close(ignored);
+                } else {
+                    LOG_NETWORK_INFO("New SSL connection accepted");
+                    LOG_NETWORK_DEBUG("Start handling SSL connection");
+                    handle_accept(std::move(ssl_socket), ec);
+                }
             }
             else {
                 if (m_state.load() == ServerState::Running) {
@@ -307,10 +313,18 @@ void ServerBase::accept_tcp_connection() {
     m_tcp_acceptor->async_accept(peer_socket,
         [this, socket = std::move(socket)](const boost::system::error_code& error) mutable {
             if (!error) {
-                LOG_NETWORK_INFO("New TCP connection accepted from {}",
-                              socket->remote_endpoint().address().to_string());
-                // 处理TCP连接
-                handle_tcp_accept(std::move(socket), error);
+                std::string reject_reason;
+                if (should_reject_connection(reject_reason)) {
+                    LOG_NETWORK_WARN("Rejecting new TCP connection from {}: {}",
+                                     socket->remote_endpoint().address().to_string(),
+                                     reject_reason);
+                    boost::system::error_code ignored;
+                    socket->close(ignored);
+                } else {
+                    LOG_NETWORK_INFO("New TCP connection accepted from {}",
+                                  socket->remote_endpoint().address().to_string());
+                    handle_tcp_accept(std::move(socket), error);
+                }
             } else {
                 if (m_state.load() == ServerState::Running) {
                     LOG_NETWORK_ERROR("Error accepting TCP connection: {}", error.message());

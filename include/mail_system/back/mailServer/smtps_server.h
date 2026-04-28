@@ -31,6 +31,9 @@ namespace mail_system {
            const boost::system::error_code& error) override;
           void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) override;
 
+        // 连接负载门控：判断是否应拒绝新连接
+        bool should_reject_connection(std::string& reason) const override;
+
         std::string get_free_client_ip();
         void post_to_client(size_t mail_id);
         void post_to_local_client(std::shared_ptr<void> client, std::unique_ptr<mail>&& mail);

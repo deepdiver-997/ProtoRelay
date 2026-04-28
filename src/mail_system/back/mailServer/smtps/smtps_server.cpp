@@ -47,6 +47,7 @@ void SmtpsServer::handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::
         try {
             LOG_NETWORK_INFO("New SMTPS connection from {}", session->get_client_ip());
 
+            increment_connection_count();
             // 启动会话 - 直接在当前线程调用以避免unique_ptr复制问题
             SslSession::start(std::move(session));
         }
@@ -68,6 +69,7 @@ void SmtpsServer::handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket
         try {
             LOG_NETWORK_INFO("New SMTP connection from {}", session->get_client_ip());
 
+            increment_connection_count();
             // 启动会话 - 直接在当前线程调用以避免unique_ptr复制问题
             TcpSession::start(std::move(session));
         }
@@ -98,6 +100,23 @@ void SmtpsServer::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::
     } catch (const std::exception& e) {
         LOG_NETWORK_ERROR("Error handing off STARTTLS socket: {}", e.what());
     }
+}
+
+bool SmtpsServer::should_reject_connection(std::string& reason) const {
+    if (m_config.maxConnections > 0 &&
+        active_connections_.load(std::memory_order_relaxed) >= m_config.maxConnections) {
+        reason = "max connections reached";
+        return true;
+    }
+
+    if (m_persistentQueue &&
+        m_config.persist_max_inflight_mails > 0 &&
+        m_persistentQueue->inflight_count() >= m_config.persist_max_inflight_mails) {
+        reason = "persist inflight limit reached";
+        return true;
+    }
+
+    return false;
 }
 
 } // namespace mail_system

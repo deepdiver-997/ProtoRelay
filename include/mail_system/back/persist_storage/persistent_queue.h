@@ -82,6 +82,11 @@ public:
     // 获取队列大小
     size_t queue_size() const;
 
+    // 获取当前在途邮件数（用于负载门控）
+    size_t inflight_count() const {
+        return inflight_mail_count_.load(std::memory_order_relaxed);
+    }
+
     void set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client);
     void set_local_domain(std::string local_domain);
     void set_batch_pop_size(size_t batch_size);

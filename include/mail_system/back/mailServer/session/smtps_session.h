@@ -41,6 +41,7 @@ public:
 
     void handle_read(const std::string& data) override;
     void process_read(std::unique_ptr<SessionBase<ConnectionType>> self) override;
+    std::chrono::milliseconds compute_reply_delay() const override;
     void* get_fsm() const override;
     void* get_context() override;
 
