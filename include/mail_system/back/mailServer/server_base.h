@@ -19,6 +19,7 @@
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/outbound/smtp_outbound_client.h"
 #include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/mailServer/metrics_server.h"
 // #include "mail_system/back/mailServer/session/session_base.h"
 
 // #include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
@@ -111,6 +112,63 @@ public:
         active_connections_.fetch_sub(1, std::memory_order_relaxed);
     }
 
+    // Metrics 计数器
+    std::atomic<size_t> connections_total_{0};
+    std::atomic<size_t> connections_rejected_total_{0};
+    std::atomic<size_t> mails_accepted_total_{0};
+
+    void increment_connections_total() {
+        connections_total_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void increment_connections_rejected() {
+        connections_rejected_total_.fetch_add(1, std::memory_order_relaxed);
+    }
+    void increment_mails_accepted() {
+        mails_accepted_total_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Prometheus 格式 metrics 输出
+    std::string build_metrics_response() const {
+        std::string out;
+        out.reserve(1024);
+
+        auto add_gauge = [&](const char* name, const char* help, size_t val) {
+            out.append("# HELP ").append(name).append(" ").append(help).append("\n");
+            out.append("# TYPE ").append(name).append(" gauge\n");
+            out.append(name).append(" ").append(std::to_string(val)).append("\n");
+        };
+
+        auto add_counter = [&](const char* name, const char* help, size_t val) {
+            out.append("# HELP ").append(name).append(" ").append(help).append("\n");
+            out.append("# TYPE ").append(name).append(" counter\n");
+            out.append(name).append(" ").append(std::to_string(val)).append("\n");
+        };
+
+        add_gauge("protorelay_active_connections",
+                  "Current active connections",
+                  active_connections_.load(std::memory_order_relaxed));
+
+        add_counter("protorelay_connections_total",
+                    "Total connections accepted since start",
+                    connections_total_.load(std::memory_order_relaxed));
+
+        add_counter("protorelay_connections_rejected_total",
+                    "Total connections rejected since start",
+                    connections_rejected_total_.load(std::memory_order_relaxed));
+
+        add_counter("protorelay_mails_accepted_total",
+                    "Total mails accepted (250 OK sent) since start",
+                    mails_accepted_total_.load(std::memory_order_relaxed));
+
+        if (m_persistentQueue) {
+            add_gauge("protorelay_inflight_mails",
+                      "Current inflight mails in persistence pipeline",
+                      m_persistentQueue->inflight_count());
+        }
+
+        return out;
+    }
+
 protected:
     // 加载SSL证书
     void load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file = "");
@@ -135,6 +193,11 @@ protected:
     bool m_enable_tcp;
     // 判断是否应该拒绝新连接（纯虚函数，由子类实现具体负载检查逻辑）
     virtual bool should_reject_connection(std::string& reason) const = 0;
+
+    // Metrics HTTP 服务
+    void start_metrics_server();
+    void stop_metrics_server();
+    std::unique_ptr<MetricsServer> metrics_server_;
 
     // 是否正在运行
     std::atomic<bool> has_listener_thread;

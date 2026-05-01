@@ -771,6 +771,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     if (ack_after_enqueue) {
         session->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
         smtp_session->reset_mail_state();
+        session->get_server()->increment_mails_accepted();
         SessionBase<ConnectionType>::do_async_write(std::move(session), "250 OK\r\n", [] (
             std::unique_ptr<SessionBase<ConnectionType>> s,
             const boost::system::error_code& error
@@ -824,6 +825,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 // 成功则回复 250 OK 并继续
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
                 smtp_session->reset_mail_state();
+                s->get_server()->increment_mails_accepted();
                 SessionBase<ConnectionType>::do_async_write(std::move(s), "250 OK\r\n", [] (
                     std::unique_ptr<SessionBase<ConnectionType>> sss,
                     const boost::system::error_code& error

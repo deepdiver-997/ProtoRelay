@@ -116,7 +116,12 @@ struct ServerConfig {
     std::string outbound_dkim_selector;    // DKIM selector
     std::string outbound_dkim_domain;      // DKIM domain (d=)
     std::string outbound_dkim_private_key_file; // DKIM 私钥文件路径
-    
+
+    // Metrics 配置
+    bool metrics_enabled;              // 是否启用 metrics HTTP 端点
+    uint16_t metrics_port;             // metrics 监听端口
+    std::string metrics_bind_address;  // metrics 绑定地址（默认 127.0.0.1）
+
     ServerConfig()
         : address("0.0.0.0")
         , port(0)
@@ -167,6 +172,9 @@ struct ServerConfig {
         , outbound_dkim_selector("default")
         , outbound_dkim_domain("")
         , outbound_dkim_private_key_file("")
+        , metrics_enabled(false)
+        , metrics_port(9090)
+        , metrics_bind_address("127.0.0.1")
     {}
 
     ServerConfig(const ServerConfig& other) = default;
@@ -239,6 +247,9 @@ struct ServerConfig {
                   << "\noutbound_dkim_selector = " << outbound_dkim_selector
                   << "\noutbound_dkim_domain = " << outbound_dkim_domain
                   << "\noutbound_dkim_private_key_file = " << outbound_dkim_private_key_file
+                  << "\nmetrics_enabled = " << (metrics_enabled ? "true" : "false")
+                  << "\nmetrics_port = " << metrics_port
+                  << "\nmetrics_bind_address = " << metrics_bind_address
                   << std::endl;
 
         std::cout << "outbound_ports = [";
@@ -460,6 +471,10 @@ struct ServerConfig {
         outbound_dkim_domain = json_config.value("outbound_dkim_domain", outbound_dkim_domain);
         outbound_dkim_private_key_file = resolve_path(filename,
             json_config.value("outbound_dkim_private_key_file", outbound_dkim_private_key_file));
+
+        metrics_enabled = json_config.value("metrics_enabled", metrics_enabled);
+        metrics_port = json_config.value("metrics_port", metrics_port);
+        metrics_bind_address = json_config.value("metrics_bind_address", metrics_bind_address);
 
         if (json_config.contains("outbound_ports") && json_config["outbound_ports"].is_array()) {
             std::vector<uint16_t> parsed_ports;

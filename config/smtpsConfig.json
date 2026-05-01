@@ -45,5 +45,8 @@
   "log_file": "../logs/server.log",
   "mail_storage_path": "../mail/",
   "attachment_storage_path": "../attachments/",
-  "inbound_ack_mode": "after_enqueue"
+  "inbound_ack_mode": "after_enqueue",
+  "metrics_enabled": true,
+  "metrics_port": 9090,
+  "metrics_bind_address": "127.0.0.1"
 }

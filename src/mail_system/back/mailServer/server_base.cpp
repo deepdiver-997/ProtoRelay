@@ -279,11 +279,13 @@ void ServerBase::accept_ssl_connection() {
                 std::string reject_reason;
                 if (should_reject_connection(reject_reason)) {
                     LOG_NETWORK_WARN("Rejecting new SSL connection: {}", reject_reason);
+                    increment_connections_rejected();
                     boost::system::error_code ignored;
                     ssl_socket->lowest_layer().close(ignored);
                 } else {
                     LOG_NETWORK_INFO("New SSL connection accepted");
                     LOG_NETWORK_DEBUG("Start handling SSL connection");
+                    increment_connections_total();
                     handle_accept(std::move(ssl_socket), ec);
                 }
             }
@@ -318,11 +320,13 @@ void ServerBase::accept_tcp_connection() {
                     LOG_NETWORK_WARN("Rejecting new TCP connection from {}: {}",
                                      socket->remote_endpoint().address().to_string(),
                                      reject_reason);
+                    increment_connections_rejected();
                     boost::system::error_code ignored;
                     socket->close(ignored);
                 } else {
                     LOG_NETWORK_INFO("New TCP connection accepted from {}",
                                   socket->remote_endpoint().address().to_string());
+                    increment_connections_total();
                     handle_tcp_accept(std::move(socket), error);
                 }
             } else {
@@ -354,6 +358,7 @@ void ServerBase::start() {
     }
     if (m_state.load() != ServerState::Stopped) {
         m_state.store(ServerState::Running);
+        start_metrics_server();
     if (m_outboundInterruptFlag) {
         m_outboundInterruptFlag->store(true);
     }
@@ -412,6 +417,7 @@ void ServerBase::stop(ServerState next_state) {
     if (m_state.load() == ServerState::Running) {
         try {
             m_state.store(next_state);
+            stop_metrics_server();
             if (m_outboundInterruptFlag) {
                 m_outboundInterruptFlag->store(false);
             }
@@ -528,6 +534,36 @@ void ServerBase::load_certificates(const std::string& cert_file, const std::stri
     catch (const std::exception& e) {
         LOG_SERVER_ERROR("Error loading SSL certificates: {}", e.what());
         throw;
+    }
+}
+
+void ServerBase::start_metrics_server() {
+    if (!m_config.metrics_enabled) {
+        return;
+    }
+    if (metrics_server_) {
+        return;
+    }
+    try {
+        metrics_server_ = std::make_unique<MetricsServer>(
+            *m_ioContext,
+            m_config.metrics_port,
+            m_config.metrics_bind_address,
+            [this]() { return build_metrics_response(); });
+        metrics_server_->start();
+        LOG_SERVER_INFO("Metrics server started on {}:{}",
+                       m_config.metrics_bind_address, m_config.metrics_port);
+    } catch (const std::exception& e) {
+        LOG_SERVER_ERROR("Failed to start metrics server: {}", e.what());
+        metrics_server_.reset();
+    }
+}
+
+void ServerBase::stop_metrics_server() {
+    if (metrics_server_) {
+        metrics_server_->stop();
+        metrics_server_.reset();
+        LOG_SERVER_INFO("Metrics server stopped");
     }
 }
 
