@@ -117,6 +117,10 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 
 - `docs/PROJECT_STYLE.md`
 
+## 写给学弟学妹
+
+如果你正在找课程项目参考——代码随便看、随便改、随便用，不用问我。如果觉得有帮助，希望能到 GitHub 给我点个 Star，不仅是对我劳动的认可，也能让我知道这个项目帮到了人。
+
 ## 许可证
 
-MIT；Boost 许可证见 `COPYING_BOOST.txt`。
+MIT，详见 `LICENSE` 文件；Boost 许可证见 `COPYING_BOOST.txt`。

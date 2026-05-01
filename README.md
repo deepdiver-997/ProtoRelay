@@ -117,6 +117,10 @@ See style and engineering conventions:
 
 - `docs/PROJECT_STYLE.md`
 
+## A Note for Students
+
+If you're a student looking for a course project reference — feel free to study, borrow, or adapt any part of this codebase. No need to ask. That said, a GitHub star would be much appreciated. Credit where it's due, but mostly it helps me know this project was useful to someone.
+
 ## License
 
-MIT. Boost license in `COPYING_BOOST.txt`.
+MIT. See `LICENSE`. Boost license in `COPYING_BOOST.txt`.
