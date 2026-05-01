@@ -67,6 +67,25 @@ Key points:
 - Session logic is built around async callbacks and strict ownership rules.
 - Validation and protocol responses are generated with SMTP utility helpers.
 
+### 4.1.1 Inbound Sender Verification (SPF/DKIM/DMARC)
+
+At `MAIL FROM` and `DATA_END` stages, the inbound path performs sender identity verification:
+
+- **SPF** (Sender Policy Framework): checks at `MAIL FROM` whether the connecting IP is authorized by the envelope sender's domain. On hard-fail (`-all`), the session rejects with `550 5.7.1` before accepting the message body.
+- **DKIM** (DomainKeys Identified Mail): at `DATA_END`, verifies the DKIM signature in the message headers against the signer's public key retrieved via DNS TXT.
+- **DMARC** (Domain-based Message Authentication, Reporting and Conformance): at `DATA_END`, evaluates DKIM and SPF alignment against the `From` header domain and applies the domain's published policy.
+
+The verification result is injected into the message as an `Authentication-Results` header (RFC 8601).
+
+**SPF-at-MAIL-FROM optimization**: to enable early rejection without blocking the IO thread, the MAIL FROM stage performs a quick SPF check using a DNS TXT cache. If the cache is hot, verification completes inline; a miss falls through and a full verification (including DKIM/DMARC) runs on a worker thread at `DATA_END`, reusing the SPF result if already computed.
+
+**DNS TXT caching**: DKIM and SPF lookups use an in-memory cache with a fixed 300-second TTL. Cache entries are keyed by domain, and cache hits avoid repeated DNS round trips.
+
+**Per-check mode configuration**: each check (SPF/DKIM/DMARC) supports three modes:
+- `off`: skip this check entirely.
+- `soft`: perform the check and record the result in `Authentication-Results`, but do not reject.
+- `hard`: perform the check and reject the message on failure.
+
 ## 4.2 Outbound Delivery Pipeline
 
 Responsibilities:
@@ -168,6 +187,17 @@ Notable SMTP ingest policy knobs:
   - admission backpressure based on free system memory
 - `persist_min_db_available_connections`
   - admission backpressure based on DB pool pressure
+
+Inbound sender verification knobs:
+
+- `inbound_spf_mode` (`off`|`soft`|`hard`, default `off`)
+  - SPF check mode. `hard` rejects at `MAIL FROM` on SPF fail.
+- `inbound_dkim_mode` (`off`|`soft`|`hard`, default `off`)
+  - DKIM signature verification mode.
+- `inbound_dmarc_mode` (`off`|`soft`|`hard`, default `off`)
+  - DMARC policy enforcement mode.
+- `inbound_auth_timeout_ms` (default `30000`)
+  - max wait time for the asynchronous verification task on the worker thread.
 
 Startup sequence (simplified):
 

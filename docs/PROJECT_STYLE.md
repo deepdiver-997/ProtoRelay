@@ -62,6 +62,7 @@ This document captures conventions inspired by large production-grade CLI/networ
 - Do not commit secrets (DB password/private keys).
 - Prefer mounted runtime secrets/config for deployment.
 - Enforce cert/key file existence checks during startup.
+- Project must include a `LICENSE` file with the chosen open-source license.
 
 ## 10. Test and Change Quality
 
