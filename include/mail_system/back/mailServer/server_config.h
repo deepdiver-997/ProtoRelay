@@ -122,6 +122,12 @@ struct ServerConfig {
     uint16_t metrics_port;             // metrics 监听端口
     std::string metrics_bind_address;  // metrics 绑定地址（默认 127.0.0.1）
 
+    // 入站验证配置
+    std::string inbound_spf_mode;      // SPF 验证模式："off"/"soft"/"hard"
+    std::string inbound_dkim_mode;     // DKIM 验证模式："off"/"soft"/"hard"
+    std::string inbound_dmarc_mode;    // DMARC 验证模式："off"/"soft"/"hard"
+    uint32_t inbound_auth_timeout_ms;  // hard 模式下等待验证的最大时间
+
     ServerConfig()
         : address("0.0.0.0")
         , port(0)
@@ -175,6 +181,10 @@ struct ServerConfig {
         , metrics_enabled(false)
         , metrics_port(9090)
         , metrics_bind_address("127.0.0.1")
+        , inbound_spf_mode("off")
+        , inbound_dkim_mode("off")
+        , inbound_dmarc_mode("off")
+        , inbound_auth_timeout_ms(30000)
     {}
 
     ServerConfig(const ServerConfig& other) = default;
@@ -250,6 +260,10 @@ struct ServerConfig {
                   << "\nmetrics_enabled = " << (metrics_enabled ? "true" : "false")
                   << "\nmetrics_port = " << metrics_port
                   << "\nmetrics_bind_address = " << metrics_bind_address
+                  << "\ninbound_spf_mode = " << inbound_spf_mode
+                  << "\ninbound_dkim_mode = " << inbound_dkim_mode
+                  << "\ninbound_dmarc_mode = " << inbound_dmarc_mode
+                  << "\ninbound_auth_timeout_ms = " << inbound_auth_timeout_ms
                   << std::endl;
 
         std::cout << "outbound_ports = [";
@@ -475,6 +489,11 @@ struct ServerConfig {
         metrics_enabled = json_config.value("metrics_enabled", metrics_enabled);
         metrics_port = json_config.value("metrics_port", metrics_port);
         metrics_bind_address = json_config.value("metrics_bind_address", metrics_bind_address);
+
+        inbound_spf_mode = json_config.value("inbound_spf_mode", inbound_spf_mode);
+        inbound_dkim_mode = json_config.value("inbound_dkim_mode", inbound_dkim_mode);
+        inbound_dmarc_mode = json_config.value("inbound_dmarc_mode", inbound_dmarc_mode);
+        inbound_auth_timeout_ms = json_config.value("inbound_auth_timeout_ms", inbound_auth_timeout_ms);
 
         if (json_config.contains("outbound_ports") && json_config["outbound_ports"].is_array()) {
             std::vector<uint16_t> parsed_ports;

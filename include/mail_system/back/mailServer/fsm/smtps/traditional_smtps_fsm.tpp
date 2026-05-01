@@ -2,6 +2,7 @@
 #define TRADITIONAL_SMTPS_FSM_TPP
 
 #include "mail_system/back/algorithm/smtp_utils.h"
+#include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/mailServer/session/smtps_session.h"
 
 namespace mail_system {
@@ -324,6 +325,11 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
                              static_cast<SmtpsState>(session->get_current_state())),
                          args);
 
+    // 存下 EHLO 域名，供后续 SPF 验证使用
+    if (auto* ctx = static_cast<SmtpsContext*>(session->get_context())) {
+        ctx->ehlo_domain = args;
+    }
+
     std::string response = "250-" + args + " Hello\r\n";
     response += "250-SIZE 10240000\r\n"
                "250-8BITMIME\r\n";
@@ -535,6 +541,68 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         ctx->sender_address = matches[1];
         // New MAIL FROM starts/restarts the envelope transaction.
         ctx->recipient_addresses.clear();
+        ctx->spf_checked = false;
+
+        // ===== SPF 提前验证 (MAIL FROM 阶段) =====
+        const auto& config = session->get_server()->m_config;
+        std::string spf_reject_reason;
+        if (config.inbound_spf_mode != "off" &&
+            !ctx->sender_address.empty() && ctx->sender_address != "<>") {
+            auto outbound = session->get_server()->m_outboundClient;
+            if (outbound) {
+                auto resolver = outbound->get_dns_resolver();
+                if (resolver) {
+                    auto spf = inbound::InboundVerifier::check_spf_only(
+                        *resolver,
+                        session->get_client_ip(),
+                        ctx->sender_address,
+                        ctx->ehlo_domain);
+                    ctx->spf_checked = true;
+                    ctx->spf_result = spf.result;
+                    ctx->spf_reason = spf.reason;
+
+                    LOG_SMTP_DETAIL_DEBUG("SPF at MAIL FROM: result={}, reason={}",
+                                          spf.result, spf.reason);
+
+                    if (config.inbound_spf_mode == "hard" && spf.result == "fail") {
+                        spf_reject_reason = spf.reason;
+                    }
+                }
+            }
+        }
+
+        if (!spf_reject_reason.empty()) {
+            LOG_SMTP_DETAIL_WARN("SPF hard-fail at MAIL FROM from {}: {}",
+                                 session->get_client_ip(), spf_reject_reason);
+            SessionBase<ConnectionType>::do_async_write(
+                std::move(session),
+                "550 5.7.1 SPF verification failed: " + spf_reject_reason + "\r\n",
+                [] (
+                    std::unique_ptr<SessionBase<ConnectionType>> s,
+                    const boost::system::error_code& ec
+                ) mutable {
+                    if (ec) {
+                        LOG_SMTP_DETAIL_ERROR("Error sending SPF rejection: {}", ec.message());
+                        return;
+                    }
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                    SessionBase<ConnectionType>::do_async_read(std::move(s), [] (
+                        std::unique_ptr<SessionBase<ConnectionType>> sss,
+                        const boost::system::error_code& error,
+                        std::size_t bytes_transferred
+                    ) mutable {
+                        if (error) {
+                            LOG_SMTP_DETAIL_ERROR("Error reading after SPF rejection: {}", error.message());
+                            return;
+                        }
+                        auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                        fsm->auto_process_event(std::move(sss));
+                    });
+                }
+            );
+            return;
+        }
+
         SessionBase<ConnectionType>::do_async_write(
             std::move(session),
             "250 Ok\r\n",
@@ -751,6 +819,143 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     }
 
     smtp_session->flush_body_and_wait();
+
+    // ===== 入站验证 (DKIM/DMARC，SPF 已在 MAIL FROM 阶段完成) =====
+    const auto& config = session->get_server()->m_config;
+    bool needs_more_verification = (!ctx->spf_checked && config.inbound_spf_mode != "off") ||
+                                    config.inbound_dkim_mode != "off" ||
+                                    config.inbound_dmarc_mode != "off";
+
+    if (needs_more_verification && !ctx->verification_run) {
+        std::string client_ip = session->get_client_ip();
+        std::string mail_from = ctx->sender_address;
+        std::string helo = ctx->ehlo_domain;
+        std::string headers = ctx->header_buffer;
+
+        // 从已写入的文件中读取正文（用于 DKIM 体哈希验证）
+        std::string raw_body;
+        if (session->get_mail() && !session->get_mail()->body_path.empty()) {
+            std::ifstream body_file(session->get_mail()->body_path, std::ios::binary);
+            if (body_file.is_open()) {
+                std::ostringstream ss;
+                ss << body_file.rdbuf();
+                std::string full = ss.str();
+                auto hdr_end = full.find("\r\n\r\n");
+                if (hdr_end != std::string::npos) {
+                    raw_body = full.substr(hdr_end + 4);
+                }
+            }
+        }
+
+        auto outbound = session->get_server()->m_outboundClient;
+        if (outbound) {
+            auto resolver = outbound->get_dns_resolver();
+            if (resolver) {
+                bool any_hard = (config.inbound_spf_mode == "hard" ||
+                                config.inbound_dkim_mode == "hard" ||
+                                config.inbound_dmarc_mode == "hard");
+
+                auto pool = session->get_server()->m_workerThreadPool;
+
+                // SPF 已在 MAIL FROM 阶段验证则复用
+                bool spf_done = ctx->spf_checked;
+                inbound::SpfResult stored_spf;
+                if (spf_done) {
+                    stored_spf.result = ctx->spf_result;
+                    stored_spf.reason = ctx->spf_reason;
+                }
+
+                auto task = [resolver, client_ip, mail_from, helo, headers, raw_body,
+                             cfg = config, spf_done, stored_spf]() -> inbound::VerificationResult {
+                    inbound::VerificationResult result;
+                    inbound::InboundVerifier verifier(*resolver);
+                    verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, cfg, result,
+                                        spf_done ? &stored_spf : nullptr);
+                    return result;
+                };
+
+                auto fut = pool->submit(std::move(task));
+                auto timeout = std::chrono::milliseconds(config.inbound_auth_timeout_ms);
+
+                if (fut.wait_for(timeout) == std::future_status::ready) {
+                    inbound::VerificationResult result = fut.get();
+                    ctx->verification_run = true;
+
+                    // hard 模式：验证失败则拒绝
+                    if (any_hard) {
+                        std::string reject_reason;
+                        if (config.inbound_spf_mode == "hard" && result.spf_hard_fail()) {
+                            reject_reason = "5.7.1 SPF verification failed: " + result.spf.reason;
+                        } else if (config.inbound_dkim_mode == "hard" && result.dkim_hard_fail()) {
+                            reject_reason = "5.7.1 DKIM verification failed: " + result.dkim.reason;
+                        } else if (config.inbound_dmarc_mode == "hard" && result.dmarc_hard_fail()) {
+                            reject_reason = "5.7.1 DMARC verification failed: " + result.dmarc.reason;
+                        }
+
+                        if (!reject_reason.empty()) {
+                            LOG_SMTP_DETAIL_WARN("Inbound verification hard-fail from {}: {}",
+                                                 client_ip, reject_reason);
+                            smtp_session->discard_current_mail();
+                            SessionBase<ConnectionType>::do_async_write(
+                                std::move(session),
+                                "550 " + reject_reason + "\r\n",
+                                [](std::unique_ptr<SessionBase<ConnectionType>> s,
+                                   const boost::system::error_code&) mutable {
+                                    if (s) s->close();
+                                });
+                            return;
+                        }
+                    }
+
+                    // 构建 Authentication-Results 头并注入 header_buffer
+                    std::string mf_domain = inbound::InboundVerifier::extract_domain(mail_from);
+                    ctx->auth_results_header = inbound::InboundVerifier::build_auth_results_header(
+                        config.system_domain, result, mf_domain);
+
+                    if (!ctx->auth_results_header.empty()) {
+                        ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
+                        LOG_SMTP_DETAIL_DEBUG("Injected Authentication-Results header: {}",
+                                              ctx->auth_results_header);
+                    }
+                } else {
+                    // 验证超时
+                    LOG_SMTP_DETAIL_WARN("Inbound verification timed out for {}", client_ip);
+                    if (any_hard) {
+                        smtp_session->discard_current_mail();
+                        SessionBase<ConnectionType>::do_async_write(
+                            std::move(session),
+                            "451 4.7.1 Inbound verification timeout\r\n",
+                            [](std::unique_ptr<SessionBase<ConnectionType>> s,
+                               const boost::system::error_code&) mutable {
+                                if (s) s->close();
+                            });
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // SPF 已在 MAIL FROM 阶段完成但未进入上方验证块（DKIM/DMARC 均关闭）
+    // 此时仍需注入 Authentication-Results 头
+    if (ctx->spf_checked && !ctx->verification_run && !ctx->spf_result.empty()) {
+        inbound::VerificationResult spf_only;
+        spf_only.spf.result = ctx->spf_result;
+        spf_only.spf.reason = ctx->spf_reason;
+        spf_only.dkim.result = "none";
+        spf_only.dmarc.result = "none";
+
+        std::string mf_domain = inbound::InboundVerifier::extract_domain(ctx->sender_address);
+        ctx->auth_results_header = inbound::InboundVerifier::build_auth_results_header(
+            config.system_domain, spf_only, mf_domain);
+
+        if (!ctx->auth_results_header.empty()) {
+            ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
+            LOG_SMTP_DETAIL_DEBUG("Injected SPF-only Authentication-Results header: {}",
+                                  ctx->auth_results_header);
+        }
+    }
+
     auto submit_result = smtp_session->submit_mail_to_queue();
     if (!submit_result.accepted) {
         smtp_session->discard_current_mail();

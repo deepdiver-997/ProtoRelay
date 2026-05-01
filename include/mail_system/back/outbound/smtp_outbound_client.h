@@ -88,6 +88,7 @@ public:
     void notify_outbox_ready();
     const std::string& worker_id() const { return worker_id_; }
     int local_reservation_lease_seconds() const;
+    std::shared_ptr<IDnsResolver> get_dns_resolver() const { return dns_resolver_; }
 
 private:
     void run_loop();

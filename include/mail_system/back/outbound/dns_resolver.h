@@ -22,6 +22,9 @@ public:
 
     // Resolve hostname to a list of numeric IP addresses (IPv4/IPv6).
     virtual std::vector<std::string> resolve_host_addresses(const std::string& host) = 0;
+
+    // Resolve TXT records for a domain.
+    virtual std::vector<std::string> resolve_txt(const std::string& domain) = 0;
 };
 
 } // namespace outbound

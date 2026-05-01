@@ -28,6 +28,12 @@ struct AddrQueryContext {
     int status{ARES_EDESTRUCTION};
 };
 
+struct TxtQueryContext {
+    std::vector<std::string> records;
+    std::atomic<bool>* done{nullptr};
+    int status{ARES_EDESTRUCTION};
+};
+
 void mx_query_callback(void* arg, int status, int timeouts, unsigned char* abuf, int alen) {
     (void)timeouts;
     auto* ctx = static_cast<MxQueryContext*>(arg);
@@ -107,6 +113,56 @@ void addr_query_callback(void* arg, int status, int timeouts, struct ares_addrin
 
     if (result != nullptr) {
         ares_freeaddrinfo(result);
+    }
+
+    if (ctx->done) {
+        ctx->done->store(true);
+    }
+}
+
+void txt_query_callback(void* arg, int status, int timeouts, unsigned char* abuf, int alen) {
+    (void)timeouts;
+    auto* ctx = static_cast<TxtQueryContext*>(arg);
+    if (!ctx) {
+        return;
+    }
+
+    ctx->status = status;
+    if (status != ARES_SUCCESS) {
+        if (ctx->done) {
+            ctx->done->store(true);
+        }
+        return;
+    }
+
+    struct ares_txt_reply* txt_reply = nullptr;
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    const int parse_status = ares_parse_txt_reply(abuf, alen, &txt_reply);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+    if (parse_status == ARES_SUCCESS && txt_reply) {
+        for (auto* it = txt_reply; it != nullptr; it = it->next) {
+            if (!it->txt || it->length == 0) {
+                continue;
+            }
+            std::string record;
+            record.reserve(it->length);
+            const unsigned char* ptr = it->txt;
+            const unsigned char* end = it->txt + it->length;
+            while (ptr < end) {
+                unsigned char seg_len = *ptr;
+                ++ptr;
+                record.append(reinterpret_cast<const char*>(ptr), seg_len);
+                ptr += seg_len;
+            }
+            ctx->records.push_back(std::move(record));
+        }
+        ares_free_data(txt_reply);
     }
 
     if (ctx->done) {
@@ -265,6 +321,74 @@ std::vector<std::string> CaresDnsResolver::resolve_host_addresses(const std::str
     ctx.addresses.erase(std::unique(ctx.addresses.begin(), ctx.addresses.end()), ctx.addresses.end());
     addresses = std::move(ctx.addresses);
     return addresses;
+}
+
+std::vector<std::string> CaresDnsResolver::resolve_txt(const std::string& domain) {
+    std::vector<std::string> records;
+    if (domain.empty()) {
+        return records;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!init_channel_locked()) {
+        LOG_OUTBOUND_WARN("DNS(TXT): channel unavailable, domain={}", domain);
+        return records;
+    }
+
+    TxtQueryContext ctx;
+    std::atomic<bool> done{false};
+    ctx.done = &done;
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    ares_query(channel_, domain.c_str(), ns_c_in, ns_t_txt, &txt_query_callback, &ctx);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+    const bool loop_ok = run_event_loop_locked(done, kDefaultDnsTimeout);
+    if (!loop_ok || ctx.status != ARES_SUCCESS) {
+        LOG_OUTBOUND_WARN("DNS(TXT): lookup failed, domain={}, status={}, reason={}",
+                        domain,
+                        ctx.status,
+                        ares_strerror(ctx.status));
+        ares_cancel(channel_);
+        return records;
+    }
+
+    records = std::move(ctx.records);
+
+    // 写入缓存（固定 TTL 300 秒，c-ares 的 ares_txt_reply 不暴露 TTL）
+    {
+        constexpr unsigned int kCacheTtlSeconds = 300;
+        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+        txt_cache_[domain] = {
+            records,
+            std::chrono::steady_clock::now() + std::chrono::seconds(kCacheTtlSeconds)
+        };
+    }
+
+    return records;
+}
+
+std::vector<std::string> CaresDnsResolver::resolve_txt_cached(const std::string& domain) {
+    if (domain.empty()) {
+        return {};
+    }
+
+    // 缓存命中则直接返回
+    {
+        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+        auto it = txt_cache_.find(domain);
+        if (it != txt_cache_.end() && it->second.expiry > std::chrono::steady_clock::now()) {
+            return it->second.records;
+        }
+    }
+
+    // 缓存未命中：真正查询（会更新缓存）
+    return resolve_txt(domain);
 }
 
 } // namespace outbound

@@ -87,7 +87,15 @@ struct SmtpsContext {
     std::string base64_remainder;                // Base64 断行余数，拼接下一块使用
     size_t current_attachment_size = 0;          // 当前附件累计写入大小
     std::vector<attachment> streamed_attachments;// 已完成的附件元数据，DATA_END 时搬运到 mail
-    
+
+    // 入站验证相关
+    std::string ehlo_domain;                   // EHLO/HELO 客户端声明的域名
+    std::string auth_results_header;           // 验证后注入的 Authentication-Results 头
+    bool verification_run = false;             // 本次事务是否已执行验证
+    bool spf_checked = false;                  // SPF 已在 MAIL FROM 阶段验证
+    std::string spf_result;                    // MAIL FROM 阶段的 SPF 结果
+    std::string spf_reason;                    // SPF 失败原因
+
     // 附件缓冲区相关（采用与邮件相同的缓冲策略）
     size_t attachment_buffer_size = 0;           // 当前附件缓冲区大小
     std::unique_ptr<char[]> attachment_buffer;   // 附件数据缓冲指针
@@ -126,6 +134,12 @@ struct SmtpsContext {
         streamed_attachments.clear();
         attachment_buffer_used = 0;
         attachment_buffer_expand_count = 0;
+        ehlo_domain.clear();
+        auth_results_header.clear();
+        verification_run = false;
+        spf_checked = false;
+        spf_result.clear();
+        spf_reason.clear();
         if (current_attachment_stream.is_open()) {
             current_attachment_stream.close();
         }
