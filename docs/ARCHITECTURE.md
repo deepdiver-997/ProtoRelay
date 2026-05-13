@@ -86,6 +86,20 @@ The verification result is injected into the message as an `Authentication-Resul
 - `soft`: perform the check and record the result in `Authentication-Results`, but do not reject.
 - `hard`: perform the check and reject the message on failure.
 
+### 4.1.2 SMTP AUTH and EHLO Verification
+
+The server supports three AUTH policies via `inbound_auth_policy`:
+
+- `off` (default): never require AUTH — pure relay/MTA mode. MAIL FROM is accepted without authentication.
+- `on`: always require AUTH — pure MSA (Mail Submission Agent) mode. Clients must authenticate with AUTH LOGIN/PLAIN before sending.
+- `auto`: hybrid mode. Use PTR (reverse DNS) lookup on the connecting IP to identify trusted servers:
+  - PTR record matches the EHLO domain → skip AUTH (server-to-server traffic)
+  - No PTR match → require AUTH (client submission)
+
+**EHLO verification flow** (auto mode): at MAIL FROM, the server performs a cached PTR lookup on the connecting IP. If any returned hostname matches the EHLO domain (exact or suffix), the connection is marked as trusted and AUTH is skipped. The PTR cache shares the 300-second TTL with other DNS caches.
+
+**AUTH implementation**: supports `AUTH LOGIN` (base64-encoded username/password). Credentials are verified against the `users` table. On success, `last_login_time` is updated. The `status` column allows disabling accounts without deletion.
+
 ## 4.2 Outbound Delivery Pipeline
 
 Responsibilities:
@@ -198,6 +212,8 @@ Inbound sender verification knobs:
   - DMARC policy enforcement mode.
 - `inbound_auth_timeout_ms` (default `30000`)
   - max wait time for the asynchronous verification task on the worker thread.
+- `inbound_auth_policy` (`off`|`auto`|`on`, default `off`)
+  - AUTH enforcement mode. `off`=relay mode (no AUTH), `auto`=EHLO/PTR-verified servers skip AUTH, `on`=always require AUTH before MAIL FROM.
 
 Startup sequence (simplified):
 
