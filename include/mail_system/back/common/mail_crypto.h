@@ -114,6 +114,31 @@ inline std::string base64_encode(const unsigned char* data, std::size_t size) {
     return out;
 }
 
+inline std::string base64_decode(const std::string& encoded) {
+    if (encoded.empty()) {
+        return {};
+    }
+    const int in_len = static_cast<int>(encoded.size());
+    // 输出长度：每 4 个输入字符产生 3 字节
+    std::string out(static_cast<std::size_t>(3 * ((in_len + 3) / 4)), '\0');
+    int decoded = EVP_DecodeBlock(
+        reinterpret_cast<unsigned char*>(out.data()),
+        reinterpret_cast<const unsigned char*>(encoded.data()), in_len);
+    if (decoded <= 0) {
+        return {};
+    }
+    // EVP_DecodeBlock 会在末尾追加填充字节，根据 '=' 数量剪掉
+    int pad = 0;
+    if (in_len > 0 && encoded[in_len - 1] == '=') ++pad;
+    if (in_len > 1 && encoded[in_len - 2] == '=') ++pad;
+    const int real_len = decoded - pad;
+    if (real_len < 0) {
+        return {};
+    }
+    out.resize(static_cast<std::size_t>(real_len));
+    return out;
+}
+
 inline std::string sha256_base64(const std::string& data) {
     unsigned char digest[SHA256_DIGEST_LENGTH] = {0};
     if (!EVP_Digest(data.data(), data.size(), digest, nullptr, EVP_sha256(), nullptr)) {

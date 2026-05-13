@@ -2,6 +2,7 @@
 #define TRADITIONAL_SMTPS_FSM_TPP
 
 #include "mail_system/back/algorithm/smtp_utils.h"
+#include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/mailServer/session/smtps_session.h"
 
@@ -325,7 +326,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
                              static_cast<SmtpsState>(session->get_current_state())),
                          args);
 
-    // 存下 EHLO 域名，供后续 SPF 验证使用
+    // 存下 EHLO 域名，供后续 SPF 验证和 AUTH 策略判断使用
     if (auto* ctx = static_cast<SmtpsContext*>(session->get_context())) {
         ctx->ehlo_domain = args;
     }
@@ -336,6 +337,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
 
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>) {
         response += "250-STARTTLS\r\n";
+    }
+
+    // 根据 AUTH 策略决定是否通告 AUTH 能力
+    {
+        const auto& config = session->get_server()->m_config;
+        if (config.inbound_auth_policy != InboundAuthPolicy::OFF) {
+            response += "250-AUTH LOGIN PLAIN\r\n";
+        }
     }
 
     response += "250 SMTPUTF8\r\n";
@@ -430,7 +439,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_username(
     std::unique_ptr<SessionBase<ConnectionType>> session,
     const std::string& args
 ) {
-    static_cast<SmtpsContext*>(session->get_context())->client_username = args;
+    // AUTH LOGIN username 是 base64 编码的
+    static_cast<SmtpsContext*>(session->get_context())->client_username =
+        mail_system::outbound::base64_decode(args);
     SessionBase<ConnectionType>::do_async_write(
         std::move(session),
         "334 UGFzc3dvcmQ6\r\n",
@@ -466,7 +477,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
     const std::string& args
 ) {
     std::string username = static_cast<SmtpsContext*>(session->get_context())->client_username;
-    if (this->auth_user(session.get(), username, args)) {
+    // AUTH LOGIN password 是 base64 编码的
+    std::string password = mail_system::outbound::base64_decode(args);
+    if (this->auth_user(session.get(), username, password)) {
         static_cast<SmtpsContext*>(session->get_context())->is_authenticated = true;
         SessionBase<ConnectionType>::do_async_write(
             std::move(session),
@@ -533,6 +546,84 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                          SmtpsFsm<ConnectionType>::get_state_name(
                              static_cast<SmtpsState>(session->get_current_state())),
                          args);
+
+    // ===== AUTH 策略检查 =====
+    {
+        auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        const auto& config = session->get_server()->m_config;
+
+        // auto 模式：尝试 EHLO 验证（PTR 反向 DNS）
+        if (config.inbound_auth_policy == InboundAuthPolicy::AUTO &&
+            !ctx->is_trusted_server && !ctx->ehlo_domain.empty()) {
+            auto outbound = session->get_server()->m_outboundClient;
+            if (outbound) {
+                auto resolver = outbound->get_dns_resolver();
+                if (resolver) {
+                    auto hostnames = resolver->resolve_ptr_cached(session->get_client_ip());
+                    // 检查 PTR 主机名域名后缀是否匹配 EHLO 域
+                    for (const auto& h : hostnames) {
+                        // 宽松后缀匹配：主机名以 ".ehlo_domain" 结尾或完全等于 ehlo_domain
+                        if (h == ctx->ehlo_domain ||
+                            (h.size() > ctx->ehlo_domain.size() &&
+                             h[h.size() - ctx->ehlo_domain.size() - 1] == '.' &&
+                             h.compare(h.size() - ctx->ehlo_domain.size(),
+                                       ctx->ehlo_domain.size(), ctx->ehlo_domain) == 0)) {
+                            ctx->is_trusted_server = true;
+                            LOG_SMTP_DETAIL_DEBUG("EHLO verified: PTR={} matches EHLO={}, trusted",
+                                                  h, ctx->ehlo_domain);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        bool require_auth = false;
+        switch (config.inbound_auth_policy) {
+        case InboundAuthPolicy::ON:
+            require_auth = true;
+            break;
+        case InboundAuthPolicy::AUTO:
+            require_auth = !ctx->is_trusted_server;
+            break;
+        case InboundAuthPolicy::OFF:
+        default:
+            break;
+        }
+
+        if (require_auth && !ctx->is_authenticated) {
+            LOG_SMTP_DETAIL_WARN("AUTH required but not authenticated from {}",
+                                 session->get_client_ip());
+            SessionBase<ConnectionType>::do_async_write(
+                std::move(session),
+                "530 5.7.1 Authentication required\r\n",
+                [] (
+                    std::unique_ptr<SessionBase<ConnectionType>> s,
+                    const boost::system::error_code& ec
+                ) mutable {
+                    if (ec) {
+                        LOG_SMTP_DETAIL_ERROR("Error sending AUTH required: {}", ec.message());
+                        return;
+                    }
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                    SessionBase<ConnectionType>::do_async_read(std::move(s), [] (
+                        std::unique_ptr<SessionBase<ConnectionType>> sss,
+                        const boost::system::error_code& error,
+                        std::size_t bytes_transferred
+                    ) mutable {
+                        if (error) {
+                            LOG_SMTP_DETAIL_ERROR("Error reading after AUTH required: {}", error.message());
+                            return;
+                        }
+                        auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                        fsm->auto_process_event(std::move(sss));
+                    });
+                }
+            );
+            return;
+        }
+    }
+
     std::regex mail_from_regex(R"(FROM:\s*<([^>]*)>)", std::regex_constants::icase);
     std::smatch matches;
     if (std::regex_search(args, matches, mail_from_regex) && matches.size() > 1) {

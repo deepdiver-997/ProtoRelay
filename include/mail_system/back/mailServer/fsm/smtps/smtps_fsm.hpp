@@ -90,6 +90,7 @@ struct SmtpsContext {
 
     // 入站验证相关
     std::string ehlo_domain;                   // EHLO/HELO 客户端声明的域名
+    bool is_trusted_server = false;            // EHLO 验证通过（PTR 匹配），auto 模式跳过 AUTH
     std::string auth_results_header;           // 验证后注入的 Authentication-Results 头
     bool verification_run = false;             // 本次事务是否已执行验证
     bool spf_checked = false;                  // SPF 已在 MAIL FROM 阶段验证
@@ -135,6 +136,7 @@ struct SmtpsContext {
         attachment_buffer_used = 0;
         attachment_buffer_expand_count = 0;
         ehlo_domain.clear();
+        is_trusted_server = false;
         auth_results_header.clear();
         verification_run = false;
         spf_checked = false;
@@ -234,12 +236,20 @@ public:
         }
 
         // 使用参数化查询防止SQL注入并提高性能
-        std::string sql = "SELECT COUNT(*) as cnt FROM users WHERE mail_address = ? AND password = ?";
+        // 同时检查账户状态（status=1 表示正常）
+        std::string sql = "SELECT COUNT(*) as cnt FROM users "
+                         "WHERE mail_address = ? AND password = ? AND status = 1";
         auto result = connection->query(sql, {mail_address, password});
         if (!result || result->get_row_count() == 0) {
             return false;
         }
-        return std::stoul(result->get_value(0, "cnt")) > 0;
+        bool ok = std::stoul(result->get_value(0, "cnt")) > 0;
+        if (ok) {
+            // 更新最后登录时间
+            connection->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
+                               {mail_address});
+        }
+        return ok;
     }
 
     bool auth_user(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& mail_address, const std::string& password) {

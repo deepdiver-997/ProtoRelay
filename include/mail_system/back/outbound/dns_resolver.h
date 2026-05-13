@@ -25,6 +25,14 @@ public:
 
     // Resolve TXT records for a domain.
     virtual std::vector<std::string> resolve_txt(const std::string& domain) = 0;
+
+    // Resolve PTR (reverse DNS) records for an IPv4/IPv6 address.
+    virtual std::vector<std::string> resolve_ptr(const std::string& ip) = 0;
+
+    // 优先走缓存，未命中才真正查询（子类可覆盖；默认无缓存直接查）
+    virtual std::vector<std::string> resolve_ptr_cached(const std::string& ip) {
+        return resolve_ptr(ip);
+    }
 };
 
 } // namespace outbound

@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS users (
     password VARCHAR(255) NOT NULL COMMENT '加密存储的密码',
     name VARCHAR(100) NOT NULL COMMENT '用户名称',
     telephone VARCHAR(20) COMMENT '电话号码',
+    status TINYINT NOT NULL DEFAULT 1 COMMENT '账户状态: 1=正常, 0=禁用',
+    last_login_time TIMESTAMP NULL DEFAULT NULL COMMENT '最后登录时间',
     register_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '注册时间',
     INDEX idx_mail_address (mail_address)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户信息表';

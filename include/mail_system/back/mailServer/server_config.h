@@ -35,6 +35,34 @@ inline InboundAckMode inbound_ack_mode_from_string(const std::string& raw_mode) 
     return InboundAckMode::AFTER_PERSIST;
 }
 
+enum class InboundAuthPolicy : int {
+    OFF = 0,   // 从不要求 AUTH（纯 relay 模式）
+    AUTO = 1,  // EHLO 验证通过则跳过 AUTH，否则要求
+    ON = 2,    // 始终要求 AUTH（纯 MSA 模式）
+};
+
+inline const char* inbound_auth_policy_to_string(InboundAuthPolicy p) {
+    switch (p) {
+    case InboundAuthPolicy::AUTO:
+        return "auto";
+    case InboundAuthPolicy::ON:
+        return "on";
+    case InboundAuthPolicy::OFF:
+    default:
+        return "off";
+    }
+}
+
+inline InboundAuthPolicy inbound_auth_policy_from_string(const std::string& s) {
+    if (s == "auto") {
+        return InboundAuthPolicy::AUTO;
+    }
+    if (s == "on") {
+        return InboundAuthPolicy::ON;
+    }
+    return InboundAuthPolicy::OFF;
+}
+
 // 服务器配置类
 struct ServerConfig {
     // 网络配置
@@ -127,6 +155,7 @@ struct ServerConfig {
     std::string inbound_dkim_mode;     // DKIM 验证模式："off"/"soft"/"hard"
     std::string inbound_dmarc_mode;    // DMARC 验证模式："off"/"soft"/"hard"
     uint32_t inbound_auth_timeout_ms;  // hard 模式下等待验证的最大时间
+    InboundAuthPolicy inbound_auth_policy;  // AUTH 策略：off/auto/on
 
     ServerConfig()
         : address("0.0.0.0")
@@ -185,6 +214,7 @@ struct ServerConfig {
         , inbound_dkim_mode("off")
         , inbound_dmarc_mode("off")
         , inbound_auth_timeout_ms(30000)
+        , inbound_auth_policy(InboundAuthPolicy::OFF)
     {}
 
     ServerConfig(const ServerConfig& other) = default;
@@ -264,6 +294,7 @@ struct ServerConfig {
                   << "\ninbound_dkim_mode = " << inbound_dkim_mode
                   << "\ninbound_dmarc_mode = " << inbound_dmarc_mode
                   << "\ninbound_auth_timeout_ms = " << inbound_auth_timeout_ms
+                  << "\ninbound_auth_policy = " << inbound_auth_policy_to_string(inbound_auth_policy)
                   << std::endl;
 
         std::cout << "outbound_ports = [";
@@ -494,6 +525,9 @@ struct ServerConfig {
         inbound_dkim_mode = json_config.value("inbound_dkim_mode", inbound_dkim_mode);
         inbound_dmarc_mode = json_config.value("inbound_dmarc_mode", inbound_dmarc_mode);
         inbound_auth_timeout_ms = json_config.value("inbound_auth_timeout_ms", inbound_auth_timeout_ms);
+        inbound_auth_policy = inbound_auth_policy_from_string(
+            json_config.value("inbound_auth_policy",
+                              std::string(inbound_auth_policy_to_string(inbound_auth_policy))));
 
         if (json_config.contains("outbound_ports") && json_config["outbound_ports"].is_array()) {
             std::vector<uint16_t> parsed_ports;

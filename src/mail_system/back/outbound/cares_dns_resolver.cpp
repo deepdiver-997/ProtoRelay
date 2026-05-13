@@ -5,6 +5,7 @@
 #include <ares.h>
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
+#include <netdb.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -33,6 +34,28 @@ struct TxtQueryContext {
     std::atomic<bool>* done{nullptr};
     int status{ARES_EDESTRUCTION};
 };
+
+struct PtrQueryContext {
+    std::vector<std::string> hostnames;
+    std::atomic<bool>* done{nullptr};
+    int status{ARES_EDESTRUCTION};
+};
+
+// 将 IPv4 地址转换为反向查找域名 (e.g. "1.2.3.4" -> "4.3.2.1.in-addr.arpa")
+std::string ipv4_to_ptr_name(const std::string& ip) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+        return {};
+    }
+    const uint32_t n = ntohl(addr.s_addr);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u.in-addr.arpa",
+             (n & 0xFF),
+             (n >> 8) & 0xFF,
+             (n >> 16) & 0xFF,
+             (n >> 24) & 0xFF);
+    return buf;
+}
 
 void mx_query_callback(void* arg, int status, int timeouts, unsigned char* abuf, int alen) {
     (void)timeouts;
@@ -163,6 +186,50 @@ void txt_query_callback(void* arg, int status, int timeouts, unsigned char* abuf
             ctx->records.push_back(std::move(record));
         }
         ares_free_data(txt_reply);
+    }
+
+    if (ctx->done) {
+        ctx->done->store(true);
+    }
+}
+
+void ptr_query_callback(void* arg, int status, int timeouts,
+                       unsigned char* abuf, int alen) {
+    (void)timeouts;
+    auto* ctx = static_cast<PtrQueryContext*>(arg);
+    if (!ctx) {
+        return;
+    }
+
+    ctx->status = status;
+    if (status != ARES_SUCCESS) {
+        if (ctx->done) {
+            ctx->done->store(true);
+        }
+        return;
+    }
+
+    struct hostent* host = nullptr;
+    // addr/addrlen/family 在标准 ares_query 回调中不可用, 传 nullptr 跳过验证
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    const int parse_status = ares_parse_ptr_reply(abuf, alen, nullptr, 0, AF_UNSPEC, &host);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+    if (parse_status == ARES_SUCCESS && host) {
+        if (host->h_name && std::strlen(host->h_name) > 0) {
+            ctx->hostnames.emplace_back(host->h_name);
+        }
+        for (char** alias = host->h_aliases; alias && *alias; ++alias) {
+            if (*alias && std::strlen(*alias) > 0) {
+                ctx->hostnames.emplace_back(*alias);
+            }
+        }
+        ares_free_hostent(host);
     }
 
     if (ctx->done) {
@@ -389,6 +456,79 @@ std::vector<std::string> CaresDnsResolver::resolve_txt_cached(const std::string&
 
     // 缓存未命中：真正查询（会更新缓存）
     return resolve_txt(domain);
+}
+
+std::vector<std::string> CaresDnsResolver::resolve_ptr(const std::string& ip) {
+    std::vector<std::string> hostnames;
+    if (ip.empty()) {
+        return hostnames;
+    }
+
+    const std::string ptr_name = ipv4_to_ptr_name(ip);
+    if (ptr_name.empty()) {
+        return hostnames;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!init_channel_locked()) {
+        LOG_OUTBOUND_WARN("DNS(PTR): channel unavailable, ip={}", ip);
+        return hostnames;
+    }
+
+    PtrQueryContext ctx;
+    std::atomic<bool> done{false};
+    ctx.done = &done;
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    ares_query(channel_, ptr_name.c_str(), ns_c_in, ns_t_ptr, &ptr_query_callback, &ctx);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+    const bool loop_ok = run_event_loop_locked(done, kDefaultDnsTimeout);
+    if (!loop_ok || ctx.status != ARES_SUCCESS) {
+        LOG_OUTBOUND_WARN("DNS(PTR): lookup failed, ip={}, status={}, reason={}",
+                        ip,
+                        ctx.status,
+                        ares_strerror(ctx.status));
+        ares_cancel(channel_);
+        return hostnames;
+    }
+
+    hostnames = std::move(ctx.hostnames);
+
+    // 写入缓存
+    {
+        constexpr unsigned int kCacheTtlSeconds = 300;
+        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+        ptr_cache_[ip] = {
+            hostnames,
+            std::chrono::steady_clock::now() + std::chrono::seconds(kCacheTtlSeconds)
+        };
+    }
+
+    return hostnames;
+}
+
+std::vector<std::string> CaresDnsResolver::resolve_ptr_cached(const std::string& ip) {
+    if (ip.empty()) {
+        return {};
+    }
+
+    // 缓存命中则直接返回
+    {
+        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
+        auto it = ptr_cache_.find(ip);
+        if (it != ptr_cache_.end() && it->second.expiry > std::chrono::steady_clock::now()) {
+            return it->second.hostnames;
+        }
+    }
+
+    // 缓存未命中：真正查询（会更新缓存）
+    return resolve_ptr(ip);
 }
 
 } // namespace outbound
