@@ -1,0 +1,671 @@
+#ifndef IMAPS_FSM_H
+#define IMAPS_FSM_H
+
+#include "mail_system/back/mailServer/session/session_base.h"
+#include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/db/db_service.h"
+#include "mail_system/back/db/mysql_service.h"
+#include "mail_system/back/thread_pool/thread_pool_base.h"
+#include "mail_system/back/entities/mail.h"
+#include "mail_system/back/common/logger.h"
+#include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/common/bcrypt.h"
+#include <cstddef>
+#include <functional>
+#include <future>
+#include <iostream>
+#include <map>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <ctime>
+#include <fstream>
+
+namespace mail_system {
+
+// ====================================================================
+// IMAP 状态枚举 (RFC 3501 §3 基本状态)
+// ====================================================================
+enum class ImapState {
+    INIT = 0,                // 连接刚建立
+    NOT_AUTHENTICATED = 1,   // 等待 LOGIN / AUTHENTICATE
+    AUTHENTICATED = 2,       // 已登录，无选中的邮箱
+    SELECTED = 3,            // 已选中一个邮箱
+    LOGOUT = 4,              // LOGOUT 发送完毕
+    CLOSED = 5               // 连接关闭
+};
+
+// ====================================================================
+// IMAP 事件枚举 —— 等价于命令名映射
+// ====================================================================
+enum class ImapEvent {
+    CONNECT = 0,
+    CAPABILITY = 1,
+    LOGIN = 2,
+    AUTHENTICATE = 3,
+    LOGOUT = 4,
+    SELECT = 5,
+    EXAMINE = 6,
+    CREATE = 7,
+    DELETE = 8,
+    RENAME = 9,
+    SUBSCRIBE = 10,
+    UNSUBSCRIBE = 11,
+    LIST = 12,
+    LSUB = 13,
+    STATUS = 14,
+    APPEND = 15,
+    CHECK = 16,
+    CLOSE = 17,
+    EXPUNGE = 18,
+    SEARCH = 19,
+    FETCH = 20,
+    STORE = 21,
+    COPY = 22,
+    MOVE = 23,
+    UID = 24,
+    NOOP = 25,
+    IDLE = 26,
+    DONE = 27,
+    ERROR = 28,
+    TIMEOUT = 29
+};
+
+// ====================================================================
+// IMAP 上下文 —— 存储每次会话的状态
+// ====================================================================
+struct ImapContext {
+    // 认证
+    bool is_authenticated = false;
+    std::string username;                     // 登录名（邮箱地址）
+    uint64_t user_id = 0;                     // users.id
+
+    // 命令标签
+    std::string current_tag;                  // 当前命令的 tag，响应时回显
+
+    // 选中的邮箱
+    bool mailbox_selected = false;
+    std::string selected_mailbox_name;        // 邮箱名称，如 "INBOX"
+    uint64_t selected_mailbox_id = 0;         // mailboxes.id
+    uint64_t uid_validity = 0;               // UIDVALIDITY 值
+
+    // 读写模式
+    bool read_only = false;                   // true = EXAMINE, false = SELECT
+
+    // IDLE
+    bool idle_mode = false;                   // 是否处于 IDLE 状态
+
+    // APPEND 文字量等待
+    bool awaiting_literal = false;            // 等待 APPEND 文字量数据
+    size_t literal_size = 0;                  // 期望的文字量字节数
+    std::string literal_buffer;               // 已接收的文字量数据
+    std::string pending_append_mailbox;       // APPEND 的目标邮箱
+    std::string pending_append_flags;         // APPEND 的 flags
+    std::string pending_append_internaldate;  // APPEND 的 InternalDate
+
+    void clear() {
+        is_authenticated = false;
+        username.clear();
+        user_id = 0;
+        current_tag.clear();
+        mailbox_selected = false;
+        selected_mailbox_name.clear();
+        selected_mailbox_id = 0;
+        uid_validity = 0;
+        read_only = false;
+        idle_mode = false;
+        awaiting_literal = false;
+        literal_size = 0;
+        literal_buffer.clear();
+        pending_append_mailbox.clear();
+        pending_append_flags.clear();
+        pending_append_internaldate.clear();
+    }
+};
+
+// 前向声明
+template <typename ConnectionType>
+class SessionBase;
+
+// 状态处理函数类型定义（同 SMTP 风格）
+template <typename ConnectionType>
+using ImapStateHandler = std::function<void(std::unique_ptr<SessionBase<ConnectionType>>, const std::string&)>;
+
+// ====================================================================
+// IMAP 状态机基类 —— 封装 DB 操作和公用方法
+// ====================================================================
+template <typename ConnectionType>
+class ImapsFsm {
+protected:
+    std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
+    std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
+    std::shared_ptr<DBPool> m_dbPool;
+    std::shared_ptr<storage::IStorageProvider> m_storageProvider;
+
+public:
+    ImapsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
+             std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+             std::shared_ptr<DBPool> db_pool,
+             std::shared_ptr<storage::IStorageProvider> storage_provider)
+        : m_ioThreadPool(io_thread_pool),
+          m_workerThreadPool(worker_thread_pool),
+          m_dbPool(db_pool),
+          m_storageProvider(storage_provider) {}
+
+    virtual ~ImapsFsm() = default;
+
+    // 处理事件 —— 纯虚接口
+    virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session,
+                                ImapEvent event,
+                                const std::string& tag,
+                                const std::string& args) = 0;
+
+    // ========== 状态/事件名称查询 ==========
+
+    static std::string get_state_name(ImapState state) {
+        static const std::unordered_map<ImapState, std::string> names = {
+            {ImapState::INIT, "INIT"},
+            {ImapState::NOT_AUTHENTICATED, "NOT_AUTHENTICATED"},
+            {ImapState::AUTHENTICATED, "AUTHENTICATED"},
+            {ImapState::SELECTED, "SELECTED"},
+            {ImapState::LOGOUT, "LOGOUT"},
+            {ImapState::CLOSED, "CLOSED"}
+        };
+        auto it = names.find(state);
+        return it != names.end() ? it->second : "UNKNOWN_STATE";
+    }
+
+    static std::string get_event_name(ImapEvent event) {
+        static const std::unordered_map<ImapEvent, std::string> names = {
+            {ImapEvent::CONNECT, "CONNECT"},
+            {ImapEvent::CAPABILITY, "CAPABILITY"},
+            {ImapEvent::LOGIN, "LOGIN"},
+            {ImapEvent::AUTHENTICATE, "AUTHENTICATE"},
+            {ImapEvent::LOGOUT, "LOGOUT"},
+            {ImapEvent::SELECT, "SELECT"},
+            {ImapEvent::EXAMINE, "EXAMINE"},
+            {ImapEvent::CREATE, "CREATE"},
+            {ImapEvent::DELETE, "DELETE"},
+            {ImapEvent::RENAME, "RENAME"},
+            {ImapEvent::SUBSCRIBE, "SUBSCRIBE"},
+            {ImapEvent::UNSUBSCRIBE, "UNSUBSCRIBE"},
+            {ImapEvent::LIST, "LIST"},
+            {ImapEvent::LSUB, "LSUB"},
+            {ImapEvent::STATUS, "STATUS"},
+            {ImapEvent::APPEND, "APPEND"},
+            {ImapEvent::CHECK, "CHECK"},
+            {ImapEvent::CLOSE, "CLOSE"},
+            {ImapEvent::EXPUNGE, "EXPUNGE"},
+            {ImapEvent::SEARCH, "SEARCH"},
+            {ImapEvent::FETCH, "FETCH"},
+            {ImapEvent::STORE, "STORE"},
+            {ImapEvent::COPY, "COPY"},
+            {ImapEvent::MOVE, "MOVE"},
+            {ImapEvent::UID, "UID"},
+            {ImapEvent::NOOP, "NOOP"},
+            {ImapEvent::IDLE, "IDLE"},
+            {ImapEvent::DONE, "DONE"},
+            {ImapEvent::ERROR, "ERROR"},
+            {ImapEvent::TIMEOUT, "TIMEOUT"}
+        };
+        auto it = names.find(event);
+        return it != names.end() ? it->second : "UNKNOWN_EVENT";
+    }
+
+    // ========== 数据库操作 ==========
+
+    // 用户认证（复用和 SMTP 相同的 users 表）
+    bool auth_user(SessionBase<ConnectionType>* session,
+                   const std::string& mail_address,
+                   const std::string& password,
+                   uint64_t& out_user_id) {
+        LOG_AUTH_INFO("IMAP AUTH attempt: mail_address=[{}]", mail_address);
+
+        if (!session) {
+            LOG_AUTH_ERROR("Session is null in auth_user");
+            return false;
+        }
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            LOG_AUTH_ERROR("Failed to get database connection");
+            return false;
+        }
+
+        std::string sql = "SELECT id, password, status FROM users WHERE mail_address = ?";
+        auto result = connection->query(sql, {mail_address});
+        if (!result || result->get_row_count() == 0) {
+            LOG_AUTH_WARN("User not found: {}", mail_address);
+            return false;
+        }
+
+        int status = std::stoi(result->get_value(0, "status"));
+        if (status != 1) {
+            LOG_AUTH_WARN("User account disabled: {}", mail_address);
+            return false;
+        }
+
+        std::string stored = result->get_value(0, "password");
+        bool ok = false;
+
+        if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
+            ok = bcrypt_verify(password, stored);
+        } else {
+            ok = (stored == password);
+            if (ok) {
+                LOG_AUTH_WARN("User {} still using plaintext password", mail_address);
+            }
+        }
+
+        if (ok) {
+            out_user_id = std::stoull(result->get_value(0, "id"));
+            connection->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
+                               {mail_address});
+        }
+        return ok;
+    }
+
+    // 获取用户的邮箱列表
+    bool get_mailboxes(uint64_t user_id,
+                       std::vector<std::tuple<uint64_t, std::string, int>>& mailboxes) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            LOG_DATABASE_ERROR("Failed to get DB connection in get_mailboxes");
+            return false;
+        }
+
+        auto result = connection->query(
+            "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? ORDER BY id",
+            {std::to_string(user_id)});
+        if (!result) {
+            return false;
+        }
+
+        for (size_t i = 0; i < result->get_row_count(); ++i) {
+            uint64_t id = std::stoull(result->get_value(i, "id"));
+            std::string name = result->get_value(i, "name");
+            int box_type = std::stoi(result->get_value(i, "box_type"));
+            mailboxes.emplace_back(id, name, box_type);
+        }
+        return true;
+    }
+
+    // 根据邮箱名称查找邮箱 ID
+    uint64_t find_mailbox_id(uint64_t user_id, const std::string& mailbox_name) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return 0;
+        }
+
+        // 先把 IMAP-UTF-7 编码的名称解码为 UTF-8（客户端发来的可能是编码后的）
+        std::string name_utf8 = mailbox_name;
+        if (mailbox_name.find('&') != std::string::npos) {
+            std::string decoded = decode_imap_utf7(mailbox_name);
+            if (!decoded.empty()) name_utf8 = decoded;
+        }
+
+        // Try direct name match first (handles Chinese names like "收件箱")
+        auto result = connection->query(
+            "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? AND name = ?",
+            {std::to_string(user_id), name_utf8});
+        if (result && result->get_row_count() > 0) {
+            return std::stoull(result->get_value(0, "id"));
+        }
+
+        // IMAP: "INBOX" → find the inbox mailbox (box_type=1)
+        std::string upper = name_utf8;
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+        if (upper == "INBOX") {
+            result = connection->query(
+                "SELECT id FROM mailboxes WHERE user_id = ? AND box_type = 1",
+                {std::to_string(user_id)});
+            if (result && result->get_row_count() > 0) {
+                return std::stoull(result->get_value(0, "id"));
+            }
+        }
+
+        return 0;
+    }
+
+    // 获取邮箱中的邮件列表（用于 FETCH / SEARCH）
+    struct MailboxMailInfo {
+        uint64_t mail_id;
+        std::string sender;
+        std::string recipient;
+        std::string subject;
+        std::string body_path;
+        bool is_starred;
+        bool is_deleted;
+        bool is_important;
+        int status;        // 0=read, 1=unread
+        time_t send_time;
+    };
+
+    bool get_mailbox_mails(uint64_t mailbox_id, uint64_t user_id,
+                           std::vector<MailboxMailInfo>& mails) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return false;
+        }
+
+        std::string sql =
+            "SELECT m.id, mr.sender, mr.recipient, m.subject, m.body_path, "
+            "mm.is_starred, mm.is_deleted, mm.is_important, "
+            "mr.status, m.send_time "
+            "FROM mail_mailbox mm "
+            "JOIN mails m ON mm.mail_id = m.id "
+            "JOIN mail_recipients mr ON mr.mail_id = m.id AND mr.recipient = ("
+            "  SELECT mail_address FROM users WHERE id = ?"
+            ") "
+            "WHERE mm.mailbox_id = ? AND mm.user_id = ? "
+            "ORDER BY m.send_time DESC";
+
+        auto result = connection->query(sql, {
+            std::to_string(user_id),
+            std::to_string(mailbox_id),
+            std::to_string(user_id)
+        });
+
+        if (!result) {
+            return false;
+        }
+
+        for (size_t i = 0; i < result->get_row_count(); ++i) {
+            MailboxMailInfo info;
+            info.mail_id = std::stoull(result->get_value(i, "id"));
+            info.sender = result->get_value(i, "sender");
+            info.recipient = result->get_value(i, "recipient");
+            info.subject = result->get_value(i, "subject");
+            info.body_path = result->get_value(i, "body_path");
+            info.is_starred = result->get_value(i, "is_starred") == "1";
+            info.is_deleted = result->get_value(i, "is_deleted") == "1";
+            info.is_important = result->get_value(i, "is_important") == "1";
+            info.status = std::stoi(result->get_value(i, "status"));
+            info.send_time = static_cast<time_t>(std::stoll(result->get_value(i, "send_time")));
+            mails.push_back(std::move(info));
+        }
+        return true;
+    }
+
+    // 获取单封邮件信息
+    bool get_mail_info(uint64_t mail_id,
+                       MailboxMailInfo& info) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return false;
+        }
+
+        auto result = connection->query(
+            "SELECT id, subject, body_path, send_time FROM mails WHERE id = ?",
+            {std::to_string(mail_id)});
+
+        if (!result || result->get_row_count() == 0) {
+            return false;
+        }
+
+        info.mail_id = std::stoull(result->get_value(0, "id"));
+        info.subject = result->get_value(0, "subject");
+        info.body_path = result->get_value(0, "body_path");
+        info.send_time = static_cast<time_t>(std::stoll(result->get_value(0, "send_time")));
+        return true;
+    }
+
+    // 获取发件人
+    std::string get_mail_sender(uint64_t mail_id) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return "";
+        }
+        auto result = connection->query(
+            "SELECT sender FROM mail_recipients WHERE mail_id = ? LIMIT 1",
+            {std::to_string(mail_id)});
+        if (result && result->get_row_count() > 0) {
+            return result->get_value(0, "sender");
+        }
+        return "";
+    }
+
+    // 获取收件人列表
+    std::vector<std::string> get_mail_recipients(uint64_t mail_id) {
+        std::vector<std::string> recipients;
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return recipients;
+        }
+        auto result = connection->query(
+            "SELECT recipient FROM mail_recipients WHERE mail_id = ?",
+            {std::to_string(mail_id)});
+        if (result) {
+            for (size_t i = 0; i < result->get_row_count(); ++i) {
+                recipients.push_back(result->get_value(i, "recipient"));
+            }
+        }
+        return recipients;
+    }
+
+    // 获取用户邮箱地址
+    std::string get_user_email(uint64_t user_id) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return "";
+        }
+        auto result = connection->query(
+            "SELECT mail_address FROM users WHERE id = ?",
+            {std::to_string(user_id)});
+        if (result && result->get_row_count() > 0) {
+            return result->get_value(0, "mail_address");
+        }
+        return "";
+    }
+
+    // 更新邮件已读/未读状态
+    bool update_mail_seen(uint64_t mail_id, const std::string& recipient, bool seen) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return false;
+        }
+        int new_status = seen ? 0 : 1; // 0=read, 1=unread
+        return connection->execute(
+            "UPDATE mail_recipients SET status = ? WHERE mail_id = ? AND recipient = ?",
+            {std::to_string(new_status), std::to_string(mail_id), recipient});
+    }
+
+    // 更新已删除标记
+    bool update_mail_deleted(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool deleted) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return false;
+        }
+        return connection->execute(
+            "UPDATE mail_mailbox SET is_deleted = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
+            {deleted ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+    }
+
+    // 更新标星标记
+    bool update_mail_flagged(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool flagged) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return false;
+        }
+        return connection->execute(
+            "UPDATE mail_mailbox SET is_starred = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
+            {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+    }
+
+    // ========== IMAP-UTF-7 解码（RFC 3501 §5.1.3）==========
+    // 将客户端发来的 IMAP-UTF-7 邮箱名转为 UTF-8，用于 DB 查询
+    static std::string decode_imap_utf7(const std::string& imap7) {
+        // modified Base64 反向表
+        static const int rev[128] = {
+            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+            -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,
+            52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+            -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+            15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,63,
+            -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+            41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        };
+
+        std::string result;
+        size_t i = 0;
+        while (i < imap7.size()) {
+            char c = imap7[i];
+            if (c == '&') {
+                if (i + 1 < imap7.size() && imap7[i + 1] == '-') {
+                    result += '&';
+                    i += 2;
+                } else {
+                    size_t end = imap7.find('-', i + 1);
+                    if (end == std::string::npos) { result += c; i++; continue; }
+                    std::string b64 = imap7.substr(i + 1, end - i - 1);
+                    i = end + 1;
+
+                    std::vector<uint8_t> bytes;
+                    uint32_t acc = 0;
+                    int bits = 0;
+                    for (char bc : b64) {
+                        if (bc < 0 || bc >= 128) continue;
+                        int v = rev[static_cast<int>(bc)];
+                        if (v < 0) continue;
+                        acc = (acc << 6) | static_cast<uint32_t>(v);
+                        bits += 6;
+                        if (bits >= 8) {
+                            bits -= 8;
+                            bytes.push_back(static_cast<uint8_t>((acc >> bits) & 0xFF));
+                        }
+                    }
+
+                    for (size_t j = 0; j + 1 < bytes.size(); j += 2) {
+                        uint16_t unit = (static_cast<uint16_t>(bytes[j]) << 8) | bytes[j + 1];
+                        if (unit >= 0xD800 && unit <= 0xDBFF && j + 3 < bytes.size()) {
+                            uint16_t low = (static_cast<uint16_t>(bytes[j + 2]) << 8) | bytes[j + 3];
+                            uint32_t cp = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+                            result += static_cast<char>(0xF0 | ((cp >> 18) & 0x07));
+                            result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                            result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                            result += static_cast<char>(0x80 | (cp & 0x3F));
+                            j += 2;
+                        } else if (unit >= 0xD800 && unit <= 0xDFFF) {
+                            continue;
+                        } else if (unit < 0x80) {
+                            result += static_cast<char>(unit);
+                        } else if (unit < 0x800) {
+                            result += static_cast<char>(0xC0 | ((unit >> 6) & 0x1F));
+                            result += static_cast<char>(0x80 | (unit & 0x3F));
+                        } else {
+                            result += static_cast<char>(0xE0 | ((unit >> 12) & 0x0F));
+                            result += static_cast<char>(0x80 | ((unit >> 6) & 0x3F));
+                            result += static_cast<char>(0x80 | (unit & 0x3F));
+                        }
+                    }
+                }
+            } else {
+                result += c;
+                i++;
+            }
+        }
+        return result;
+    }
+
+    // 从存储读取邮件内容
+    // 邮件内容存储在本地文件系统（body_path 是绝对/相对路径）
+    std::string read_mail_body(const std::string& body_path) {
+        if (body_path.empty()) {
+            return "";
+        }
+
+        std::ifstream in(body_path, std::ios::binary);
+        if (!in.is_open()) {
+            LOG_FILE_IO_ERROR("Failed to open mail body: {}", body_path);
+            return "";
+        }
+        std::string content((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+        return content;
+    }
+
+    // 获取邮箱的总邮件数
+    size_t get_mailbox_count(uint64_t mailbox_id, uint64_t user_id) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return 0;
+        }
+        auto result = connection->query(
+            "SELECT COUNT(*) as cnt FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?",
+            {std::to_string(mailbox_id), std::to_string(user_id)});
+        if (result && result->get_row_count() > 0) {
+            return static_cast<size_t>(std::stoull(result->get_value(0, "cnt")));
+        }
+        return 0;
+    }
+
+    // 获取邮箱的未读邮件数
+    size_t get_mailbox_unseen_count(uint64_t mailbox_id, uint64_t user_id) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return 0;
+        }
+        // 通过 mail_recipients.status=1 (unread) 统计
+        auto result = connection->query(
+            "SELECT COUNT(*) as cnt FROM mail_mailbox mm "
+            "JOIN mail_recipients mr ON mm.mail_id = mr.mail_id "
+            "JOIN users u ON u.id = ? AND mr.recipient = u.mail_address "
+            "WHERE mm.mailbox_id = ? AND mm.user_id = ? AND mr.status = 1",
+            {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)});
+        if (result && result->get_row_count() > 0) {
+            return static_cast<size_t>(std::stoull(result->get_value(0, "cnt")));
+        }
+        return 0;
+    }
+
+    // 获取邮箱的最近邮件 UID（这里直接用 mail_id 充当 UID）
+    uint64_t get_mailbox_uidnext(uint64_t mailbox_id, uint64_t user_id) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return 1;
+        }
+        auto result = connection->query(
+            "SELECT COALESCE(MAX(mm.mail_id), 0) + 1 as uidnext "
+            "FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?",
+            {std::to_string(mailbox_id), std::to_string(user_id)});
+        if (result && result->get_row_count() > 0) {
+            return std::stoull(result->get_value(0, "uidnext"));
+        }
+        return 1;
+    }
+
+    // EXPUNGE：真正从邮箱删除打了 \Deleted 标记的邮件
+    void expunge_mailbox(uint64_t mailbox_id, uint64_t user_id) {
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return;
+        }
+        // 删除 mail_mailbox 中 is_deleted=1 且在此邮箱的记录
+        connection->execute(
+            "DELETE FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1",
+            {std::to_string(mailbox_id), std::to_string(user_id)});
+    }
+
+    // 获取 EXPUNGE 序列（返回被删邮件的 mail_id 列表）
+    std::vector<uint64_t> get_expunged_ids(uint64_t mailbox_id, uint64_t user_id) {
+        std::vector<uint64_t> ids;
+        auto connection = m_dbPool->get_connection();
+        if (!connection || !connection->is_connected()) {
+            return ids;
+        }
+        auto result = connection->query(
+            "SELECT mail_id FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1",
+            {std::to_string(mailbox_id), std::to_string(user_id)});
+        if (result) {
+            for (size_t i = 0; i < result->get_row_count(); ++i) {
+                ids.push_back(std::stoull(result->get_value(i, "mail_id")));
+            }
+        }
+        return ids;
+    }
+};
+
+} // namespace mail_system
+
+#endif // IMAPS_FSM_H

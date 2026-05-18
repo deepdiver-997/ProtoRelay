@@ -26,7 +26,9 @@ enum class LogModule {
     OUTBOUND,      // 出站投递客户端/仓储日志
     THREAD_POOL,   // 线程池日志
     FILE_IO,       // 文件 I/O 日志
-    AUTH           // 认证日志
+    AUTH,          // 认证日志
+    IMAP,          // IMAP 协议日志
+    IMAP_DETAIL    // IMAP 详细状态机日志
 };
 
 // 日志级别转换
@@ -107,6 +109,10 @@ public:
                 std::make_shared<spdlog::logger>("FILE_IO", sinks.begin(), sinks.end());
             m_loggers[static_cast<size_t>(LogModule::AUTH)] =
                 std::make_shared<spdlog::logger>("AUTH", sinks.begin(), sinks.end());
+            m_loggers[static_cast<size_t>(LogModule::IMAP)] =
+                std::make_shared<spdlog::logger>("IMAP", sinks.begin(), sinks.end());
+            m_loggers[static_cast<size_t>(LogModule::IMAP_DETAIL)] =
+                std::make_shared<spdlog::logger>("IMAP_DETAIL", sinks.begin(), sinks.end());
 
             // 设置默认 logger
             spdlog::set_default_logger(m_loggers[static_cast<size_t>(LogModule::SERVER)]);
@@ -181,7 +187,7 @@ private:
     Logger& operator=(const Logger&) = delete;
 
     bool m_initialized = false;
-    std::array<std::shared_ptr<spdlog::logger>, 12> m_loggers;
+    std::array<std::shared_ptr<spdlog::logger>, 14> m_loggers;
 };
 
 // 便捷函数：获取 logger
@@ -238,6 +244,12 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
 #endif
 #ifndef ENABLE_OUTBOUND_DEBUG_LOG
 #define ENABLE_OUTBOUND_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_IMAP_DEBUG_LOG
+#define ENABLE_IMAP_DEBUG_LOG 0
+#endif
+#ifndef ENABLE_IMAP_DETAIL_DEBUG_LOG
+#define ENABLE_IMAP_DETAIL_DEBUG_LOG 0
 #endif
 
 // ==================== 模块化日志宏定义 ====================
@@ -465,5 +477,41 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
     mail_system::log(mail_system::LogModule::AUTH)->error(__VA_ARGS__)
 #define LOG_AUTH_CRITICAL(...) \
     mail_system::log(mail_system::LogModule::AUTH)->critical(__VA_ARGS__)
+
+// IMAP 模块日志
+#define LOG_IMAP_TRACE(...) \
+    if constexpr (ENABLE_IMAP_DEBUG_LOG) { \
+        mail_system::log(mail_system::LogModule::IMAP)->trace(__VA_ARGS__); \
+    }
+#define LOG_IMAP_DEBUG(...) \
+    if constexpr (ENABLE_IMAP_DEBUG_LOG) { \
+        mail_system::log(mail_system::LogModule::IMAP)->debug(__VA_ARGS__); \
+    }
+#define LOG_IMAP_INFO(...) \
+    mail_system::log(mail_system::LogModule::IMAP)->info(__VA_ARGS__)
+#define LOG_IMAP_WARN(...) \
+    mail_system::log(mail_system::LogModule::IMAP)->warn(__VA_ARGS__)
+#define LOG_IMAP_ERROR(...) \
+    mail_system::log(mail_system::LogModule::IMAP)->error(__VA_ARGS__)
+#define LOG_IMAP_CRITICAL(...) \
+    mail_system::log(mail_system::LogModule::IMAP)->critical(__VA_ARGS__)
+
+// IMAP_DETAIL 模块日志
+#define LOG_IMAP_DETAIL_TRACE(...) \
+    if constexpr (ENABLE_IMAP_DETAIL_DEBUG_LOG) { \
+        mail_system::log(mail_system::LogModule::IMAP_DETAIL)->trace(__VA_ARGS__); \
+    }
+#define LOG_IMAP_DETAIL_DEBUG(...) \
+    if constexpr (ENABLE_IMAP_DETAIL_DEBUG_LOG) { \
+        mail_system::log(mail_system::LogModule::IMAP_DETAIL)->debug(__VA_ARGS__); \
+    }
+#define LOG_IMAP_DETAIL_INFO(...) \
+    mail_system::log(mail_system::LogModule::IMAP_DETAIL)->info(__VA_ARGS__)
+#define LOG_IMAP_DETAIL_WARN(...) \
+    mail_system::log(mail_system::LogModule::IMAP_DETAIL)->warn(__VA_ARGS__)
+#define LOG_IMAP_DETAIL_ERROR(...) \
+    mail_system::log(mail_system::LogModule::IMAP_DETAIL)->error(__VA_ARGS__)
+#define LOG_IMAP_DETAIL_CRITICAL(...) \
+    mail_system::log(mail_system::LogModule::IMAP_DETAIL)->critical(__VA_ARGS__)
 
 #endif // MAIL_SYSTEM_LOGGER_H

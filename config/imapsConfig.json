@@ -1,21 +1,48 @@
 {
+  "comment": "IMAP4rev1 Server Configuration (RFC 3501)",
+
   "address": "0.0.0.0",
-  "port": 993,
-  "use_ssl": true,
+
+  "enable_ssl": true,
+  "ssl_port": 993,
+
+  "enable_tcp": true,
+  "tcp_port": 143,
+
   "certFile": "crt/server.crt",
   "keyFile": "crt/server.key",
   "dhFile": "",
-  "maxMessageSize": 1048576,
+
+  "maxMessageSize": 4194304,
   "maxConnections": 1000,
+
   "io_thread_count": 4,
   "worker_thread_count": 4,
+  "ssl_in_worker": false,
+
   "use_database": true,
   "db_config_file": "db_config.json",
-  "connection_timeout": 300,
-  "read_timeout": 60,
-  "write_timeout": 60,
-  "require_auth": false,
+
+  "connection_timeout": 1800,
+  "read_timeout": 600,
+  "write_timeout": 600,
+
+  "require_auth": true,
   "max_auth_attempts": 3,
+
+  "system_name": "mail-system-imap",
+  "system_domain": "mail.hgmail.xin",
+
   "log_level": "info",
-  "log_file": "server.log"
+  "log_to_console": true,
+  "log_to_file": true,
+  "log_file": "../logs/imap_server.log",
+
+  "storage_provider": "local",
+  "mail_storage_path": "../mail/",
+  "attachment_storage_path": "../attachments/",
+
+  "metrics_enabled": false,
+  "metrics_port": 9091,
+  "metrics_bind_address": "127.0.0.1"
 }

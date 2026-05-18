@@ -103,19 +103,12 @@ try {
             LOG_SERVER_INFO("WorkerThreadPools started");
         }
 
+        // ServerBase 只创建数据库连接池（通用基础设施）。
+        // PersistentQueue 和 OutboundClient 是 SMTP 私有的，
+        // 由 SmtpsServer 子类在其构造函数中创建。
         if (config.use_database && m_dbPool == nullptr) {
             if (config.db_pool_config.achieve == "mysql" ||
                 config.db_pool_config.achieve == "mysql_distributed") {
-                // initialize DB pool asynchronously with timeout, to avoid blocking server startup
-                // will be improved in future versions and support sync initialization with better error handling
-                // auto fut = std::async(std::launch::async, [&]() {
-                //     return MySQLPoolFactory::get_instance().create_pool(
-                //         config.db_pool_config,
-                //         std::make_shared<MySQLService>());
-                // });
-                // m_dbPool = fut.wait_for(std::chrono::seconds(10)) == std::future_status::ready ? fut.get() : nullptr;
-                
-                // 临时改为同步初始化，以便调试
                 try {
                     if (config.db_pool_config.achieve == "mysql_distributed") {
                         m_dbPool = DistributedMySQLPoolFactory::get_instance().create_pool(
@@ -135,51 +128,11 @@ try {
                     LOG_SERVER_INFO("Database pool initialized successfully");
                 } else {
                     LOG_SERVER_ERROR("Failed to initialize database pool");
-                    return;
+                    // 不 return —— IMAP 可以在无 DB 时启动（只是无法认证）
                 }
-                m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(
-                    m_dbPool,
-                    m_workerThreadPool,
-                    m_storageProvider);
-                m_persistentQueue->set_local_domain(m_domain);
-                persist_storage::PersistentQueuePressureConfig pressure_config;
-                pressure_config.max_inflight_mails = cfg->persist_max_inflight_mails;
-                pressure_config.min_available_memory_mb = cfg->persist_min_available_memory_mb;
-                pressure_config.min_db_available_connections = cfg->persist_min_db_available_connections;
-                m_persistentQueue->set_pressure_config(pressure_config);
-                m_outboundInterruptFlag = std::make_shared<std::atomic<bool>>(true);
-                outbound::OutboundIdentityConfig outbound_identity;
-                outbound_identity.helo_domain = cfg->outbound_helo_domain;
-                outbound_identity.mail_from_domain = cfg->outbound_mail_from_domain;
-                outbound_identity.rewrite_header_from = cfg->outbound_rewrite_header_from;
-                outbound_identity.dkim_enabled = cfg->outbound_dkim_enabled;
-                outbound_identity.dkim_selector = cfg->outbound_dkim_selector;
-                outbound_identity.dkim_domain = cfg->outbound_dkim_domain;
-                outbound_identity.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
-
-                outbound::OutboundPollingConfig outbound_polling;
-                outbound_polling.busy_sleep_ms = static_cast<int>(cfg->outbound_poll_busy_sleep_ms);
-                outbound_polling.backoff_base_ms = static_cast<int>(cfg->outbound_poll_backoff_base_ms);
-                outbound_polling.backoff_max_ms = static_cast<int>(cfg->outbound_poll_backoff_max_ms);
-                outbound_polling.backoff_shift_cap = static_cast<std::size_t>(cfg->outbound_poll_backoff_shift_cap);
-
-                m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
-                    m_dbPool,
-                    m_ioThreadPool,
-                    m_workerThreadPool,
-                    std::make_shared<outbound::CaresDnsResolver>(),
-                    m_outboundInterruptFlag,
-                    std::move(outbound_identity),
-                    outbound_polling,
-                    m_domain,
-                    cfg->outbound_ports,
-                    static_cast<int>(cfg->outbound_max_attempts)
-                );
-                m_persistentQueue->set_outbound_client(m_outboundClient);
-                m_outboundClient->start();
             } else {
-                LOG_SERVER_ERROR("Unsupported database achieve: {}", config.db_pool_config.achieve);
-                return;
+                LOG_SERVER_WARN("No database achieve configured; DB-dependent features disabled");
+                // 不 return —— 有些部署可能不需要数据库
             }
         }
 

@@ -2,11 +2,22 @@
 
 ## 1. Overview
 
-ProtoRelay is a C++20 SMTP/SMTPS server focused on reliable mail ingest, local persistence, and asynchronous outbound delivery.
+ProtoRelay is a C++20 multi-protocol mail server focused on reliable mail ingest, local persistence,
+asynchronous outbound delivery, and remote mailbox access.
+
+**Supported protocols:**
+- **SMTP/SMTPS** (RFC 5321) — inbound mail receipt + outbound delivery
+- **IMAP4rev1** (RFC 3501) — remote mailbox access (reading, searching, managing folders)
 
 Current implementation status:
 
-- Inbound: SMTP protocol parsing, state machine, MIME/attachment handling.
+- Inbound (SMTP): protocol parsing, state machine, MIME/attachment handling.
+- Inbound (IMAP): protocol state machine, folder listing, mail retrieval, flag management.
+- Persistence: local filesystem, distributed filesystem roots, optional WebHDFS provider.
+- Outbound (SMTP): queue-driven delivery worker with retry/backoff and lease-style claiming.
+- Operations: service-manager-first deployment (systemd/launchd), configurable log sinks.
+
+This document reflects the current state of the repository and replaces older V7-era descriptions.
 - Persistence: local filesystem, distributed filesystem roots, optional WebHDFS provider.
 - Outbound: queue-driven delivery worker with retry/backoff and lease-style claiming.
 - Operations: service-manager-first deployment (systemd/launchd), configurable log sinks.
@@ -31,7 +42,8 @@ This document reflects the current state of the repository and replaces older V7
                                 |
 +-------------------------------v------------------------------+
 | Server Core                                                   |
-| server_base, smtps server, session management, SMTP FSM      |
+| server_base, smtps server, imaps server, session management, |
+| SMTP FSM, IMAP FSM                                           |
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
