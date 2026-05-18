@@ -8,21 +8,24 @@
 
 namespace mail_system {
 
-// 最小化 HTTP 服务器，仅响应 GET /metrics 和 /health
+// 最小化 HTTP 服务器，仅响应 GET /metrics、/health 和 POST /reload
 // 只用 Boost.Asio，不引入 beast 等额外依赖
 // 复用外部 io_context，不创建额外线程
 class MetricsServer {
 public:
     using MetricsProvider = std::function<std::string()>;
+    using ReloadHandler = std::function<std::string()>;  // 返回 "200 OK" 或 "500 ..." body
 
     MetricsServer(boost::asio::io_context& io_ctx,
                   uint16_t port, const std::string& bind_address,
-                  MetricsProvider provider)
+                  MetricsProvider provider,
+                  ReloadHandler reload_handler = nullptr)
         : io_ctx_(io_ctx)
         , acceptor_(io_ctx_)
         , port_(port)
         , bind_address_(bind_address)
         , provider_(std::move(provider))
+        , reload_handler_(std::move(reload_handler))
         , running_(false) {}
 
     ~MetricsServer() { stop(); }
@@ -79,10 +82,12 @@ private:
                 std::istream is(buf.get());
                 std::getline(is, request); // 只读第一行 "GET /metrics HTTP/1.1"
 
+                std::string method;
                 std::string path;
                 size_t start = request.find(' ');
                 size_t end = request.find(' ', start + 1);
                 if (start != std::string::npos && end != std::string::npos) {
+                    method = request.substr(0, start);
                     path = request.substr(start + 1, end - start - 1);
                 }
 
@@ -90,7 +95,17 @@ private:
                 std::string content_type;
                 std::string body;
 
-                if (path == "/metrics" || path == "/") {
+                if (method == "POST" && path == "/reload" && reload_handler_) {
+                    std::string result = reload_handler_();
+                    if (result.empty() || result == "OK") {
+                        status = "200 OK";
+                        body = "OK";
+                    } else {
+                        status = "500 Internal Server Error";
+                        body = result;
+                    }
+                    content_type = "text/plain";
+                } else if (path == "/metrics" || path == "/") {
                     status = "200 OK";
                     content_type = "text/plain; version=0.0.4";
                     body = provider_ ? provider_() : "";
@@ -135,6 +150,7 @@ private:
     uint16_t port_;
     std::string bind_address_;
     MetricsProvider provider_;
+    ReloadHandler reload_handler_;
     std::atomic<bool> running_;
 };
 

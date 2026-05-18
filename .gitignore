@@ -19,6 +19,7 @@ compile_commands.json
 
 # 可执行文件
 test/smtpsServer
+test/register_user
 test/*Server
 smtpsServer
 
@@ -26,6 +27,7 @@ smtpsServer
 logs/
 *.log
 *.log.*
+*.pcapng
 
 # ==================== 数据和运行时文件 ====================
 # 邮件存储

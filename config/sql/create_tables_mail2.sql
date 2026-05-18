@@ -32,13 +32,15 @@ CREATE TABLE IF NOT EXISTS mail_recipients (
     mail_id BIGINT NOT NULL COMMENT '邮件ID',
     sender VARCHAR(255) NOT NULL COMMENT '发件人邮箱地址',
     recipient VARCHAR(255) NOT NULL COMMENT '收件人邮箱地址',
+    source_message_id VARCHAR(255) NULL COMMENT '上游 Message-ID，用于入站去重',
     status INT NOT NULL DEFAULT 0 COMMENT '邮件状态：0已读，1未读，2未送达，3草稿，4垃圾邮件，5已删除',
     send_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     FOREIGN KEY (mail_id) REFERENCES mails(id) ON DELETE CASCADE,
     UNIQUE KEY uk_mail_sender_recipient (mail_id, sender, recipient) COMMENT '同一份邮件同一对收发件人只记录一次',
     INDEX idx_mail_id (mail_id),
     INDEX idx_sender (sender),
-    INDEX idx_recipient (recipient)
+    INDEX idx_recipient (recipient),
+    INDEX idx_sender_recipient_msgid (sender, recipient, source_message_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件收发件人关系表';
 
 -- 创建出站投递队列表
@@ -112,6 +114,7 @@ CREATE TABLE IF NOT EXISTS mail_mailbox (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件-邮箱关联表';
 
 -- 创建系统默认邮箱的存储过程
+DROP PROCEDURE IF EXISTS create_default_mailboxes;
 DELIMITER //
 CREATE PROCEDURE create_default_mailboxes(IN p_user_id BIGINT)
 BEGIN
@@ -138,6 +141,7 @@ END //
 DELIMITER ;
 
 -- 创建用户注册后自动创建默认邮箱的触发器
+DROP TRIGGER IF EXISTS after_user_insert;
 DELIMITER //
 CREATE TRIGGER after_user_insert
 AFTER INSERT ON users

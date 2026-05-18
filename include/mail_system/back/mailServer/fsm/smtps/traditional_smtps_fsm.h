@@ -74,6 +74,7 @@ private:
     void handle_greeting_ehlo(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_wait_auth_starttls(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_wait_auth_auth(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_wait_auth_auth_login(std::unique_ptr<SessionBase<ConnectionType>> session);
     void handle_wait_auth_username(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_wait_auth_password(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_wait_auth_mail_from(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);

@@ -17,6 +17,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "mail_system/back/common/bcrypt.h"
 #include <fstream>
 
 namespace mail_system {
@@ -55,6 +56,7 @@ enum class SmtpsEvent {
 // SMTPS 上下文
 struct SmtpsContext {
     bool is_authenticated = false;               // AUTH 是否通过，决定后续命令是否允许
+    bool plain_auth_expected = false;            // AUTH PLAIN 多步流程：等待客户端发送 base64 凭证
     std::string client_username;                 // AUTH 登录名；MAIL FROM 缺省时作为发件人
     std::string sender_address;                  // MAIL FROM 解析出的地址
     std::vector<std::string> recipient_addresses;// RCPT TO 收件人列表
@@ -225,6 +227,8 @@ public:
     // 数据库操作
 
     bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address, const std::string& password) {
+        LOG_AUTH_INFO("AUTH attempt: mail_address=[{}] password_len={}", mail_address, password.length());
+
         if (!session) {
             LOG_AUTH_ERROR("Session is null in auth_user");
             return false;
@@ -235,17 +239,46 @@ public:
             return false;
         }
 
-        // 使用参数化查询防止SQL注入并提高性能
-        // 同时检查账户状态（status=1 表示正常）
-        std::string sql = "SELECT COUNT(*) as cnt FROM users "
-                         "WHERE mail_address = ? AND password = ? AND status = 1";
-        auto result = connection->query(sql, {mail_address, password});
-        if (!result || result->get_row_count() == 0) {
+        // 查询用户密码哈希和状态
+        std::string sql = "SELECT password, status FROM users "
+                         "WHERE mail_address = ?";
+        LOG_AUTH_DEBUG("SQL: {}  param=[{}]", sql, mail_address);
+        auto result = connection->query(sql, {mail_address});
+        if (!result) {
+            LOG_AUTH_WARN("Query returned null result for: {}", mail_address);
             return false;
         }
-        bool ok = std::stoul(result->get_value(0, "cnt")) > 0;
+        LOG_AUTH_DEBUG("Query success: row_count={} col_count={}", result->get_row_count(), result->get_column_count());
+        if (result->get_row_count() == 0) {
+            LOG_AUTH_WARN("User not found: {}", mail_address);
+            return false;
+        }
+
+        int status = std::stoi(result->get_value(0, "status"));
+        LOG_AUTH_DEBUG("User status: {}", status);
+        if (status != 1) {
+            LOG_AUTH_WARN("User account disabled: {}", mail_address);
+            return false;
+        }
+
+        std::string stored = result->get_value(0, "password");
+        LOG_AUTH_DEBUG("stored hash prefix: {}...", stored.substr(0, 10));
+        bool ok = false;
+
+        // bcrypt 哈希：以 "$2" 开头
+        if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
+            ok = bcrypt_verify(password, stored);
+            LOG_AUTH_DEBUG("bcrypt_verify result: {}", ok ? "MATCH" : "NO_MATCH");
+        } else {
+            // 兼容旧明文密码（应尽快迁移到 bcrypt）
+            ok = (stored == password);
+            if (ok) {
+                LOG_AUTH_WARN("User {} still using plaintext password - "
+                             "should re-register with bcrypt", mail_address);
+            }
+        }
+
         if (ok) {
-            // 更新最后登录时间
             connection->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
                                {mail_address});
         }

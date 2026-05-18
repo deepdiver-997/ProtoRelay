@@ -11,6 +11,10 @@ namespace mail_system {
 class MySQLResult : public IDBResult {
 public:
     explicit MySQLResult(MYSQL_RES* result);
+    // 预填充数据的构造：用于 prepared statement 结果
+    MySQLResult(std::vector<std::string> colNames,
+                std::vector<std::vector<std::string>> rows,
+                size_t rowCount, size_t colCount);
     ~MySQLResult() override;
 
     // IDBResult接口实现

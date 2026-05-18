@@ -341,8 +341,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
 
     // 根据 AUTH 策略决定是否通告 AUTH 能力
     {
-        const auto& config = session->get_server()->m_config;
-        if (config.inbound_auth_policy != InboundAuthPolicy::OFF) {
+        auto config = std::atomic_load(&session->get_server()->m_config);
+        if (config->inbound_auth_policy != InboundAuthPolicy::OFF) {
             response += "250-AUTH LOGIN PLAIN\r\n";
         }
     }
@@ -405,6 +405,204 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
     std::unique_ptr<SessionBase<ConnectionType>> session,
     const std::string& args
 ) {
+    auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+
+    // AUTH PLAIN 多步流程的第二阶段：收到的就是 base64(\0username\0password)
+    if (ctx->plain_auth_expected) {
+        ctx->plain_auth_expected = false;
+        LOG_AUTH_DEBUG("[AUTH PLAIN step2] raw base64 args: {}", args);
+        std::string decoded = mail_system::outbound::base64_decode(args);
+        auto null1 = decoded.find('\0');
+        if (null1 != std::string::npos) {
+            auto null2 = decoded.find('\0', null1 + 1);
+            std::string username = decoded.substr(null1 + 1, null2 - null1 - 1);
+            std::string password = (null2 != std::string::npos)
+                ? decoded.substr(null2 + 1) : "";
+
+            ctx->client_username = username;
+
+            // 兼容客户端只传本地部分（不含 @domain）的场景
+            if (username.find('@') == std::string::npos) {
+                auto config = std::atomic_load(&session->get_server()->m_config);
+                username += "@" + config->system_domain;
+                ctx->client_username = username;
+            }
+
+            if (this->auth_user(session.get(), username, password)) {
+                ctx->is_authenticated = true;
+                SessionBase<ConnectionType>::do_async_write(
+                    std::move(session),
+                    "235 Authentication successful\r\n",
+                    [](std::unique_ptr<SessionBase<ConnectionType>> s,
+                       const boost::system::error_code& ec) mutable {
+                        if (ec) {
+                            LOG_SMTP_DETAIL_ERROR("Error sending auth success: {}", ec.message());
+                            return;
+                        }
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                        SessionBase<ConnectionType>::do_async_read(std::move(s), [](
+                            std::unique_ptr<SessionBase<ConnectionType>> sss,
+                            const boost::system::error_code& error,
+                            std::size_t) mutable {
+                            if (error) {
+                                LOG_SMTP_DETAIL_ERROR("Error reading after auth: {}", error.message());
+                                return;
+                            }
+                            auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                            fsm->auto_process_event(std::move(sss));
+                        });
+                    });
+                return;
+            }
+        }
+        // PLAIN 多步认证失败
+        SessionBase<ConnectionType>::do_async_write(
+            std::move(session),
+            "535 Authentication failed\r\n",
+            [](std::unique_ptr<SessionBase<ConnectionType>> s,
+               const boost::system::error_code& ec) mutable {
+                if (ec) {
+                    LOG_SMTP_DETAIL_ERROR("Error sending auth failed: {}", ec.message());
+                    return;
+                }
+                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                SessionBase<ConnectionType>::do_async_read(std::move(s), [](
+                    std::unique_ptr<SessionBase<ConnectionType>> sss,
+                    const boost::system::error_code& error,
+                    std::size_t) mutable {
+                    if (error) {
+                        LOG_SMTP_DETAIL_ERROR("Error reading after auth failed: {}", error.message());
+                        return;
+                    }
+                    auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                    fsm->auto_process_event(std::move(sss));
+                });
+            });
+        return;
+    }
+
+    // 处理 AUTH PLAIN（一步发送凭证：base64(\0username\0password)）
+    std::string upper_args = args;
+    std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
+    if (upper_args.find("PLAIN") == 0) {
+        // 提取 base64 token（跳过 "PLAIN " 前缀）
+        std::string token;
+        if (args.length() > 6) {
+            token = args.substr(6);  // "PLAIN " = 6 chars
+        }
+        if (token.empty()) {
+            // AUTH PLAIN 无初始响应 → 多步流程：发送空 challenge，等待客户端发送凭证
+            ctx->plain_auth_expected = true;
+            SessionBase<ConnectionType>::do_async_write(
+                std::move(session),
+                "334 \r\n",
+                [](std::unique_ptr<SessionBase<ConnectionType>> s,
+                   const boost::system::error_code& ec) mutable {
+                    if (ec) {
+                        LOG_SMTP_DETAIL_ERROR("Error sending PLAIN challenge: {}", ec.message());
+                        return;
+                    }
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                    SessionBase<ConnectionType>::do_async_read(std::move(s), [](
+                        std::unique_ptr<SessionBase<ConnectionType>> sss,
+                        const boost::system::error_code& error,
+                        std::size_t) mutable {
+                        if (error) {
+                            LOG_SMTP_DETAIL_ERROR("Error reading PLAIN credentials: {}", error.message());
+                            return;
+                        }
+                        auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                        fsm->auto_process_event(std::move(sss));
+                    });
+                });
+            return;
+        }
+        LOG_AUTH_DEBUG("[AUTH PLAIN 1-step] token: {}", token);
+        std::string decoded = mail_system::outbound::base64_decode(token);
+
+        // PLAIN 格式: \0authcid\0password  (RFC 4616)
+        auto null1 = decoded.find('\0');
+        if (null1 != std::string::npos) {
+            auto null2 = decoded.find('\0', null1 + 1);
+            std::string username = decoded.substr(null1 + 1, null2 - null1 - 1);
+            std::string password = (null2 != std::string::npos)
+                ? decoded.substr(null2 + 1) : "";
+            LOG_AUTH_DEBUG("[AUTH PLAIN 1-step] username=[{}] password_len={}", username, password.length());
+
+            ctx->client_username = username;
+
+            // 兼容客户端只传本地部分（不含 @domain）的场景
+            if (username.find('@') == std::string::npos) {
+                auto config = std::atomic_load(&session->get_server()->m_config);
+                username += "@" + config->system_domain;
+                ctx->client_username = username;
+                LOG_AUTH_DEBUG("[AUTH PLAIN 1-step] auto-domain → {}", username);
+            }
+
+            if (this->auth_user(session.get(), username, password)) {
+                ctx->is_authenticated = true;
+                SessionBase<ConnectionType>::do_async_write(
+                    std::move(session),
+                    "235 Authentication successful\r\n",
+                    [](std::unique_ptr<SessionBase<ConnectionType>> s,
+                       const boost::system::error_code& ec) mutable {
+                        if (ec) {
+                            LOG_SMTP_DETAIL_ERROR("Error sending auth success: {}", ec.message());
+                            return;
+                        }
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                        SessionBase<ConnectionType>::do_async_read(std::move(s), [](
+                            std::unique_ptr<SessionBase<ConnectionType>> sss,
+                            const boost::system::error_code& error,
+                            std::size_t) mutable {
+                            if (error) {
+                                LOG_SMTP_DETAIL_ERROR("Error reading after auth: {}", error.message());
+                                return;
+                            }
+                            auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                            fsm->auto_process_event(std::move(sss));
+                        });
+                    });
+                return;
+            }
+            // AUTH PLAIN 失败
+            SessionBase<ConnectionType>::do_async_write(
+                std::move(session),
+                "535 Authentication failed\r\n",
+                [](std::unique_ptr<SessionBase<ConnectionType>> s,
+                   const boost::system::error_code& ec) mutable {
+                    if (ec) {
+                        LOG_SMTP_DETAIL_ERROR("Error sending auth failed: {}", ec.message());
+                        return;
+                    }
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                    SessionBase<ConnectionType>::do_async_read(std::move(s), [](
+                        std::unique_ptr<SessionBase<ConnectionType>> sss,
+                        const boost::system::error_code& error,
+                        std::size_t) mutable {
+                        if (error) {
+                            LOG_SMTP_DETAIL_ERROR("Error reading after auth failed: {}", error.message());
+                            return;
+                        }
+                        auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(sss->get_fsm());
+                        fsm->auto_process_event(std::move(sss));
+                    });
+                });
+            return;
+        }
+        // PLAIN token 格式不正确，回退到 LOGIN
+        handle_wait_auth_auth_login(std::move(session));
+        return;
+    }
+
+    // 默认 AUTH LOGIN 流程
+    handle_wait_auth_auth_login(std::move(session));
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth_login(
+    std::unique_ptr<SessionBase<ConnectionType>> session
+) {
     SessionBase<ConnectionType>::do_async_write(
         std::move(session),
         "334 VXNlcm5hbWU6\r\n",
@@ -440,8 +638,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_username(
     const std::string& args
 ) {
     // AUTH LOGIN username 是 base64 编码的
-    static_cast<SmtpsContext*>(session->get_context())->client_username =
-        mail_system::outbound::base64_decode(args);
+    std::string decoded_username = mail_system::outbound::base64_decode(args);
+    LOG_AUTH_DEBUG("[AUTH LOGIN username] raw base64: {}  decoded: {}", args, decoded_username);
+    static_cast<SmtpsContext*>(session->get_context())->client_username = decoded_username;
     SessionBase<ConnectionType>::do_async_write(
         std::move(session),
         "334 UGFzc3dvcmQ6\r\n",
@@ -479,6 +678,17 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
     std::string username = static_cast<SmtpsContext*>(session->get_context())->client_username;
     // AUTH LOGIN password 是 base64 编码的
     std::string password = mail_system::outbound::base64_decode(args);
+    LOG_AUTH_DEBUG("[AUTH LOGIN password] raw base64: {}  decoded_len: {}", args, password.length());
+
+    // 兼容客户端只传本地部分（不含 @domain）的场景，自动补全
+    if (username.find('@') == std::string::npos) {
+        auto config = std::atomic_load(&session->get_server()->m_config);
+        username += "@" + config->system_domain;
+        static_cast<SmtpsContext*>(session->get_context())->client_username = username;
+        LOG_AUTH_DEBUG("[AUTH LOGIN] auto-domain → {}", username);
+    }
+
+    LOG_AUTH_DEBUG("[AUTH LOGIN] attempting auth: username=[{}] password_len={}", username, password.length());
     if (this->auth_user(session.get(), username, password)) {
         static_cast<SmtpsContext*>(session->get_context())->is_authenticated = true;
         SessionBase<ConnectionType>::do_async_write(
@@ -550,10 +760,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     // ===== AUTH 策略检查 =====
     {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
-        const auto& config = session->get_server()->m_config;
+        auto config = std::atomic_load(&session->get_server()->m_config);
 
         // auto 模式：尝试 EHLO 验证（PTR 反向 DNS）
-        if (config.inbound_auth_policy == InboundAuthPolicy::AUTO &&
+        if (config->inbound_auth_policy == InboundAuthPolicy::AUTO &&
             !ctx->is_trusted_server && !ctx->ehlo_domain.empty()) {
             auto outbound = session->get_server()->m_outboundClient;
             if (outbound) {
@@ -579,7 +789,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         }
 
         bool require_auth = false;
-        switch (config.inbound_auth_policy) {
+        switch (config->inbound_auth_policy) {
         case InboundAuthPolicy::ON:
             require_auth = true;
             break;
@@ -635,9 +845,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         ctx->spf_checked = false;
 
         // ===== SPF 提前验证 (MAIL FROM 阶段) =====
-        const auto& config = session->get_server()->m_config;
+        auto config = std::atomic_load(&session->get_server()->m_config);
         std::string spf_reject_reason;
-        if (config.inbound_spf_mode != "off" &&
+        if (config->inbound_spf_mode != "off" &&
             !ctx->sender_address.empty() && ctx->sender_address != "<>") {
             auto outbound = session->get_server()->m_outboundClient;
             if (outbound) {
@@ -655,7 +865,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                     LOG_SMTP_DETAIL_DEBUG("SPF at MAIL FROM: result={}, reason={}",
                                           spf.result, spf.reason);
 
-                    if (config.inbound_spf_mode == "hard" && spf.result == "fail") {
+                    if (config->inbound_spf_mode == "hard" && spf.result == "fail") {
                         spf_reject_reason = spf.reason;
                     }
                 }
@@ -912,10 +1122,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     smtp_session->flush_body_and_wait();
 
     // ===== 入站验证 (DKIM/DMARC，SPF 已在 MAIL FROM 阶段完成) =====
-    const auto& config = session->get_server()->m_config;
-    bool needs_more_verification = (!ctx->spf_checked && config.inbound_spf_mode != "off") ||
-                                    config.inbound_dkim_mode != "off" ||
-                                    config.inbound_dmarc_mode != "off";
+    auto config = std::atomic_load(&session->get_server()->m_config);
+    bool needs_more_verification = (!ctx->spf_checked && config->inbound_spf_mode != "off") ||
+                                    config->inbound_dkim_mode != "off" ||
+                                    config->inbound_dmarc_mode != "off";
 
     if (needs_more_verification && !ctx->verification_run) {
         std::string client_ip = session->get_client_ip();
@@ -942,9 +1152,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         if (outbound) {
             auto resolver = outbound->get_dns_resolver();
             if (resolver) {
-                bool any_hard = (config.inbound_spf_mode == "hard" ||
-                                config.inbound_dkim_mode == "hard" ||
-                                config.inbound_dmarc_mode == "hard");
+                bool any_hard = (config->inbound_spf_mode == "hard" ||
+                                config->inbound_dkim_mode == "hard" ||
+                                config->inbound_dmarc_mode == "hard");
 
                 auto pool = session->get_server()->m_workerThreadPool;
 
@@ -957,7 +1167,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 }
 
                 auto task = [resolver, client_ip, mail_from, helo, headers, raw_body,
-                             cfg = config, spf_done, stored_spf]() -> inbound::VerificationResult {
+                             cfg = *config, spf_done, stored_spf]() -> inbound::VerificationResult {
                     inbound::VerificationResult result;
                     inbound::InboundVerifier verifier(*resolver);
                     verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, cfg, result,
@@ -966,7 +1176,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 };
 
                 auto fut = pool->submit(std::move(task));
-                auto timeout = std::chrono::milliseconds(config.inbound_auth_timeout_ms);
+                auto timeout = std::chrono::milliseconds(config->inbound_auth_timeout_ms);
 
                 if (fut.wait_for(timeout) == std::future_status::ready) {
                     inbound::VerificationResult result = fut.get();
@@ -975,11 +1185,11 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                     // hard 模式：验证失败则拒绝
                     if (any_hard) {
                         std::string reject_reason;
-                        if (config.inbound_spf_mode == "hard" && result.spf_hard_fail()) {
+                        if (config->inbound_spf_mode == "hard" && result.spf_hard_fail()) {
                             reject_reason = "5.7.1 SPF verification failed: " + result.spf.reason;
-                        } else if (config.inbound_dkim_mode == "hard" && result.dkim_hard_fail()) {
+                        } else if (config->inbound_dkim_mode == "hard" && result.dkim_hard_fail()) {
                             reject_reason = "5.7.1 DKIM verification failed: " + result.dkim.reason;
-                        } else if (config.inbound_dmarc_mode == "hard" && result.dmarc_hard_fail()) {
+                        } else if (config->inbound_dmarc_mode == "hard" && result.dmarc_hard_fail()) {
                             reject_reason = "5.7.1 DMARC verification failed: " + result.dmarc.reason;
                         }
 
@@ -1001,7 +1211,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                     // 构建 Authentication-Results 头并注入 header_buffer
                     std::string mf_domain = inbound::InboundVerifier::extract_domain(mail_from);
                     ctx->auth_results_header = inbound::InboundVerifier::build_auth_results_header(
-                        config.system_domain, result, mf_domain);
+                        config->system_domain, result, mf_domain);
 
                     if (!ctx->auth_results_header.empty()) {
                         ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
@@ -1038,7 +1248,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
         std::string mf_domain = inbound::InboundVerifier::extract_domain(ctx->sender_address);
         ctx->auth_results_header = inbound::InboundVerifier::build_auth_results_header(
-            config.system_domain, spf_only, mf_domain);
+            config->system_domain, spf_only, mf_domain);
 
         if (!ctx->auth_results_header.empty()) {
             ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
@@ -1063,7 +1273,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     }
 
     const bool ack_after_enqueue =
-        session->get_server()->m_config.inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
+        std::atomic_load(&session->get_server()->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
     if (ack_after_enqueue) {
         session->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
         smtp_session->reset_mail_state();
@@ -1112,7 +1322,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         }
 
         const auto wait_timeout =
-            std::chrono::milliseconds(s->get_server()->m_config.inbound_persist_wait_timeout_ms);
+            std::chrono::milliseconds(std::atomic_load(&s->get_server()->m_config)->inbound_persist_wait_timeout_ms);
         auto deadline = std::chrono::steady_clock::now() + wait_timeout;
         auto backoff = std::chrono::milliseconds(50);
         while (std::chrono::steady_clock::now() < deadline) {

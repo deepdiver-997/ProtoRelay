@@ -22,7 +22,7 @@ ServerBase::ServerBase(const ServerConfig& config,
       m_dbPool(dbPool),
       ssl_in_worker(config.ssl_in_worker),
             m_domain(config.system_domain.empty() ? std::string("example.com") : config.system_domain),
-            m_config(config),
+            m_config(std::make_shared<ServerConfig>(config)),
       m_ssl_endpoint(boost::asio::ip::make_address(config.address), config.ssl_port),
       m_tcp_endpoint(boost::asio::ip::make_address(config.address), config.tcp_port),
       m_sslContext(boost::asio::ssl::context::sslv23),
@@ -30,6 +30,7 @@ ServerBase::ServerBase(const ServerConfig& config,
       m_enable_tcp(config.enable_tcp),
       has_listener_thread(false),
       m_state(ServerState::Stopped) {
+    auto cfg = std::atomic_load(&m_config);
 try {
         // {
         //     std::fstream mail_storage_dir_check(config.mail_storage_path);
@@ -142,25 +143,25 @@ try {
                     m_storageProvider);
                 m_persistentQueue->set_local_domain(m_domain);
                 persist_storage::PersistentQueuePressureConfig pressure_config;
-                pressure_config.max_inflight_mails = m_config.persist_max_inflight_mails;
-                pressure_config.min_available_memory_mb = m_config.persist_min_available_memory_mb;
-                pressure_config.min_db_available_connections = m_config.persist_min_db_available_connections;
+                pressure_config.max_inflight_mails = cfg->persist_max_inflight_mails;
+                pressure_config.min_available_memory_mb = cfg->persist_min_available_memory_mb;
+                pressure_config.min_db_available_connections = cfg->persist_min_db_available_connections;
                 m_persistentQueue->set_pressure_config(pressure_config);
                 m_outboundInterruptFlag = std::make_shared<std::atomic<bool>>(true);
                 outbound::OutboundIdentityConfig outbound_identity;
-                outbound_identity.helo_domain = m_config.outbound_helo_domain;
-                outbound_identity.mail_from_domain = m_config.outbound_mail_from_domain;
-                outbound_identity.rewrite_header_from = m_config.outbound_rewrite_header_from;
-                outbound_identity.dkim_enabled = m_config.outbound_dkim_enabled;
-                outbound_identity.dkim_selector = m_config.outbound_dkim_selector;
-                outbound_identity.dkim_domain = m_config.outbound_dkim_domain;
-                outbound_identity.dkim_private_key_file = m_config.outbound_dkim_private_key_file;
+                outbound_identity.helo_domain = cfg->outbound_helo_domain;
+                outbound_identity.mail_from_domain = cfg->outbound_mail_from_domain;
+                outbound_identity.rewrite_header_from = cfg->outbound_rewrite_header_from;
+                outbound_identity.dkim_enabled = cfg->outbound_dkim_enabled;
+                outbound_identity.dkim_selector = cfg->outbound_dkim_selector;
+                outbound_identity.dkim_domain = cfg->outbound_dkim_domain;
+                outbound_identity.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
 
                 outbound::OutboundPollingConfig outbound_polling;
-                outbound_polling.busy_sleep_ms = static_cast<int>(m_config.outbound_poll_busy_sleep_ms);
-                outbound_polling.backoff_base_ms = static_cast<int>(m_config.outbound_poll_backoff_base_ms);
-                outbound_polling.backoff_max_ms = static_cast<int>(m_config.outbound_poll_backoff_max_ms);
-                outbound_polling.backoff_shift_cap = static_cast<std::size_t>(m_config.outbound_poll_backoff_shift_cap);
+                outbound_polling.busy_sleep_ms = static_cast<int>(cfg->outbound_poll_busy_sleep_ms);
+                outbound_polling.backoff_base_ms = static_cast<int>(cfg->outbound_poll_backoff_base_ms);
+                outbound_polling.backoff_max_ms = static_cast<int>(cfg->outbound_poll_backoff_max_ms);
+                outbound_polling.backoff_shift_cap = static_cast<std::size_t>(cfg->outbound_poll_backoff_shift_cap);
 
                 m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
                     m_dbPool,
@@ -171,8 +172,8 @@ try {
                     std::move(outbound_identity),
                     outbound_polling,
                     m_domain,
-                    m_config.outbound_ports,
-                    static_cast<int>(m_config.outbound_max_attempts)
+                    cfg->outbound_ports,
+                    static_cast<int>(cfg->outbound_max_attempts)
                 );
                 m_persistentQueue->set_outbound_client(m_outboundClient);
                 m_outboundClient->start();
@@ -538,7 +539,8 @@ void ServerBase::load_certificates(const std::string& cert_file, const std::stri
 }
 
 void ServerBase::start_metrics_server() {
-    if (!m_config.metrics_enabled) {
+    auto cfg = std::atomic_load(&m_config);
+    if (!cfg->metrics_enabled) {
         return;
     }
     if (metrics_server_) {
@@ -547,12 +549,18 @@ void ServerBase::start_metrics_server() {
     try {
         metrics_server_ = std::make_unique<MetricsServer>(
             *m_ioContext,
-            m_config.metrics_port,
-            m_config.metrics_bind_address,
-            [this]() { return build_metrics_response(); });
+            cfg->metrics_port,
+            cfg->metrics_bind_address,
+            [this]() { return build_metrics_response(); },
+            [this]() -> std::string {
+                if (m_configFilePath.empty()) {
+                    return "config file path not set";
+                }
+                return reload_config(m_configFilePath) ? "OK" : "reload failed";
+            });
         metrics_server_->start();
         LOG_SERVER_INFO("Metrics server started on {}:{}",
-                       m_config.metrics_bind_address, m_config.metrics_port);
+                       cfg->metrics_bind_address, cfg->metrics_port);
     } catch (const std::exception& e) {
         LOG_SERVER_ERROR("Failed to start metrics server: {}", e.what());
         metrics_server_.reset();
@@ -565,6 +573,64 @@ void ServerBase::stop_metrics_server() {
         metrics_server_.reset();
         LOG_SERVER_INFO("Metrics server stopped");
     }
+}
+
+bool ServerBase::reload_config(const std::string& json_file) {
+    m_configFilePath = json_file;
+    // 1. 解析新配置
+    ServerConfig new_cfg = *std::atomic_load(&m_config);  // 基于当前配置的副本
+    if (!new_cfg.loadFromFile(json_file)) {
+        LOG_SERVER_ERROR("Config reload failed: could not parse {}", json_file);
+        return false;
+    }
+
+    // 2. 验证结构性字段未变更（这些字段需要重启才能生效）
+    auto old_cfg = std::atomic_load(&m_config);
+    if (old_cfg->address != new_cfg.address ||
+        old_cfg->port != new_cfg.port ||
+        old_cfg->ssl_port != new_cfg.ssl_port ||
+        old_cfg->tcp_port != new_cfg.tcp_port ||
+        old_cfg->enable_ssl != new_cfg.enable_ssl ||
+        old_cfg->enable_tcp != new_cfg.enable_tcp ||
+        old_cfg->io_thread_count != new_cfg.io_thread_count ||
+        old_cfg->worker_thread_count != new_cfg.worker_thread_count ||
+        old_cfg->use_database != new_cfg.use_database ||
+        old_cfg->storage_provider != new_cfg.storage_provider ||
+        old_cfg->mail_storage_path != new_cfg.mail_storage_path ||
+        old_cfg->attachment_storage_path != new_cfg.attachment_storage_path ||
+        old_cfg->system_name != new_cfg.system_name ||
+        old_cfg->system_domain != new_cfg.system_domain ||
+        old_cfg->certFile != new_cfg.certFile ||
+        old_cfg->keyFile != new_cfg.keyFile) {
+        LOG_SERVER_WARN("Config reload rejected: structural fields changed (requires restart)");
+        return false;
+    }
+
+    // 3. 应用新配置（atomic store，所有读者立即可见）
+    std::atomic_store(&m_config, std::make_shared<ServerConfig>(new_cfg));
+    auto applied = std::atomic_load(&m_config);
+
+    // 4. 更新热可加载的运行时状态
+
+    // 日志级别
+    Logger::get_instance().set_level(Logger::string_to_level(applied->log_level));
+    LOG_SERVER_INFO("Config reloaded from {}: log_level={}, inbound_auth_policy={}",
+                    json_file,
+                    applied->log_level,
+                    inbound_auth_policy_to_string(applied->inbound_auth_policy));
+
+    // PersistentQueue 背压配置
+    if (m_persistentQueue) {
+        persist_storage::PersistentQueuePressureConfig pressure_config;
+        pressure_config.max_inflight_mails = applied->persist_max_inflight_mails;
+        pressure_config.min_available_memory_mb = applied->persist_min_available_memory_mb;
+        pressure_config.min_db_available_connections = applied->persist_min_db_available_connections;
+        m_persistentQueue->set_pressure_config(pressure_config);
+    }
+
+    // Outbound client 配置热更新待后续添加 setter 后支持
+
+    return true;
 }
 
 } // namespace mail_system

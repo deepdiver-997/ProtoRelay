@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS mail_mailbox (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件-邮箱关联表';
 
 -- 创建系统默认邮箱的存储过程
+DROP PROCEDURE IF EXISTS create_default_mailboxes;
 DELIMITER //
 CREATE PROCEDURE create_default_mailboxes(IN p_user_id BIGINT)
 BEGIN
@@ -140,6 +141,7 @@ END //
 DELIMITER ;
 
 -- 创建用户注册后自动创建默认邮箱的触发器
+DROP TRIGGER IF EXISTS after_user_insert;
 DELIMITER //
 CREATE TRIGGER after_user_insert
 AFTER INSERT ON users

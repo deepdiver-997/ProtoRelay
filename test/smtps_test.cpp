@@ -80,6 +80,21 @@ std::unique_ptr<SmtpsServer> g_server = nullptr;
 
 // 信号处理函数
 void signal_handler(int signal) {
+    if (signal == SIGHUP) {
+        LOG_SERVER_INFO("Received SIGHUP, reloading config...");
+        if (g_server) {
+            auto ctx = g_server->get_io_context();
+            if (ctx) {
+                boost::asio::post(*ctx, []() {
+                    if (g_server) {
+                        bool ok = g_server->reload_config(g_server->m_configFilePath);
+                        LOG_SERVER_INFO("Config reload from SIGHUP: {}", ok ? "success" : "failed");
+                    }
+                });
+            }
+        }
+        return;
+    }
     LOG_SERVER_INFO("\nReceived signal {}, shutting down...", signal);
     if (g_server) {
         g_server->stop();
@@ -109,6 +124,7 @@ int main(int argc, char* argv[]) {
     // 注册信号处理
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    signal(SIGHUP, signal_handler);
 
     #ifdef GNU_LINUX
     std::cout << "Remember to execute 'sudo setcap 'cap_net_bind_service=+ep' " << argv[0] << "' to allow binding to privileged ports without running as root." << std::endl;
@@ -142,6 +158,7 @@ int main(int argc, char* argv[]) {
 
         // 创建服务器
         g_server = std::make_unique<SmtpsServer>(config);
+        g_server->m_configFilePath = config_path;
 
         // 启动服务器
         g_server->start();

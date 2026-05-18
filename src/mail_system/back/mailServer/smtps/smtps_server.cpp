@@ -12,6 +12,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
       std::shared_ptr<ThreadPoolBase> wokerThreadPool,
        std::shared_ptr<DBPool> dbPool)
         : ServerBase(config, ioThreadPool, wokerThreadPool, dbPool) {
+    auto cfg = std::atomic_load(&m_config);
     // ServerBase may already create and wire PersistentQueue with outbound client.
     // Avoid overriding it here, otherwise outbox enqueue/notify wiring can be lost.
     if (!m_persistentQueue && m_dbPool) {
@@ -21,9 +22,9 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             m_storageProvider);
         m_persistentQueue->set_local_domain(m_domain);
         persist_storage::PersistentQueuePressureConfig pressure_config;
-        pressure_config.max_inflight_mails = m_config.persist_max_inflight_mails;
-        pressure_config.min_available_memory_mb = m_config.persist_min_available_memory_mb;
-        pressure_config.min_db_available_connections = m_config.persist_min_db_available_connections;
+        pressure_config.max_inflight_mails = cfg->persist_max_inflight_mails;
+        pressure_config.min_available_memory_mb = cfg->persist_min_available_memory_mb;
+        pressure_config.min_db_available_connections = cfg->persist_min_db_available_connections;
         m_persistentQueue->set_pressure_config(pressure_config);
         if (m_outboundClient) {
             m_persistentQueue->set_outbound_client(m_outboundClient);
@@ -103,15 +104,16 @@ void SmtpsServer::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::
 }
 
 bool SmtpsServer::should_reject_connection(std::string& reason) const {
-    if (m_config.maxConnections > 0 &&
-        active_connections_.load(std::memory_order_relaxed) >= m_config.maxConnections) {
+    auto cfg = std::atomic_load(&m_config);
+    if (cfg->maxConnections > 0 &&
+        active_connections_.load(std::memory_order_relaxed) >= cfg->maxConnections) {
         reason = "max connections reached";
         return true;
     }
 
     if (m_persistentQueue &&
-        m_config.persist_max_inflight_mails > 0 &&
-        m_persistentQueue->inflight_count() >= m_config.persist_max_inflight_mails) {
+        cfg->persist_max_inflight_mails > 0 &&
+        m_persistentQueue->inflight_count() >= cfg->persist_max_inflight_mails) {
         reason = "persist inflight limit reached";
         return true;
     }

@@ -339,7 +339,8 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     if (this->m_server->m_storageProvider) {
         this->get_mail()->body_path = this->m_server->m_storageProvider->build_mail_body_key(this->get_mail()->id);
     } else {
-        std::string body_path = this->m_server->m_config.mail_storage_path;
+        auto cfg = std::atomic_load(&this->m_server->m_config);
+        std::string body_path = cfg->mail_storage_path;
         if (!body_path.empty() && body_path.back() != '/' && body_path.back() != '\\') {
             body_path.push_back('/');
         }
@@ -714,7 +715,8 @@ void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data,
                 this->get_mail()->id,
                 context_.current_attachment_filename);
         } else {
-            std::string attachment_path = this->m_server->m_config.attachment_storage_path;
+            auto cfg = std::atomic_load(&this->m_server->m_config);
+            std::string attachment_path = cfg->attachment_storage_path;
             if (!attachment_path.empty() && attachment_path.back() != '/' && attachment_path.back() != '\\') {
                 attachment_path.push_back('/');
             }
@@ -849,7 +851,8 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
 
     ignore_current_command_ = false;
 
-    if (state_ == SmtpsState::WAIT_AUTH_USERNAME || state_ == SmtpsState::WAIT_AUTH_PASSWORD) {
+    if (state_ == SmtpsState::WAIT_AUTH_USERNAME || state_ == SmtpsState::WAIT_AUTH_PASSWORD ||
+        (state_ == SmtpsState::WAIT_AUTH && context_.plain_auth_expected)) {
         next_event_ = SmtpsEvent::AUTH;
         last_command_args_ = trimmed;
         if (fsm_) {

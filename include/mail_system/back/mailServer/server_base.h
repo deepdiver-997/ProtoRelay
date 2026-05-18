@@ -3,6 +3,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <atomic>
 #include <memory>
 #include <string>
 #include "server_config.h"
@@ -99,7 +100,12 @@ public:
     // std::shared_ptr<ClientFSM> m_client_fsm;
     bool ssl_in_worker;
     std::string m_domain;
-    ServerConfig m_config;
+    std::string m_configFilePath;
+    // 热可重载配置（copy-on-write，读路径无锁，通过 std::atomic_load/store 保护）
+    std::shared_ptr<ServerConfig> m_config;
+
+    // 运行时重载配置文件（SIGHUP 或 /reload 触发）
+    bool reload_config(const std::string& json_file);
 
     // 连接负载门控
     std::atomic<size_t> active_connections_{0};

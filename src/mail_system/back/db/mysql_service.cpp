@@ -15,10 +15,23 @@ MySQLResult::MySQLResult(MYSQL_RES* result)
     : m_result(result), m_rowCount(0), m_columnCount(0) {
     if (m_result) {
         load_result_data();
+        mysql_free_result(m_result);
+        m_result = nullptr;
     }
 }
 
+MySQLResult::MySQLResult(std::vector<std::string> colNames,
+                         std::vector<std::vector<std::string>> rows,
+                         size_t rowCount, size_t colCount)
+    : m_result(nullptr)
+    , m_columnNames(std::move(colNames))
+    , m_rows(std::move(rows))
+    , m_rowCount(rowCount)
+    , m_columnCount(colCount) {}
+
 MySQLResult::~MySQLResult() {
+    // m_result is already freed in constructor (if was non-null)
+    // keeping this check as safety net, but should be nullptr by now
     if (m_result) {
         mysql_free_result(m_result);
         m_result = nullptr;
@@ -317,19 +330,22 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
         return nullptr;
     }
 
-    // 绑定参数
+    // 绑定参数 — 变量必须存活到 mysql_stmt_execute 之后
     size_t param_count = params.size();
-    if (param_count > 0) {
-        std::vector<MYSQL_BIND> binds(param_count);
-        std::vector<unsigned long> lengths(param_count);
-        std::vector<char> nulls(param_count, 0);
+    std::vector<MYSQL_BIND> binds;
+    std::vector<unsigned long> lengths;
+    std::vector<char> nulls;
+    std::vector<std::string> param_copies;
 
-        // 关键：创建参数字符串的副本，确保在执行期间缓冲区有效
-        std::vector<std::string> param_copies(params);
+    if (param_count > 0) {
+        binds.resize(param_count);
+        lengths.resize(param_count);
+        nulls.resize(param_count, 0);
+        param_copies = params;  // 复制一份，确保执行期间缓冲区有效
 
         for (size_t i = 0; i < param_count; ++i) {
             binds[i].buffer_type = MYSQL_TYPE_STRING;
-            binds[i].buffer = (void*)param_copies[i].c_str(); // 使用副本
+            binds[i].buffer = (void*)param_copies[i].c_str();
             binds[i].buffer_length = param_copies[i].length();
             binds[i].length = &lengths[i];
             lengths[i] = param_copies[i].length();
@@ -348,26 +364,87 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
         return nullptr;
     }
 
-    // 获取结果
-    MYSQL_RES* result = mysql_stmt_result_metadata(stmt);
-    if (!result) {
-        if (mysql_stmt_field_count(stmt) == 0) {
-            // 没有结果集
-            return nullptr;
-        } else {
+    // 获取结果元数据（列名/类型）并拉取数据行
+    {
+        MYSQL_RES* meta = mysql_stmt_result_metadata(stmt);
+        if (!meta) {
+            if (mysql_stmt_field_count(stmt) == 0) {
+                return nullptr;  // 没有结果集
+            }
             LOG_DB_QUERY_ERROR("MySQL stmt result metadata error: {}", mysql_stmt_error(stmt));
             return nullptr;
         }
+
+        // 收集列名
+        size_t num_fields = mysql_num_fields(meta);
+        std::vector<std::string> colNames;
+        MYSQL_FIELD* fields = mysql_fetch_fields(meta);
+        for (size_t i = 0; i < num_fields; ++i) {
+            colNames.push_back(fields[i].name);
+        }
+
+        // 存储结果并获取行数
+        if (mysql_stmt_store_result(stmt) != 0) {
+            LOG_DB_QUERY_ERROR("MySQL stmt store result error: {}", mysql_stmt_error(stmt));
+            mysql_free_result(meta);
+            return nullptr;
+        }
+
+        // 逐行拉取数据
+        std::vector<std::vector<std::string>> rows;
+
+        // 为每列绑定缓冲区
+        std::vector<MYSQL_BIND> result_binds(num_fields);
+        std::vector<std::vector<char>> buffers(num_fields);
+        std::vector<unsigned long> result_lengths(num_fields);
+        std::vector<char> result_nulls(num_fields);
+
+        for (size_t i = 0; i < num_fields; ++i) {
+            buffers[i].resize(fields[i].max_length > 0 ? fields[i].max_length : 256);
+            memset(&result_binds[i], 0, sizeof(MYSQL_BIND));
+            result_binds[i].buffer_type = MYSQL_TYPE_STRING;
+            result_binds[i].buffer = buffers[i].data();
+            result_binds[i].buffer_length = buffers[i].size();
+            result_binds[i].length = &result_lengths[i];
+            result_binds[i].is_null = (bool*)&result_nulls[i];
+        }
+
+        if (mysql_stmt_bind_result(stmt, result_binds.data()) != 0) {
+            LOG_DB_QUERY_ERROR("MySQL stmt bind result error: {}", mysql_stmt_error(stmt));
+            mysql_free_result(meta);
+            return nullptr;
+        }
+
+        int fetch_rc;
+        while ((fetch_rc = mysql_stmt_fetch(stmt)) == 0) {
+            std::vector<std::string> row_data(num_fields);
+            for (size_t i = 0; i < num_fields; ++i) {
+                if (result_nulls[i]) {
+                    row_data[i] = "";
+                } else {
+                    // 如果数据被截断，扩展缓冲区重试
+                    if (result_lengths[i] > buffers[i].size()) {
+                        buffers[i].resize(result_lengths[i]);
+                        result_binds[i].buffer = buffers[i].data();
+                        result_binds[i].buffer_length = buffers[i].size();
+                        mysql_stmt_fetch_column(stmt, &result_binds[i], i, 0);
+                    }
+                    row_data[i] = std::string(buffers[i].data(), result_lengths[i]);
+                }
+            }
+            rows.push_back(std::move(row_data));
+        }
+
+        if (fetch_rc != MYSQL_NO_DATA) {
+            LOG_DB_QUERY_ERROR("MySQL stmt fetch error: {}", mysql_stmt_error(stmt));
+            mysql_free_result(meta);
+            return nullptr;
+        }
+
+        mysql_free_result(meta);
+        return std::make_shared<MySQLResult>(
+            std::move(colNames), std::move(rows), rows.size(), num_fields);
     }
-
-    // 存储结果
-    mysql_stmt_store_result(stmt);
-
-    // 创建MySQLResult并加载数据
-    auto res_ptr = std::make_shared<MySQLResult>(result);
-    mysql_free_result(result);
-
-    return res_ptr;
 }
 
 bool MySQLConnection::execute(const std::string& sql) {
@@ -458,16 +535,20 @@ bool MySQLConnection::execute(const std::string& sql, const std::vector<std::str
     }
     LOG_DB_QUERY_DEBUG("Statement prepared successfully");
 
-    // 绑定参数
+    // 绑定参数 — 变量必须存活到 mysql_stmt_execute 之后
     size_t param_count = params.size();
-    if (param_count > 0) {
-        std::vector<MYSQL_BIND> binds(param_count);
-        std::vector<unsigned long> lengths(param_count);
-        std::vector<char> nulls(param_count, 0);
-        std::vector<int> int_values(param_count, 0); // only used for ParamType::Int
+    std::vector<MYSQL_BIND> binds;
+    std::vector<unsigned long> lengths;
+    std::vector<char> nulls;
+    std::vector<int> int_values;
+    std::vector<std::string> param_copies;
 
-        // 关键：创建参数字符串的副本，确保在 execute 期间缓冲区有效
-        std::vector<std::string> param_copies(params);
+    if (param_count > 0) {
+        binds.resize(param_count);
+        lengths.resize(param_count);
+        nulls.resize(param_count, 0);
+        int_values.resize(param_count, 0);
+        param_copies = params;  // 复制一份，确保执行期间缓冲区有效
 
         LOG_DB_QUERY_DEBUG("Binding {} parameters:", param_count);
         for (size_t i = 0; i < param_count; ++i) {
@@ -485,7 +566,7 @@ bool MySQLConnection::execute(const std::string& sql, const std::vector<std::str
                 LOG_DB_QUERY_DEBUG("    -> bound as int: {}", int_values[i]);
             } else {
                 binds[i].buffer_type = MYSQL_TYPE_STRING;
-                binds[i].buffer = (void*)param_copies[i].c_str(); // 使用副本
+                binds[i].buffer = (void*)param_copies[i].c_str();
                 binds[i].buffer_length = param_copies[i].length();
                 binds[i].length = &lengths[i];
                 lengths[i] = param_copies[i].length();
