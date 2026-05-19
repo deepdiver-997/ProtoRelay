@@ -791,10 +791,15 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     // Generate UIDVALIDITY (use mailbox_id as validity)
     ctx->uid_validity = mailbox_id;
 
-    size_t count = this->get_mailbox_count(mailbox_id, ctx->user_id);
-    size_t unseen = this->get_mailbox_unseen_count(mailbox_id, ctx->user_id);
-    uint64_t uidnext = this->get_mailbox_uidnext(mailbox_id, ctx->user_id);
+    bool from_cache = false, stale = false;
+    auto stats = this->get_mailbox_stats_cached(
+        ctx->user_id, mailbox_id, from_cache, stale);
+    size_t count = stats.exists;
+    size_t unseen = stats.unseen;
+    uint64_t uidnext = stats.uidnext;
 
+    // stale-while-revalidate: 缓存过期但数据仍可用，下次 SELECT 会自动回源
+    // （需要后台刷新时，可在主循环中定期调用 invalidate 或重入 handler）
     session->set_current_state(static_cast<int>(ImapState::SELECTED));
 
     // Build SELECT response
@@ -848,9 +853,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
     ctx->read_only = true;
     ctx->uid_validity = mailbox_id;
 
-    size_t count = this->get_mailbox_count(mailbox_id, ctx->user_id);
-    size_t unseen = this->get_mailbox_unseen_count(mailbox_id, ctx->user_id);
-    uint64_t uidnext = this->get_mailbox_uidnext(mailbox_id, ctx->user_id);
+    bool from_cache = false, stale = false;
+    auto stats = this->get_mailbox_stats_cached(
+        ctx->user_id, mailbox_id, from_cache, stale);
+    size_t count = stats.exists;
+    size_t unseen = stats.unseen;
+    uint64_t uidnext = stats.uidnext;
 
     session->set_current_state(static_cast<int>(ImapState::SELECTED));
 
@@ -987,9 +995,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
         return;
     }
 
-    size_t messages = this->get_mailbox_count(mailbox_id, ctx->user_id);
-    size_t unseen = this->get_mailbox_unseen_count(mailbox_id, ctx->user_id);
-    uint64_t uidnext = this->get_mailbox_uidnext(mailbox_id, ctx->user_id);
+    bool from_cache = false, stale = false;
+    auto stats = this->get_mailbox_stats_cached(
+        ctx->user_id, mailbox_id, from_cache, stale);
+    size_t messages = stats.exists;
+    size_t unseen = stats.unseen;
+    uint64_t uidnext = stats.uidnext;
     uint64_t uidvalidity = mailbox_id;
 
     std::string response = "* STATUS " + quote_string(encode_mailbox_name(mailbox_name)) + " (";

@@ -164,6 +164,7 @@ protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
+    std::shared_ptr<IMailboxCache> m_mailboxCache;
     std::shared_ptr<mail_system::persist_storage::PersistentQueue> m_persistentQueue;
 public:
     SmtpsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
@@ -175,6 +176,9 @@ public:
                     m_dbPool(db_pool),
                     m_persistentQueue(persistent_queue) {}
     virtual ~SmtpsFsm() = default;
+
+    void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
+    std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
 
     // 处理事件
     virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event, const std::string& args) = 0;

@@ -146,6 +146,9 @@ protected:
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
     std::shared_ptr<storage::IStorageProvider> m_storageProvider;
+    // 邮箱摘要 LRU 缓存（可选，注入后生效）
+    using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
+    std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
 
 public:
     ImapsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
@@ -158,6 +161,9 @@ public:
           m_storageProvider(storage_provider) {}
 
     virtual ~ImapsFsm() = default;
+
+    void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
+    std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
 
     // 处理事件 —— 纯虚接口
     virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session,
@@ -659,6 +665,43 @@ public:
         std::string content((std::istreambuf_iterator<char>(in)),
                             std::istreambuf_iterator<char>());
         return content;
+    }
+
+    // ========== 缓存感知的邮箱统计 ==========
+
+    // 获取邮箱摘要（优先缓存，stale-while-revalidate）
+    // from_cache_out: true 表示返回值来自缓存
+    // stale_out: true 表示缓存 TTL 已过（值仍可用，建议异步刷新）
+    MailboxCacheEntry get_mailbox_stats_cached(
+        uint64_t user_id, uint64_t mailbox_id,
+        bool& from_cache_out, bool& stale_out) {
+
+        from_cache_out = false;
+        stale_out = false;
+
+        // 尝试缓存
+        if (m_mailboxStatsCache) {
+            std::string key = mbox_cache_key(user_id, mailbox_id);
+            MailboxCacheEntry cached;
+            if (m_mailboxStatsCache->get(key, cached, stale_out)) {
+                from_cache_out = true;
+                return cached;
+            }
+        }
+
+        // 回源 DB
+        MailboxCacheEntry entry;
+        entry.exists = get_mailbox_count(mailbox_id, user_id);
+        entry.unseen = get_mailbox_unseen_count(mailbox_id, user_id);
+        entry.uidnext = get_mailbox_uidnext(mailbox_id, user_id);
+        entry.uidvalidity = mailbox_id;
+
+        // 写入缓存
+        if (m_mailboxStatsCache) {
+            m_mailboxStatsCache->put(mbox_cache_key(user_id, mailbox_id), entry);
+        }
+
+        return entry;
     }
 
     // 获取邮箱的总邮件数

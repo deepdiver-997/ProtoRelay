@@ -19,6 +19,7 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/outbound/smtp_outbound_client.h"
+#include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/mailServer/metrics_server.h"
 // #include "mail_system/back/mailServer/session/session_base.h"
@@ -98,7 +99,14 @@ public:
     std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
     std::shared_ptr<storage::IStorageProvider> m_storageProvider;
     // std::shared_ptr<ClientFSM> m_client_fsm;
+
+    // 可选：邮箱缓存（SMTP 投递后通知，IMAP 查询时使用）
+    // 由外部注入，可为 nullptr。注入后可调用 get_mailbox_cache() 获取
+    void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
+    std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
+
     bool ssl_in_worker;
+    std::shared_ptr<IMailboxCache> m_mailboxCache;
     std::string m_domain;
     std::string m_configFilePath;
     // 热可重载配置（copy-on-write，读路径无锁，通过 std::atomic_load/store 保护）
