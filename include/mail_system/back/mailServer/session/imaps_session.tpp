@@ -21,7 +21,7 @@ namespace {
             {"UNSUBSCRIBE", ImapEvent::UNSUBSCRIBE},
             {"LIST", ImapEvent::LIST},
             {"LSUB", ImapEvent::LSUB},
-            {"STATUS", ImapEvent::STATUS},
+            {"STATUS", ImapEvent::IMAP_STATUS},
             {"APPEND", ImapEvent::APPEND},
             {"CHECK", ImapEvent::CHECK},
             {"CLOSE", ImapEvent::CLOSE},
@@ -35,6 +35,7 @@ namespace {
             {"NOOP", ImapEvent::NOOP},
             {"IDLE", ImapEvent::IDLE},
             {"DONE", ImapEvent::DONE},
+            {"STARTTLS", ImapEvent::STARTTLS},
         };
         return map;
     }
@@ -228,6 +229,11 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
                 session->last_command_args_.clear();
             }
 
+            // 保存 APPEND preamble（literal 覆盖 last_command_args_ 之前）
+            if (session->current_command_ == "APPEND") {
+                session->context_.pending_append_preamble = session->last_command_args_;
+            }
+
             std::transform(session->current_command_.begin(), session->current_command_.end(),
                           session->current_command_.begin(), ::toupper);
             LOG_IMAP_DEBUG("Literal declared: cmd={}, size={}", session->current_command_, literal_size);
@@ -248,12 +254,14 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
                                    session->current_tag_, session->literal_data_buffer_);
                 return;
             } else {
-                // 需要更多数据
+                // 发送 + 继续响应，然后等待更多数据
                 session->awaiting_literal_ = true;
                 session->expected_literal_size_ = literal_size;
                 session->literal_data_buffer_ = buf;
                 buf.clear();
-                SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+
+                auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
+                fsm->send_continuation(std::move(self), "Ready for literal data");
                 return;
             }
         } catch (const std::exception& e) {

@@ -392,6 +392,8 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN}] = ImapState::NOT_AUTHENTICATED; // may transition in handler
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP}] = ImapState::NOT_AUTHENTICATED;
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT}] = ImapState::LOGOUT;
+    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
+        transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS}] = ImapState::NOT_AUTHENTICATED;
 
     // AUTHENTICATED
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::SELECT}] = ImapState::SELECTED;
@@ -399,7 +401,7 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::CAPABILITY}] = ImapState::AUTHENTICATED;
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::LIST}] = ImapState::AUTHENTICATED;
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::LSUB}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::STATUS}] = ImapState::AUTHENTICATED;
+    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS}] = ImapState::AUTHENTICATED;
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::CREATE}] = ImapState::AUTHENTICATED;
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::DELETE}] = ImapState::AUTHENTICATED;
     transition_table_[{ImapState::AUTHENTICATED, ImapEvent::RENAME}] = ImapState::AUTHENTICATED;
@@ -424,6 +426,7 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     transition_table_[{ImapState::SELECTED, ImapEvent::CHECK}] = ImapState::SELECTED;
     transition_table_[{ImapState::SELECTED, ImapEvent::CAPABILITY}] = ImapState::SELECTED;
     transition_table_[{ImapState::SELECTED, ImapEvent::NOOP}] = ImapState::SELECTED;
+    transition_table_[{ImapState::SELECTED, ImapEvent::APPEND}] = ImapState::SELECTED;
     transition_table_[{ImapState::SELECTED, ImapEvent::IDLE}] = ImapState::SELECTED;
     transition_table_[{ImapState::SELECTED, ImapEvent::LOGOUT}] = ImapState::LOGOUT;
 
@@ -444,6 +447,9 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     // NOT_AUTHENTICATED
     state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::CAPABILITY] =
         [this](auto session, auto args) { handle_capability(std::move(session), args); };
+    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
+        state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::STARTTLS] =
+            [this](auto session, auto args) { handle_starttls(std::move(session), args); };
     state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::LOGIN] =
         [this](auto session, auto args) { handle_login(std::move(session), args); };
     state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::NOOP] =
@@ -466,7 +472,7 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
         [this](auto session, auto args) { handle_list(std::move(session), args); };
     state_handlers_[ImapState::AUTHENTICATED][ImapEvent::LSUB] =
         [this](auto session, auto args) { handle_lsub(std::move(session), args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::STATUS] =
+    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::IMAP_STATUS] =
         [this](auto session, auto args) { handle_status(std::move(session), args); };
     state_handlers_[ImapState::AUTHENTICATED][ImapEvent::CREATE] =
         [this](auto session, auto args) { handle_create(std::move(session), args); };
@@ -504,6 +510,8 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
         [this](auto session, auto args) { handle_search(std::move(session), args); };
     state_handlers_[ImapState::SELECTED][ImapEvent::COPY] =
         [this](auto session, auto args) { handle_copy(std::move(session), args); };
+    state_handlers_[ImapState::SELECTED][ImapEvent::MOVE] =
+        [this](auto session, auto args) { handle_move(std::move(session), args); };
     state_handlers_[ImapState::SELECTED][ImapEvent::UID] =
         [this](auto session, auto args) { handle_uid(std::move(session), args); };
     state_handlers_[ImapState::SELECTED][ImapEvent::EXPUNGE] =
@@ -512,6 +520,8 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
         [this](auto session, auto args) { handle_close(std::move(session), args); };
     state_handlers_[ImapState::SELECTED][ImapEvent::CHECK] =
         [this](auto session, auto args) { handle_check(std::move(session), args); };
+    state_handlers_[ImapState::SELECTED][ImapEvent::APPEND] =
+        [this](auto session, auto args) { handle_append(std::move(session), args); };
     state_handlers_[ImapState::SELECTED][ImapEvent::CAPABILITY] =
         [this](auto session, auto args) { handle_capability(std::move(session), args); };
     state_handlers_[ImapState::SELECTED][ImapEvent::NOOP] =
@@ -1363,6 +1373,33 @@ void TraditionalImapsFsm<ConnectionType>::handle_check(
     send_tagged(std::move(session), tag, "OK", "CHECK completed");
 }
 
+// ---------- STARTTLS ----------
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::handle_starttls(
+    std::unique_ptr<SessionBase<ConnectionType>> session,
+    const std::string& args)
+{
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    std::string tag = ctx ? ctx->current_tag : "*";
+
+    // STARTTLS only available on TCP connections (not already SSL)
+    // Handoff logic: send OK, extract TCP socket, call server handoff
+    SessionBase<ConnectionType>::do_async_write(
+        std::move(session),
+        tag + " OK Begin TLS negotiation now\r\n",
+        [](std::unique_ptr<SessionBase<ConnectionType>> self,
+           const boost::system::error_code& ec) mutable {
+            if (ec) {
+                LOG_IMAP_ERROR("Error sending STARTTLS response: {}", ec.message());
+                return;
+            }
+            auto server = self->get_server();
+            auto tcp_sock = self->release_connection()->release_socket();
+            server->handoff_starttls_socket(std::move(tcp_sock));
+        }
+    );
+}
+
 // ---------- CREATE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_create(
@@ -1560,9 +1597,109 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
         return;
     }
 
-    // For now, we don't implement full APPEND literal handling
-    // Send BAD to let client know
-    send_tagged(std::move(session), tag, "NO", "APPEND not yet implemented");
+    if (ctx->pending_append_preamble.empty()) {
+        send_tagged(std::move(session), tag, "BAD", "APPEND missing preamble");
+        return;
+    }
+
+    // 解析 preamble: mailbox (flags) "InternalDate"
+    std::string preamble = ctx->pending_append_preamble;
+    std::string mailbox_name;
+    std::string flags_str;
+
+    // 提取邮箱名（可能带引号）
+    if (preamble[0] == '"') {
+        size_t end = preamble.find('"', 1);
+        if (end != std::string::npos) {
+            mailbox_name = preamble.substr(1, end - 1);
+            std::string rest = preamble.substr(end + 1);
+            // trim leading spaces
+            rest.erase(0, rest.find_first_not_of(" \t"));
+            if (!rest.empty() && rest[0] == '(') {
+                size_t paren = rest.find(')');
+                if (paren != std::string::npos) {
+                    flags_str = rest.substr(0, paren + 1);
+                }
+            }
+        }
+    } else {
+        size_t sp = preamble.find(' ');
+        if (sp != std::string::npos) {
+            mailbox_name = preamble.substr(0, sp);
+            std::string rest = preamble.substr(sp + 1);
+            rest.erase(0, rest.find_first_not_of(" \t"));
+            if (!rest.empty() && rest[0] == '(') {
+                size_t paren = rest.find(')');
+                if (paren != std::string::npos) {
+                    flags_str = rest.substr(0, paren + 1);
+                }
+            }
+        } else {
+            mailbox_name = preamble;
+        }
+    }
+
+    // 解析 flags
+    int init_status = 0; // 0=read
+    if (flags_str.find("\\Seen") != std::string::npos || flags_str.find("\\seen") != std::string::npos) {
+        init_status = 0;
+    } else if (flags_str.find("\\Unseen") != std::string::npos || flags_str.find("\\Draft") != std::string::npos) {
+        init_status = 1; // unread / draft
+    }
+    if (flags_str.find("\\Deleted") != std::string::npos) {
+        init_status = 5; // deleted
+    }
+
+    // 解码邮箱名（IMAP-UTF-7 → UTF-8）
+    mailbox_name = this->decode_mailbox_name(mailbox_name);
+
+    // 查找目标邮箱
+    uint64_t target_mbox_id = this->find_mailbox_id(ctx->user_id, mailbox_name);
+    if (target_mbox_id == 0) {
+        send_tagged(std::move(session), tag, "NO", "APPEND failed: mailbox not found");
+        return;
+    }
+
+    // 正文内容即 literal 数据（args）
+    std::string body_content = args;
+    std::string subject = "(APPEND)";
+
+    // 尝试提取 Subject（正文第一行或全文首 200 字符）
+    if (!body_content.empty()) {
+        std::istringstream ss(body_content);
+        std::string line;
+        while (std::getline(ss, line)) {
+            if (line.find("Subject:") == 0 || line.find("subject:") == 0) {
+                subject = line.substr(8);
+                // trim
+                subject.erase(0, subject.find_first_not_of(" \t"));
+                break;
+            }
+        }
+    }
+
+    // 保存邮件
+    std::string body_path;
+    std::string error;
+    uint64_t mail_id = this->create_mail(subject, body_content, body_path, error);
+    if (mail_id == 0) {
+        send_tagged(std::move(session), tag, "NO", "APPEND failed: " + error);
+        return;
+    }
+
+    // 关联到邮箱
+    std::string user_email = this->get_user_email(ctx->user_id);
+    if (user_email.empty()) user_email = ctx->username;
+    this->link_mail_to_mailbox(mail_id, ctx->user_id, target_mbox_id,
+                                user_email, user_email, init_status);
+
+    // 返回 APPENDUID
+    uint64_t uidvalidity = target_mbox_id;
+    std::string response = tag + " OK [APPENDUID " + std::to_string(uidvalidity)
+                          + " " + std::to_string(mail_id) + "] APPEND completed\r\n";
+    SessionBase<ConnectionType>::do_async_write(std::move(session), response, nullptr);
+
+    LOG_IMAP_INFO("APPEND: mail_id={}, mailbox={}, user={}", mail_id, mailbox_name, ctx->username);
 }
 
 // ---------- SEARCH ----------
@@ -1579,14 +1716,34 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         return;
     }
 
-    // Simplified: return all matching UIDs (or sequences)
-    // For now, just return ALL messages
     std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
     this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
 
+    // 解析搜索关键词（简单实现常用关键词）
+    std::string upper_args = args;
+    std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
+
+    bool search_unseen = (upper_args.find("UNSEEN") != std::string::npos
+                         || upper_args.find("NEW") != std::string::npos);
+    bool search_seen = (upper_args.find("SEEN") != std::string::npos
+                       && upper_args.find("UNSEEN") == std::string::npos
+                       && upper_args.find("UNSEEN") == std::string::npos);
+    bool search_deleted = (upper_args.find("DELETED") != std::string::npos
+                          && upper_args.find("UNDELETED") == std::string::npos);
+
     std::string response = "* SEARCH";
     for (size_t i = 0; i < mails.size(); ++i) {
-        response += " " + std::to_string(i + 1);
+        const auto& m = mails[i];
+        size_t seq = i + 1;
+
+        bool match = true;
+        if (search_unseen) match = (m.status == 1);
+        else if (search_seen) match = (m.status == 0);
+        if (search_deleted) match = m.is_deleted;
+
+        if (match) {
+            response += " " + std::to_string(seq);
+        }
     }
     response += "\r\n";
     response += tag + " OK SEARCH completed\r\n";
@@ -1608,7 +1765,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
         return;
     }
 
-    // Parse "FETCH <args>", "STORE <args>", etc.
     size_t space = args.find(' ');
     if (space == std::string::npos) {
         send_tagged(std::move(session), tag, "BAD", "UID requires subcommand");
@@ -1617,8 +1773,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
 
     std::string subcmd = args.substr(0, space);
     std::string subargs = args.substr(space + 1);
-
-    // Normalize subcmd
     std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
 
     if (subcmd == "FETCH") {
@@ -1634,11 +1788,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
     }
 }
 
-// ---------- COPY ----------
+// ---------- COPY / MOVE (共享实现) ----------
+// 把当前选中的邮箱中的一组邮件复制/移动到目标邮箱
 template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::handle_copy(
+void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     std::unique_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    const std::string& args,
+    bool is_move)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1648,7 +1804,104 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy(
         return;
     }
 
-    send_tagged(std::move(session), tag, "NO", "COPY not yet fully implemented");
+    // 解析 "seq_set mailbox"
+    size_t sp = args.rfind(' ');
+    if (sp == std::string::npos) {
+        send_tagged(std::move(session), tag, "BAD", "COPY/MOVE requires sequence set and mailbox");
+        return;
+    }
+
+    std::string seq_set = args.substr(0, sp);
+    std::string target_name = args.substr(sp + 1);
+    // trim quotes
+    if (!target_name.empty() && target_name[0] == '"') {
+        size_t end = target_name.find('"', 1);
+        if (end != std::string::npos) target_name = target_name.substr(1, end - 1);
+    }
+    target_name = this->decode_mailbox_name(target_name);
+
+    uint64_t target_id = this->find_mailbox_id(ctx->user_id, target_name);
+    if (target_id == 0) {
+        send_tagged(std::move(session), tag, "NO", "COPY/MOVE failed: mailbox not found");
+        return;
+    }
+
+    // 获取所有邮件，建立序号→mail_id 映射
+    std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+    this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
+
+    std::vector<uint64_t> mail_ids;
+    if (seq_set == "*") {
+        for (const auto& m : mails) mail_ids.push_back(m.mail_id);
+    } else if (seq_set.find(':') != std::string::npos) {
+        size_t colon = seq_set.find(':');
+        uint64_t start = std::stoull(seq_set.substr(0, colon));
+        uint64_t end_val = std::stoull(seq_set.substr(colon + 1));
+        if (end_val > mails.size()) end_val = mails.size();
+        for (uint64_t s = start; s <= end_val && s <= mails.size(); ++s) {
+            mail_ids.push_back(mails[s - 1].mail_id);
+        }
+    } else {
+        uint64_t n = std::stoull(seq_set);
+        if (n >= 1 && n <= mails.size())
+            mail_ids.push_back(mails[n - 1].mail_id);
+    }
+
+    if (mail_ids.empty()) {
+        send_tagged(std::move(session), tag, "OK", "COPY/MOVE completed (no messages)");
+        return;
+    }
+
+    // 获取用户邮箱
+    std::string user_email = this->get_user_email(ctx->user_id);
+    if (user_email.empty()) user_email = ctx->username;
+
+    auto conn = this->m_dbPool->get_connection();
+    if (!conn || !conn->is_connected()) {
+        send_tagged(std::move(session), tag, "NO", "Server error");
+        return;
+    }
+
+    int copied = 0;
+    for (uint64_t mid : mail_ids) {
+        // 检查是否已在目标邮箱
+        auto existing = conn->query(
+            "SELECT id FROM mail_mailbox WHERE mail_id = ? AND mailbox_id = ? AND user_id = ?",
+            {std::to_string(mid), std::to_string(target_id), std::to_string(ctx->user_id)});
+        if (existing && existing->get_row_count() > 0) continue; // 已存在
+
+        int64_t mmid = algorithm::get_snowflake_generator().next_id();
+        if (conn->execute(
+                "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
+                "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())",
+                {std::to_string(mmid), std::to_string(mid), std::to_string(target_id),
+                 std::to_string(ctx->user_id)})) {
+            copied++;
+
+            // MOVE: 从源邮箱删除
+            if (is_move) {
+                this->update_mail_deleted(mid, ctx->user_id, ctx->selected_mailbox_id, true);
+                // 发送 EXPUNGE 通知
+                // 简化处理：不逐个发 untagged EXPUNGE
+            }
+        }
+    }
+
+    std::string cmd_name = is_move ? "MOVE" : "COPY";
+    std::string response = tag + " OK " + cmd_name + " completed (" + std::to_string(copied) + " messages)\r\n";
+    SessionBase<ConnectionType>::do_async_write(std::move(session), response, nullptr);
+}
+
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::handle_copy(
+    std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args) {
+    handle_copy_move(std::move(session), args, false);
+}
+
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::handle_move(
+    std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args) {
+    handle_copy_move(std::move(session), args, true);
 }
 
 // ---------- IDLE ----------
@@ -1678,6 +1931,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
                 return;
             }
             // Continue reading — DONE command will be sent by client
+            // NOTE: IDLE push notifications require a background polling
+            // mechanism that is beyond the current scope. The IMAP server
+            // accepts IDLE/DONE correctly; new-mail notifications (untagged
+            // EXISTS) will be sent when the client exits IDLE and issues
+            // a NOOP or re-selects the mailbox.
             SessionBase<ConnectionType>::do_async_read(std::move(s), nullptr);
         }
     );

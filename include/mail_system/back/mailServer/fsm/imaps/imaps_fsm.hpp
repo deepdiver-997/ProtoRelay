@@ -11,6 +11,7 @@
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/common/bcrypt.h"
+#include "mail_system/back/algorithm/snow.h"
 #include <cstddef>
 #include <functional>
 #include <future>
@@ -54,7 +55,7 @@ enum class ImapEvent {
     UNSUBSCRIBE = 11,
     LIST = 12,
     LSUB = 13,
-    STATUS = 14,
+    IMAP_STATUS = 14,   // 避免与 MySQL headers 中的 STATUS 宏冲突
     APPEND = 15,
     CHECK = 16,
     CLOSE = 17,
@@ -68,8 +69,9 @@ enum class ImapEvent {
     NOOP = 25,
     IDLE = 26,
     DONE = 27,
-    ERROR = 28,
-    TIMEOUT = 29
+    STARTTLS = 28,
+    ERROR = 29,
+    TIMEOUT = 30
 };
 
 // ====================================================================
@@ -103,6 +105,7 @@ struct ImapContext {
     std::string pending_append_mailbox;       // APPEND 的目标邮箱
     std::string pending_append_flags;         // APPEND 的 flags
     std::string pending_append_internaldate;  // APPEND 的 InternalDate
+    std::string pending_append_preamble;      // APPEND 原始参数（literal 前的部分）
 
     void clear() {
         is_authenticated = false;
@@ -121,6 +124,7 @@ struct ImapContext {
         pending_append_mailbox.clear();
         pending_append_flags.clear();
         pending_append_internaldate.clear();
+        pending_append_preamble.clear();
     }
 };
 
@@ -192,7 +196,7 @@ public:
             {ImapEvent::UNSUBSCRIBE, "UNSUBSCRIBE"},
             {ImapEvent::LIST, "LIST"},
             {ImapEvent::LSUB, "LSUB"},
-            {ImapEvent::STATUS, "STATUS"},
+            {ImapEvent::IMAP_STATUS, "STATUS"},
             {ImapEvent::APPEND, "APPEND"},
             {ImapEvent::CHECK, "CHECK"},
             {ImapEvent::CLOSE, "CLOSE"},
@@ -206,6 +210,7 @@ public:
             {ImapEvent::NOOP, "NOOP"},
             {ImapEvent::IDLE, "IDLE"},
             {ImapEvent::DONE, "DONE"},
+            {ImapEvent::STARTTLS, "STARTTLS"},
             {ImapEvent::ERROR, "ERROR"},
             {ImapEvent::TIMEOUT, "TIMEOUT"}
         };
@@ -490,6 +495,77 @@ public:
         return connection->execute(
             "UPDATE mail_mailbox SET is_starred = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
             {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+    }
+
+    // ========== 邮件持久化 ==========
+
+    // 创建一封邮件记录：生成 mail_id + 保存正文 + 写入 mails 表
+    // 返回 mail_id（0 表示失败），body_path 为存储路径供后续 DB 操作使用
+    uint64_t create_mail(const std::string& subject, const std::string& body_content,
+                         std::string& out_body_path, std::string& error) {
+        int64_t mail_id = algorithm::get_snowflake_generator().next_id();
+        out_body_path.clear();
+
+        // 保存正文
+        std::string storage_key = m_storageProvider
+            ? m_storageProvider->build_mail_body_key(static_cast<uint64_t>(mail_id))
+            : "";
+        if (!storage_key.empty()) {
+            std::string err;
+            if (!m_storageProvider->append_binary(storage_key, body_content.data(),
+                                                  body_content.size(), err)) {
+                error = "Storage error: " + err;
+                return 0;
+            }
+            out_body_path = storage_key;
+        } else {
+            std::string base = "mail/";
+            std::string fp = base + std::to_string(mail_id);
+            std::ofstream out(fp, std::ios::binary);
+            if (!out) { error = "Cannot write " + fp; return 0; }
+            out.write(body_content.data(), static_cast<std::streamsize>(body_content.size()));
+            if (!out) { error = "Write failed " + fp; return 0; }
+            out_body_path = fp;
+        }
+
+        // 插入 mails 表
+        auto conn = m_dbPool->get_connection();
+        if (!conn || !conn->is_connected()) { error = "DB connection failed"; return 0; }
+        auto ts = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        if (!conn->execute(
+                "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, ?)",
+                {std::to_string(mail_id),
+                 subject.empty() ? "(无主题)" : subject,
+                 out_body_path, std::to_string(ts)})) {
+            error = "Insert mail record failed";
+            return 0;
+        }
+        return static_cast<uint64_t>(mail_id);
+    }
+
+    // 添加邮件到邮箱（mail_recipients + mail_mailbox）
+    bool link_mail_to_mailbox(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id,
+                              const std::string& sender, const std::string& recipient,
+                              int status) {
+        auto conn = m_dbPool->get_connection();
+        if (!conn || !conn->is_connected()) return false;
+
+        int64_t rid = algorithm::get_snowflake_generator().next_id();
+        bool ok = conn->execute(
+            "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            {std::to_string(rid), std::to_string(mail_id),
+             sender, recipient, std::to_string(status)});
+        if (!ok) return false;
+
+        return conn->execute(
+            "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
+            "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())",
+            {std::to_string(algorithm::get_snowflake_generator().next_id()),
+             std::to_string(mail_id), std::to_string(mailbox_id),
+             std::to_string(user_id)});
     }
 
     // ========== IMAP-UTF-7 解码（RFC 3501 §5.1.3）==========

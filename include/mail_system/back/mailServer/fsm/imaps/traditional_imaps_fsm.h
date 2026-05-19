@@ -120,7 +120,10 @@ private:
     void handle_append(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_search(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_uid(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_starttls(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_copy(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_move(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_copy_move(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args, bool is_move);
     void handle_idle(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_done(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_error(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
