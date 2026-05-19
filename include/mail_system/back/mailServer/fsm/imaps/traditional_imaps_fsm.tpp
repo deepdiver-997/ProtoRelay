@@ -798,8 +798,27 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     size_t unseen = stats.unseen;
     uint64_t uidnext = stats.uidnext;
 
-    // stale-while-revalidate: 缓存过期但数据仍可用，下次 SELECT 会自动回源
-    // （需要后台刷新时，可在主循环中定期调用 invalidate 或重入 handler）
+    // stale-while-revalidate: 先用缓存返回，后台异步回源刷新
+    if (stale && from_cache && this->m_mailboxStatsCache && this->m_workerThreadPool) {
+        auto key = mbox_cache_key(ctx->user_id, mailbox_id);
+        auto cache = this->m_mailboxStatsCache;
+        auto pool = this->m_workerThreadPool;
+        pool->post([key, cache, this]() {
+            if (!cache) return;
+            MailboxCacheEntry fresh;
+            // 从 key 反解 user_id / mailbox_id
+            size_t colon = key.find(':');
+            if (colon == std::string::npos) return;
+            uint64_t uid = std::stoull(key.substr(0, colon));
+            uint64_t mid = std::stoull(key.substr(colon + 1));
+            fresh.exists = this->get_mailbox_count(mid, uid);
+            fresh.unseen = this->get_mailbox_unseen_count(mid, uid);
+            fresh.uidnext = this->get_mailbox_uidnext(mid, uid);
+            fresh.uidvalidity = mid;
+            cache->put(key, fresh);
+        });
+    }
+
     session->set_current_state(static_cast<int>(ImapState::SELECTED));
 
     // Build SELECT response

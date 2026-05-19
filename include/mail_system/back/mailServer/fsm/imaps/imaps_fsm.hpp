@@ -141,16 +141,17 @@ using ImapStateHandler = std::function<void(std::unique_ptr<SessionBase<Connecti
 // ====================================================================
 template <typename ConnectionType>
 class ImapsFsm {
+public:
+    using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
 protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
     std::shared_ptr<storage::IStorageProvider> m_storageProvider;
-    // 邮箱摘要 LRU 缓存（可选，注入后生效）
-    using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
 
 public:
+    // 邮箱摘要 LRU 缓存类型（外部注入时使用）
     ImapsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
              std::shared_ptr<ThreadPoolBase> worker_thread_pool,
              std::shared_ptr<DBPool> db_pool,

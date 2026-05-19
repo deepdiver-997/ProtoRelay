@@ -24,6 +24,12 @@ ImapsServer::ImapsServer(const ServerConfig& config,
     m_ssl_fsm = std::make_shared<TraditionalImapsFsm<SslConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_dbPool, m_storageProvider);
 
+    // 创建并注入共享的 LRU 邮箱统计缓存（容量 20000，TTL 8 秒）
+    auto stats_cache = std::make_shared<
+        ImapsFsm<TcpConnection>::MailboxStatsCache>(20000, std::chrono::seconds(8));
+    m_tcp_fsm->set_mailbox_stats_cache(stats_cache);
+    m_ssl_fsm->set_mailbox_stats_cache(stats_cache);
+
     LOG_IMAP_INFO("IMAP server initialized, SSL fsm={}, TCP fsm={}",
                   m_ssl_fsm ? "ready" : "null",
                   m_tcp_fsm ? "ready" : "null");
