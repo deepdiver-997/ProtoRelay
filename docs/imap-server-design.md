@@ -73,7 +73,7 @@ INIT ──(CONNECT)──▶ NOT_AUTHENTICATED
 | STORE | ✅ Complete | RFC 3501 §6.4.6 |
 | EXPUNGE | ✅ Complete | RFC 3501 §6.4.3 |
 | CLOSE | ✅ Complete | RFC 3501 §6.4.2 |
-| SEARCH | ✅ Basic | RFC 3501 §6.4.4 |
+| SEARCH | ✅ 支持常用过滤 | RFC 3501 §6.4.4 |
 | UID | ✅ Basic | RFC 3501 §6.4.8 |
 | NOOP | ✅ Complete | RFC 3501 §6.1.2 |
 | CHECK | ✅ Complete | RFC 3501 §6.4.1 |
@@ -82,10 +82,11 @@ INIT ──(CONNECT)──▶ NOT_AUTHENTICATED
 | RENAME | ✅ Complete | RFC 3501 §6.3.5 |
 | SUBSCRIBE | ✅ Stub | RFC 3501 §6.3.6 |
 | UNSUBSCRIBE | ✅ Stub | RFC 3501 §6.3.7 |
-| IDLE | ✅ Complete | RFC 2177 |
-| APPEND | 🔧 Parsed only | RFC 3501 §6.3.11 |
-| COPY | 🔧 Stub | RFC 3501 §6.4.7 |
-| MOVE | 🔧 Stub | RFC 6851 |
+| IDLE | ✅ 可进出，无推送 | RFC 2177 |
+| STARTTLS | ✅ 已实现 | RFC 3501 §6.2.1 |
+| APPEND | ✅ 完整实现 | RFC 3501 §6.3.11 |
+| COPY | ✅ 完整实现 | RFC 3501 §6.4.7 |
+| MOVE | ✅ 完整实现 | RFC 6851 |
 
 ### FETCH Attributes Supported
 
@@ -196,19 +197,18 @@ Once connected, try:
 . LOGOUT
 ```
 
-## Known Limitations (Phase 1)
+## Known Limitations (Phase 2)
 
-1. **APPEND** — Literal parsing is wired but storage is not implemented
-2. **COPY/MOVE** — Return NO, not yet wired to the database
-3. **SEARCH** — Simplified: returns all messages (no search expression filtering)
-4. **IDLE** — Accepts DONE correctly, but doesn't push new-mail notifications
-5. **STARTTLS** — Advertised in CAPABILITY but handler not wired in the session
-6. **BODYSTRUCTURE** — Not yet implemented (only BODY[] works)
-7. **INTERNALDATE** — Uses send_time; should use the Date header when available
-8. **UID** — Uses mail_id directly; proper per-mailbox sequential UIDs are a future enhancement
+1. **IDLE 推送** — 能进出 IDLE，但不会主动推送新邮件 EXISTS 通知（需后台轮询机制）
+2. **BODYSTRUCTURE** — 未实现，仅支持 BODY[]
+3. **INTERNALDATE** — 目前使用 mails.send_time；建议在 Date header 可用时优先使用
+4. **UID** — 直接使用 mail_id (Snowflake)；未来可改为每邮箱自增 UID
+5. **SEARCH** — 支持 UNSEEN / SEEN / DELETED 过滤，尚未支持 SUBJECT/FROM 等文本匹配
+6. **ACL / QUOTA** — 未实现
+7. **SORT / THREAD** — 未实现
+8. **LIST-EXTENDED** — 未实现
 
 ## Future Roadmap
 
-- **Phase 2**: APPEND, COPY, MOVE, full SEARCH, STARTTLS
-- **Phase 3**: BODYSTRUCTURE, IDLE push notifications, ACL, QUOTA
-- **Phase 4**: SORT, THREAD, LIST-EXTENDED, MULTISEARCH
+- **Phase 3**: IDLE 推送通知, BODYSTRUCTURE, ACL, QUOTA
+- **Phase 4**: SORT, THREAD, LIST-EXTENDED, MULTISEARCH, full-text SEARCH
