@@ -26,6 +26,18 @@ inline std::string mbox_cache_key(uint64_t user_id, uint64_t mailbox_id) {
 }
 
 // ====================================================================
+// 邮件摘要 —— 用于缓存 FETCH 常用属性，避免每次查三表 JOIN
+// ====================================================================
+struct MailSummary {
+    uint64_t uid = 0;
+    int flags = 0;            // \Seen(bit0), \Flagged(bit1), \Deleted(bit2)
+    uint64_t size = 0;        // RFC822.SIZE
+    std::string subject;
+    std::string from;
+    std::string date;         // INTERNALDATE (RFC 3501 format)
+};
+
+// ====================================================================
 // 邮箱变化通知接口
 // SMTP 投递完成后通过此接口通知缓存层"某用户的某邮箱有变化"
 // IMAP 侧实现此接口并注入到 SMTP，实现零耦合的缓存失效

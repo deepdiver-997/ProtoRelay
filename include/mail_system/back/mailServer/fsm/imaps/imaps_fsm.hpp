@@ -150,6 +150,7 @@ protected:
     std::shared_ptr<storage::IStorageProvider> m_storageProvider;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
 
+
 public:
     // 邮箱摘要 LRU 缓存类型（外部注入时使用）
     ImapsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
@@ -165,6 +166,7 @@ public:
 
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
+    
 
     // 处理事件 —— 纯虚接口
     virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session,
