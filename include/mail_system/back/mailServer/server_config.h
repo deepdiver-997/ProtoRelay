@@ -102,6 +102,7 @@ struct ServerConfig {
     // 安全配置
     bool require_auth;               // 是否要求认证
     size_t max_auth_attempts;        // 最大认证尝试次数
+    bool dnsbl_enabled;            // 是否启用 DNSBL 反垃圾检查（Spamhaus Zen）
     
     // 日志配置
     std::string log_level;           // 日志级别
@@ -177,6 +178,7 @@ struct ServerConfig {
         , write_timeout(60)           // 1分钟
         , require_auth(true)
         , max_auth_attempts(3)
+        , dnsbl_enabled(true)
         , log_level("info")
         , log_to_console(true)
         , log_to_file(true)
@@ -255,6 +257,7 @@ struct ServerConfig {
                   << "\nwrite_timeout = " << write_timeout
                   << "\nrequire_auth = " << (require_auth ? "true" : "false")
                   << "\nmax_auth_attempts = " << max_auth_attempts
+                  << "\ndnsbl_enabled = " << (dnsbl_enabled ? "true" : "false")
                   << "\nlog_level = " << log_level
                   << "\nlog_file = " << log_file
                   << "\nlog_to_console = " << (log_to_console ? "true" : "false")
@@ -463,6 +466,7 @@ struct ServerConfig {
         write_timeout = json_config.value("write_timeout", write_timeout);
         require_auth = json_config.value("require_auth", require_auth);
         max_auth_attempts = json_config.value("max_auth_attempts", max_auth_attempts);
+        dnsbl_enabled = json_config.value("dnsbl_enabled", dnsbl_enabled);
         log_level = json_config.value("log_level", log_level);
         log_file = resolve_path(filename, json_config.value("log_file", log_file));
         log_to_console = json_config.value("log_to_console", log_to_console);

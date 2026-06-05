@@ -33,7 +33,9 @@
   "outbound_poll_backoff_base_ms": 50,
   "outbound_poll_backoff_max_ms": 1200,
   "outbound_poll_backoff_shift_cap": 6,
-  "outbound_ports": [25],
+  "outbound_ports": [
+    25
+  ],
   "outbound_max_attempts": 8,
   "inbound_persist_wait_timeout_ms": 5000,
   "persist_max_inflight_mails": 2048,
@@ -49,5 +51,6 @@
   "inbound_auth_policy": "auto",
   "metrics_enabled": true,
   "metrics_port": 9090,
-  "metrics_bind_address": "127.0.0.1"
+  "metrics_bind_address": "127.0.0.1",
+  "dnsbl_enabled": true
 }

@@ -87,7 +87,7 @@ void ImapsServer::handle_tcp_accept(
     }
 }
 
-bool ImapsServer::should_reject_connection(std::string& reason) const {
+bool ImapsServer::should_reject_connection(std::string& reason, const std::string&) const {
     auto cfg = std::atomic_load(&m_config);
     if (cfg->maxConnections > 0 &&
         active_connections_.load(std::memory_order_relaxed) >= cfg->maxConnections) {

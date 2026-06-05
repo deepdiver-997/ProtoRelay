@@ -206,7 +206,7 @@ protected:
     bool m_enable_ssl;
     bool m_enable_tcp;
     // 判断是否应该拒绝新连接（纯虚函数，由子类实现具体负载检查逻辑）
-    virtual bool should_reject_connection(std::string& reason) const = 0;
+    virtual bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const = 0;
 
     // Metrics HTTP 服务
     void start_metrics_server();

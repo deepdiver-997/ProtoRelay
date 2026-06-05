@@ -28,7 +28,7 @@ protected:
                            const boost::system::error_code& error) override;
 
     // 连接负载门控
-    bool should_reject_connection(std::string& reason) const override;
+    bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const override;
 
     std::shared_ptr<ImapsFsm<TcpConnection>> m_tcp_fsm;
     std::shared_ptr<ImapsFsm<SslConnection>> m_ssl_fsm;

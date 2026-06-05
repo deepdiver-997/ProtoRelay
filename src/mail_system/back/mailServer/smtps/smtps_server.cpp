@@ -5,6 +5,8 @@
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>
+#include <netdb.h>        // getaddrinfo / freeaddrinfo (DNSBL 查询)
+#include <arpa/inet.h>    // inet_ntop
 
 namespace mail_system {
 
@@ -145,8 +147,58 @@ void SmtpsServer::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::
     }
 }
 
-bool SmtpsServer::should_reject_connection(std::string& reason) const {
+bool SmtpsServer::should_reject_connection(std::string& reason, const std::string& client_ip) const {
     auto cfg = std::atomic_load(&m_config);
+
+    // --- DNSBL 反垃圾检查 (Spamhaus Zen) ---
+    // 将客户端 IP 反转后查询 zen.spamhaus.org，
+    // 如果返回 127.0.0.x 说明该 IP 在已知垃圾源列表中。
+    // 格式: <reversed_octets>.zen.spamhaus.org
+    // 例如: 连接到 1.2.3.4 → 查询 4.3.2.1.zen.spamhaus.org
+    if (cfg->dnsbl_enabled && !client_ip.empty()) {
+        std::string reversed;
+        try {
+            auto addr = boost::asio::ip::make_address(client_ip);
+            if (addr.is_v4()) {
+                auto bytes = addr.to_v4().to_bytes();
+                reversed = std::to_string(bytes[3]) + "." +
+                           std::to_string(bytes[2]) + "." +
+                           std::to_string(bytes[1]) + "." +
+                           std::to_string(bytes[0]);
+            }
+            // IPv6 暂不支持 DNSBL（需要 ip6.arpa 格式）
+        } catch (...) {
+            // 解析失败，跳过 DNSBL 检查
+        }
+
+        if (!reversed.empty()) {
+            std::string query = reversed + ".zen.spamhaus.org";
+            struct addrinfo hints = {};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            struct addrinfo* result = nullptr;
+
+            if (getaddrinfo(query.c_str(), nullptr, &hints, &result) == 0 && result) {
+                char ip_str[INET_ADDRSTRLEN] = {};
+                auto* sin = reinterpret_cast<struct sockaddr_in*>(result->ai_addr);
+                inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str));
+                std::string resolved = ip_str;
+                freeaddrinfo(result);
+
+                // Spamhaus 返回码:
+                //   127.0.0.2  - SBL (已知垃圾源)
+                //   127.0.0.3  - CSS (雪鞋垃圾邮件)
+                //   127.0.0.4-7 - XBL (漏洞利用/僵尸网络)
+                //   127.0.0.10-14 - PBL (策略阻止列表，通常是动态 IP)
+                if (resolved.compare(0, 7, "127.0.0") == 0) {
+                    reason = "DNSBL listed (" + resolved + "): " + query;
+                    return true;
+                }
+            }
+        }
+    }
+    // --- DNSBL 检查结束 ---
+
     if (cfg->maxConnections > 0 &&
         active_connections_.load(std::memory_order_relaxed) >= cfg->maxConnections) {
         reason = "max connections reached";
