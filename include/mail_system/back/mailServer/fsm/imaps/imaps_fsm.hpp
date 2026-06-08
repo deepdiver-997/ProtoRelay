@@ -365,7 +365,7 @@ public:
         std::string sql =
             "SELECT m.id, mr.sender, mr.recipient, m.subject, m.body_path, "
             "mm.is_starred, mm.is_deleted, mm.is_important, "
-            "mr.status, m.send_time "
+            "mr.status, UNIX_TIMESTAMP(m.send_time) AS send_time "
             "FROM mail_mailbox mm "
             "JOIN mails m ON mm.mail_id = m.id "
             "JOIN mail_recipients mr ON mr.mail_id = m.id AND mr.recipient = ("
@@ -410,7 +410,7 @@ public:
         }
 
         auto result = connection->query(
-            "SELECT id, subject, body_path, send_time FROM mails WHERE id = ?",
+            "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time FROM mails WHERE id = ?",
             {std::to_string(mail_id)});
 
         if (!result || result->get_row_count() == 0) {
@@ -682,13 +682,16 @@ public:
         from_cache_out = false;
         stale_out = false;
 
-        // 尝试缓存
+        // 尝试缓存（仅新鲜命中时返回；过期则不返回避免客户端看到旧数据）
         if (m_mailboxStatsCache) {
             std::string key = mbox_cache_key(user_id, mailbox_id);
             MailboxCacheEntry cached;
             if (m_mailboxStatsCache->get(key, cached, stale_out)) {
                 from_cache_out = true;
-                return cached;
+                if (!stale_out) {
+                    return cached;  // 新鲜命中
+                }
+                // stale=true：缓存过时，不回源，直接查 DB 更新缓存
             }
         }
 

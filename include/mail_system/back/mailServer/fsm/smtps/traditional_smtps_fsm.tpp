@@ -769,19 +769,28 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
             if (outbound) {
                 auto resolver = outbound->get_dns_resolver();
                 if (resolver) {
-                    auto hostnames = resolver->resolve_ptr_cached(session->get_client_ip());
-                    // 检查 PTR 主机名域名后缀是否匹配 EHLO 域
-                    for (const auto& h : hostnames) {
-                        // 宽松后缀匹配：主机名以 ".ehlo_domain" 结尾或完全等于 ehlo_domain
-                        if (h == ctx->ehlo_domain ||
-                            (h.size() > ctx->ehlo_domain.size() &&
-                             h[h.size() - ctx->ehlo_domain.size() - 1] == '.' &&
-                             h.compare(h.size() - ctx->ehlo_domain.size(),
-                                       ctx->ehlo_domain.size(), ctx->ehlo_domain) == 0)) {
-                            ctx->is_trusted_server = true;
-                            LOG_SMTP_DETAIL_DEBUG("EHLO verified: PTR={} matches EHLO={}, trusted",
-                                                  h, ctx->ehlo_domain);
-                            break;
+                    const auto client_ip = session->get_client_ip();
+                    // 跳过回环/内网地址的 PTR 查询（127.0.0.1, 10.x, 192.168.x, 172.16-31.x）
+                    if (client_ip == "127.0.0.1" || client_ip == "::1" ||
+                        client_ip.compare(0, 3, "10.") == 0 ||
+                        client_ip.compare(0, 8, "192.168.") == 0 ||
+                        (client_ip.compare(0, 4, "172.") == 0)) {
+                        // 内网地址无 PTR 记录，直接跳过
+                    } else {
+                        auto hostnames = resolver->resolve_ptr_cached(client_ip);
+                        // 检查 PTR 主机名域名后缀是否匹配 EHLO 域
+                        for (const auto& h : hostnames) {
+                            // 宽松后缀匹配：主机名以 ".ehlo_domain" 结尾或完全等于 ehlo_domain
+                            if (h == ctx->ehlo_domain ||
+                                (h.size() > ctx->ehlo_domain.size() &&
+                                 h[h.size() - ctx->ehlo_domain.size() - 1] == '.' &&
+                                 h.compare(h.size() - ctx->ehlo_domain.size(),
+                                           ctx->ehlo_domain.size(), ctx->ehlo_domain) == 0)) {
+                                ctx->is_trusted_server = true;
+                                LOG_SMTP_DETAIL_DEBUG("EHLO verified: PTR={} matches EHLO={}, trusted",
+                                                      h, ctx->ehlo_domain);
+                                break;
+                            }
                         }
                     }
                 }
@@ -1119,6 +1128,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         return;
     }
 
+    // 确保所有数据都已写入文件
     smtp_session->flush_body_and_wait();
 
     // ===== 入站验证 (DKIM/DMARC，SPF 已在 MAIL FROM 阶段完成) =====

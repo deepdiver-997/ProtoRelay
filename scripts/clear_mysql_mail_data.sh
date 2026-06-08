@@ -159,7 +159,7 @@ if [[ "$MODE" == "all_tables" ]]; then
 
   {
     echo "SET FOREIGN_KEY_CHECKS=0;"
-    mysql "${MYSQL_AUTH[@]}" -Nse "SELECT CONCAT('DROP TABLE IF EXISTS \\\`', table_name, '\\\`;') FROM information_schema.tables WHERE table_schema='${DB_NAME}';"
+    mysql "${MYSQL_AUTH[@]}" -Nse "SELECT CONCAT('DROP TABLE IF EXISTS \`', table_name, '\`;') FROM information_schema.tables WHERE table_schema='${DB_NAME}';"
     echo "SET FOREIGN_KEY_CHECKS=1;"
   } | mysql "${MYSQL_AUTH[@]}" "${DB_NAME}"
 
@@ -191,11 +191,21 @@ if [[ "$CONFIRM" != "YES" ]]; then
   exit 0
 fi
 
+# 拼接一条 SQL 语句执行，避免逐表执行导致的转义问题
+SQL_STATEMENT="SET FOREIGN_KEY_CHECKS=0;"
 for t in "${EXISTING_TABLES[@]}"; do
-  if ! mysql "${MYSQL_AUTH[@]}" "${DB_NAME}" -e "SET FOREIGN_KEY_CHECKS=0; TRUNCATE TABLE \\`${t}\\`; SET FOREIGN_KEY_CHECKS=1;"; then
-    echo "Warn: TRUNCATE failed for ${t}, fallback to DELETE"
-    mysql "${MYSQL_AUTH[@]}" "${DB_NAME}" -e "SET FOREIGN_KEY_CHECKS=0; DELETE FROM \\`${t}\\`; SET FOREIGN_KEY_CHECKS=1;"
-  fi
+  SQL_STATEMENT+=" TRUNCATE TABLE \`${t}\`;"
 done
+SQL_STATEMENT+=" SET FOREIGN_KEY_CHECKS=1;"
+
+if ! mysql "${MYSQL_AUTH[@]}" "${DB_NAME}" -e "$SQL_STATEMENT"; then
+  echo "Warn: TRUNCATE failed, fallback to DELETE"
+  SQL_STATEMENT="SET FOREIGN_KEY_CHECKS=0;"
+  for t in "${EXISTING_TABLES[@]}"; do
+    SQL_STATEMENT+=" DELETE FROM \`${t}\`;"
+  done
+  SQL_STATEMENT+=" SET FOREIGN_KEY_CHECKS=1;"
+  mysql "${MYSQL_AUTH[@]}" "${DB_NAME}" -e "$SQL_STATEMENT"
+fi
 
 echo "Done. Mail-related data has been cleared from ${DB_NAME}."

@@ -304,7 +304,11 @@ std::string TraditionalImapsFsm<ConnectionType>::build_envelope_string(
         if (user.empty()) user = "NIL";
         if (domain.empty()) domain = "NIL";
 
-        return "((" + name + " NIL " + quote_string(user) + " " + quote_string(domain) + "))";
+        // ENVELOPE address fields MUST be quoted strings per RFC 3501 nstring
+        auto force_quote = [](const std::string& s) -> std::string {
+            return "\"" + s + "\"";
+        };
+        return "((" + name + " NIL " + force_quote(user) + " " + force_quote(domain) + "))";
     };
 
     std::string out = "(";
@@ -390,6 +394,7 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     // NOT_AUTHENTICATED: stay on same state for most commands
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY}] = ImapState::NOT_AUTHENTICATED;
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN}] = ImapState::NOT_AUTHENTICATED; // may transition in handler
+    transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE}] = ImapState::NOT_AUTHENTICATED;
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP}] = ImapState::NOT_AUTHENTICATED;
     transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT}] = ImapState::LOGOUT;
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
@@ -452,6 +457,8 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
             [this](auto session, auto args) { handle_starttls(std::move(session), args); };
     state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::LOGIN] =
         [this](auto session, auto args) { handle_login(std::move(session), args); };
+    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::AUTHENTICATE] =
+        [this](auto session, auto args) { handle_authenticate(std::move(session), args); };
     state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::NOOP] =
         [this](auto session, auto args) { handle_noop(std::move(session), args); };
     state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::LOGOUT] =
@@ -700,6 +707,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
         username = args;
     }
 
+    // 自动补 @domain（兼容只传本地部分的客户端）
+    if (!username.empty() && username.find('@') == std::string::npos) {
+        auto config = std::atomic_load(&session->get_server()->m_config);
+        username += "@" + config->system_domain;
+        LOG_IMAP_DEBUG("Auto-domain applied: {} → {}", args, username);
+    }
+
     uint64_t user_id = 0;
     if (this->auth_user(session.get(), username, password, user_id)) {
         if (ctx) {
@@ -714,6 +728,33 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
     } else {
         LOG_IMAP_WARN("IMAP login failed: {}", username);
         send_tagged(std::move(session), tag, "NO", "LOGIN failed");
+    }
+}
+
+// ---------- AUTHENTICATE ----------
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
+    std::unique_ptr<SessionBase<ConnectionType>> session,
+    const std::string& args)
+{
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    std::string tag = ctx ? ctx->current_tag : "*";
+
+    // 解析机制名
+    std::string mechanism = args;
+    size_t space = mechanism.find(' ');
+    if (space != std::string::npos) {
+        mechanism = mechanism.substr(0, space);
+    }
+    std::transform(mechanism.begin(), mechanism.end(), mechanism.begin(), ::toupper);
+
+    if (mechanism == "LOGIN") {
+        // AUTHENTICATE LOGIN → 直接转发到 LOGIN 逻辑
+        // args 已经是 "LOGIN" 或 "LOGIN <base64>"
+        // 简化版：通知客户端用 LOGIN 命令
+        send_tagged(std::move(session), tag, "NO", "Use LOGIN command directly (AUTHENTICATE LOGIN not yet implemented)");
+    } else {
+        send_tagged(std::move(session), tag, "NO", "Unsupported authentication mechanism: " + mechanism);
     }
 }
 
@@ -825,7 +866,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     std::string response;
     response += "* " + std::to_string(count) + " EXISTS\r\n";
     response += "* " + std::to_string(count - unseen) + " RECENT\r\n"; // approximate
-    response += "* OK [UNSEEN " + std::to_string(unseen > 0 ? count - unseen + 1 : 1) + "]\r\n";
+    response += "* OK [UNSEEN " + std::to_string(unseen > 0 ? count - unseen + 1 : 0) + "]\r\n";
     response += "* OK [UIDVALIDITY " + std::to_string(ctx->uid_validity) + "]\r\n";
     response += "* OK [UIDNEXT " + std::to_string(uidnext) + "]\r\n";
     if (!ctx->read_only) {
@@ -884,7 +925,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
     std::string response;
     response += "* " + std::to_string(count) + " EXISTS\r\n";
     response += "* " + std::to_string(count - unseen) + " RECENT\r\n";
-    response += "* OK [UNSEEN " + std::to_string(unseen > 0 ? count - unseen + 1 : 1) + "]\r\n";
+    response += "* OK [UNSEEN " + std::to_string(unseen > 0 ? count - unseen + 1 : 0) + "]\r\n";
     response += "* OK [UIDVALIDITY " + std::to_string(ctx->uid_validity) + "]\r\n";
     response += "* OK [UIDNEXT " + std::to_string(uidnext) + "]\r\n";
     response += "* OK [READ-ONLY]\r\n";
@@ -1083,6 +1124,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         return;
     }
 
+    bool want_uid = attrs.find("UID") != std::string::npos;
     bool want_flags = attrs.find("FLAGS") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
@@ -1126,6 +1168,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         const auto& mail_info = mails[idx];
 
         response += "* " + std::to_string(seq) + " FETCH (";
+        if (want_uid) {
+            response += "UID " + std::to_string(mail_info.mail_id) + " ";
+        }
         if (want_flags) {
             std::string flags = build_flags_string(
                 mail_info.status,
@@ -1148,7 +1193,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             std::string to = mail_info.recipient;
             std::string date_str;
             {
-                // Generate envelope date from send_time
+                // Generate envelope date per RFC 3501: "DD-Mon-YYYY"
                 struct tm result;
                 memset(&result, 0, sizeof(result));
                 time_t t = mail_info.send_time;
@@ -1157,11 +1202,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
 #else
                 gmtime_r(&t, &result);
 #endif
+                static const char* months[] = {
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+                };
                 char buf[32];
-                snprintf(buf, sizeof(buf), "%s, %02d %s %04d %02d:%02d:%02d +0000",
-                         "Day", result.tm_mday, "Mon",
-                         result.tm_year + 1900,
-                         result.tm_hour, result.tm_min, result.tm_sec);
+                snprintf(buf, sizeof(buf), "%02d-%s-%04d",
+                         result.tm_mday, months[result.tm_mon],
+                         result.tm_year + 1900);
                 date_str = buf;
             }
             std::string envelope = build_envelope_string(

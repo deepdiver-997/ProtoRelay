@@ -454,50 +454,10 @@ if(USE_SSL)
     endif()
 endif()
 
-# 用户注册工具
-if(NOT BUILD_OBJECT_ONLY)
-    set(REGISTER_SRCS
-        ${COMMON_SRCS}
-        tools/register_user.cpp
-    )
-    add_executable(register_user ${REGISTER_SRCS})
-    set_target_properties(register_user PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-    )
-    target_include_directories(register_user PRIVATE "${CMAKE_SOURCE_DIR}/include")
-    target_include_directories(register_user PRIVATE "${CMAKE_BINARY_DIR}/generated")
-    if(spdlog_FOUND)
-        target_include_directories(register_user PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
-    endif()
-    target_include_directories(register_user PRIVATE "${CMAKE_SOURCE_DIR}/OuterLib/json")
-    target_include_directories(register_user PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
-    if(MYSQL_INCLUDE_DIRS)
-        target_include_directories(register_user PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
-    endif()
-    if(CARES_INCLUDE_DIRS)
-        target_include_directories(register_user PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
-    endif()
-    if(CARES_LIBRARY_DIRS)
-        target_link_directories(register_user PRIVATE ${CARES_LIBRARY_DIRS})
-    endif()
-    if(USE_SSL)
-        if(DEFINED OPENSSL_INCLUDE_DIRS AND OPENSSL_INCLUDE_DIRS)
-            target_include_directories(register_user PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIRS})
-        elseif(DEFINED OPENSSL_INCLUDE_DIR AND OPENSSL_INCLUDE_DIR)
-            target_include_directories(register_user PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIR})
-        endif()
-    endif()
-    target_compile_features(register_user PRIVATE cxx_std_17)
-    target_link_libraries(register_user PRIVATE ${LINK_LIBRARIES})
-    if(ENABLE_INBOUND_DEDUP_CHECK)
-        target_compile_definitions(register_user PRIVATE ENABLE_INBOUND_DEDUP_CHECK=1)
-    else()
-        target_compile_definitions(register_user PRIVATE ENABLE_INBOUND_DEDUP_CHECK=0)
-    endif()
-
     target_link_libraries(${SMTP_TARGET} PRIVATE ${LINK_LIBRARIES})
 
-    # ===== IMAP 独立服务器 =====
+# ===== IMAP 独立服务器 =====
+if(NOT BUILD_OBJECT_ONLY)
     set(IMAP_TEST_SRCS
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/imaps/imaps_server.cpp

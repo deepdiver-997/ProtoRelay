@@ -11,6 +11,7 @@
 namespace mail_system {
 namespace outbound {
 
+// 判断收件人是否属于外部域（需要 DNS 解析 + 外部 SMTP 投递）
 bool has_external_recipient(const mail& mail_data, const std::string& local_domain);
 
 std::vector<std::string> build_target_hosts(const OutboxRecord& record,

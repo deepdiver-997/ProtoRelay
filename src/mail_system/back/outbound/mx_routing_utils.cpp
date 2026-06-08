@@ -1,4 +1,5 @@
 #include "mail_system/back/outbound/mx_routing_utils.h"
+#include "mail_system/back/common/logger.h"
 
 #include <unordered_set>
 
@@ -31,6 +32,7 @@ bool has_external_recipient(const mail& mail_data, const std::string& local_doma
     for (const auto& recipient : mail_data.to) {
         const auto domain = extract_domain(recipient);
         if (!domain.empty() && domain != local_domain) {
+            LOG_OUTBOUND_DEBUG("Recipient {} is external (domain: {})", recipient, domain);
             return true;
         }
     }

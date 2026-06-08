@@ -100,6 +100,7 @@ private:
     void handle_init_connect(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_capability(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_login(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_authenticate(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_logout(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_select(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_examine(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);

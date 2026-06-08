@@ -77,7 +77,9 @@ std::string extract_domain_lower(const std::string& email) {
 int recipient_status_for_domain(const std::string& recipient,
                                 const std::string& local_domain) {
     const auto recipient_domain = extract_domain_lower(recipient);
-    const auto system_domain = extract_domain_lower(local_domain);
+    auto system_domain = local_domain;
+    std::transform(system_domain.begin(), system_domain.end(), system_domain.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     // 1=未读（本域），2=未送达（外域）
     return (!recipient_domain.empty() && !system_domain.empty() && recipient_domain == system_domain) ? 1 : 2;
 }
@@ -366,8 +368,11 @@ bool PersistentQueue::process_task() {
             }
 
             mail_data->persist_status = PersistStatus::SUCCESS;
-            if (!mail_data->deduplicated_inbound &&
-                outbound::has_external_recipient(*mail_data, local_domain_)) {
+            if (mail_data->deduplicated_inbound) {
+                // 重复入站邮件：清理文件，不存储
+                cleanup_mail_files(mail_data.get());
+            } else if (outbound::has_external_recipient(*mail_data, local_domain_)) {
+                // 有外部收件人：移交 outbound 客户端（由其负责清理）
                 if (can_hot_dispatch) {
                     std::vector<std::uint64_t> reserved_ids;
                     reserved_ids.reserve(reserved_records.size());
@@ -388,9 +393,8 @@ bool PersistentQueue::process_task() {
                 } else if (outbound_client_) {
                     outbound_client_->notify_outbox_ready();
                 }
-            } else {
-                cleanup_mail_files(mail_data.get());
             }
+            // 本地收件/入站邮件：保留 body 文件供 IMAP 读取，不清理
             LOG_PERSISTENT_QUEUE_INFO("Successfully processed mail ID {}", mail_id);
         } else {
             mail_data->persist_status = PersistStatus::FAILED;
@@ -432,10 +436,11 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, MySQLConnection* co
     }
 
     try {
-        std::string mail_sql = "INSERT INTO mails (id, subject, body_path) VALUES (" +
+        std::string mail_sql = "INSERT INTO mails (id, subject, body_path, send_time) VALUES (" +
                               std::to_string(mail_data->id) + ", '" +
                               conn->escape_string(mail_data->subject) + "', '" +
-                              conn->escape_string(mail_data->body_path) + "'" + ")";
+                              conn->escape_string(mail_data->body_path) + "', FROM_UNIXTIME(" +
+                              std::to_string(mail_data->send_time) + "))";
 
         if (!conn->execute(mail_sql)) {
             error = "Failed to insert mail metadata";
@@ -459,6 +464,33 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, MySQLConnection* co
             error = "Failed to insert mail recipients";
             LOG_PERSISTENT_QUEUE_ERROR("Failed to insert mail recipients with sql: {}", recipient_sql);
             return false;
+        }
+
+        // 对本域收件人：把邮件关联到用户的收件箱（mail_mailbox 表）
+        // IMAP SELECT INBOX 依赖这个表来列出邮件
+        for (size_t i = 0; i < mail_data->to.size(); ++i) {
+            const std::string& recipient = mail_data->to[i];
+            const auto domain = extract_domain_lower(recipient);
+            auto system_domain = local_domain_;
+            std::transform(system_domain.begin(), system_domain.end(), system_domain.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            if (domain.empty() || domain != system_domain) {
+                continue;  // 外域收件人，不需要 mail_mailbox
+            }
+
+            const auto escaped_recipient = conn->escape_string(recipient);
+            std::string mailbox_sql =
+                "INSERT INTO mail_mailbox (mail_id, mailbox_id, user_id) "
+                "SELECT " + std::to_string(mail_data->id) + ", mb.id, u.id "
+                "FROM users u "
+                "JOIN mailboxes mb ON mb.user_id = u.id AND mb.box_type = 1 "
+                "WHERE u.mail_address = '" + escaped_recipient + "'";
+
+            if (!conn->execute(mailbox_sql)) {
+                LOG_PERSISTENT_QUEUE_WARN("Failed to insert mail_mailbox for mail_id={} recipient={}",
+                                          mail_data->id, recipient);
+                // 不影响整体事务 —— 外发仍然需要正常出队
+            }
         }
 
         LOG_PERSISTENT_QUEUE_INFO("Successfully inserted metadata for mail ID {} with {} recipients",
@@ -751,7 +783,9 @@ bool PersistentQueue::enqueue_outbox_tasks(mail* mail_data,
 
     for (const auto& recipient : mail_data->to) {
         const auto recipient_domain = extract_domain_lower(recipient);
-        const auto local_domain = extract_domain_lower(local_domain_);
+        auto local_domain = local_domain_;
+        std::transform(local_domain.begin(), local_domain.end(), local_domain.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
         if (recipient_domain.empty() || recipient_domain == local_domain) {
             continue;
         }
