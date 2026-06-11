@@ -56,7 +56,7 @@ private:
     std::shared_ptr<DBPool> db_pool_;
 
     static std::string extract_domain(const std::string& email);
-    static std::string escape_or_empty(const std::shared_ptr<IDBConnection>& conn,
+    static std::string escape_or_empty(IDBConnection* conn,
                                        const std::string& value);
 };
 

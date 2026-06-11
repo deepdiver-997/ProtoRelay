@@ -14,35 +14,80 @@
 
 namespace mail_system {
 
+class ScopedConnection;  // 前向声明
+
 // 数据库连接池抽象类
+// 外部调用者只能通过 acquire_connection() 获取 RAII 连接，不可能泄漏
 class DBPool {
 public:
     virtual ~DBPool() = default;
 
-    // 获取数据库连接
-    virtual std::shared_ptr<IDBConnection> get_connection() = 0;
+    // 唯一公开的获取连接方式 —— 返回 RAII 包装，析构自动归还
+    ScopedConnection acquire_connection();
 
-    // 释放数据库连接
-    virtual void release_connection(std::shared_ptr<IDBConnection> connection) = 0;
-
-    // 获取连接池大小
+    // 连接池运行状况（只读）
     virtual size_t get_pool_size() const = 0;
-
-    // 获取当前可用连接数
     virtual size_t get_available_connections() const = 0;
-
-    // 关闭连接池
+    virtual size_t get_max_pool_size() const = 0;
+    virtual size_t get_active_connections() const = 0;
     virtual void close() = 0;
 
 protected:
     DBPool() = default;
 
-    // 初始化连接池
+    // ---- 以下仅子类 + ScopedConnection(friend) 可访问 ----
+    virtual std::shared_ptr<IDBConnection> get_connection() = 0;
+    virtual void release_connection(std::shared_ptr<IDBConnection> connection) = 0;
     virtual void initialize_pool() = 0;
-
-    // 创建新的连接
     virtual std::shared_ptr<IDBConnection> create_connection() = 0;
+
+    friend class ScopedConnection;
+    friend class DistributedMySQLPool;  // 分布式池需跨节点访问子池
 };
+
+// RAII 数据库连接 —— 只能由 DBPool::acquire_connection() 创建
+// 析构时自动归还连接，彻底杜绝连接泄漏
+class ScopedConnection {
+public:
+    ~ScopedConnection() {
+        if (pool_ && connection_) {
+            pool_->release_connection(connection_);
+        }
+    }
+
+    ScopedConnection(const ScopedConnection&) = delete;
+    ScopedConnection& operator=(const ScopedConnection&) = delete;
+    ScopedConnection(ScopedConnection&&) = default;
+    ScopedConnection& operator=(ScopedConnection&&) = default;
+
+    bool is_valid() const { return connection_ && connection_->is_connected(); }
+
+    // 通用 IDBConnection 接口（query/execute 等）
+    IDBConnection* operator->() const { return connection_.get(); }
+
+    // MySQL 特有方法（escape_string 等）—— 调用者显式 cast
+    template<typename T>
+    T* as() const { return dynamic_cast<T*>(connection_.get()); }
+
+private:
+    friend class DBPool;
+
+    // 仅 DBPool 可构造
+    explicit ScopedConnection(DBPool* pool)
+        : pool_(pool) {
+        if (pool_) {
+            connection_ = pool_->get_connection();
+        }
+    }
+
+    DBPool* pool_ = nullptr;
+    std::shared_ptr<IDBConnection> connection_;
+};
+
+// DBPool::acquire_connection 必须在 ScopedConnection 完整定义之后
+inline ScopedConnection DBPool::acquire_connection() {
+    return ScopedConnection(this);
+}
 
 // 数据库连接池配置
 struct DBPoolConfig {

@@ -1508,13 +1508,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
     // 解码 IMAP-UTF-7 → UTF-8（客户端发来的名称可能是编码后的）
     mailbox_name = this->decode_mailbox_name(mailbox_name);
 
-    auto connection = this->m_dbPool->get_connection();
-    if (!connection || !connection->is_connected()) {
+    auto conn = this->m_dbPool->acquire_connection();
+    if (!conn.is_valid()) {
         send_tagged(std::move(session), tag, "NO", "Server error");
         return;
     }
 
-    if (connection->execute(
+    if (conn->execute(
             "INSERT INTO mailboxes (user_id, name, is_system, box_type) VALUES (?, ?, 0, 0)",
             {std::to_string(ctx->user_id), mailbox_name})) {
         send_tagged(std::move(session), tag, "OK", "CREATE completed");
@@ -1551,14 +1551,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         return;
     }
 
-    auto connection = this->m_dbPool->get_connection();
-    if (!connection || !connection->is_connected()) {
+    auto conn = this->m_dbPool->acquire_connection();
+    if (!conn.is_valid()) {
         send_tagged(std::move(session), tag, "NO", "Server error");
         return;
     }
 
     // Check if it's a system mailbox
-    auto result = connection->query(
+    auto result = conn->query(
         "SELECT is_system FROM mailboxes WHERE id = ?",
         {std::to_string(mailbox_id)});
     if (result && result->get_row_count() > 0) {
@@ -1568,9 +1568,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         }
     }
 
-    if (connection->execute("DELETE FROM mail_mailbox WHERE mailbox_id = ?",
+    if (conn->execute("DELETE FROM mail_mailbox WHERE mailbox_id = ?",
                             {std::to_string(mailbox_id)}) &&
-        connection->execute("DELETE FROM mailboxes WHERE id = ?",
+        conn->execute("DELETE FROM mailboxes WHERE id = ?",
                             {std::to_string(mailbox_id)})) {
         send_tagged(std::move(session), tag, "OK", "DELETE completed");
     } else {
@@ -1624,13 +1624,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
     // 新名称也要解码（客户端发来的可能是 IMAP-UTF-7 编码）
     new_name = this->decode_mailbox_name(new_name);
 
-    auto connection = this->m_dbPool->get_connection();
-    if (!connection || !connection->is_connected()) {
+    auto conn = this->m_dbPool->acquire_connection();
+    if (!conn.is_valid()) {
         send_tagged(std::move(session), tag, "NO", "Server error");
         return;
     }
 
-    if (connection->execute("UPDATE mailboxes SET name = ? WHERE id = ?",
+    if (conn->execute("UPDATE mailboxes SET name = ? WHERE id = ?",
                             {new_name, std::to_string(mailbox_id)})) {
         send_tagged(std::move(session), tag, "OK", "RENAME completed");
     } else {
@@ -1934,8 +1934,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     std::string user_email = this->get_user_email(ctx->user_id);
     if (user_email.empty()) user_email = ctx->username;
 
-    auto conn = this->m_dbPool->get_connection();
-    if (!conn || !conn->is_connected()) {
+    auto db_conn = this->m_dbPool->acquire_connection();
+    if (!db_conn.is_valid()) {
         send_tagged(std::move(session), tag, "NO", "Server error");
         return;
     }
@@ -1943,13 +1943,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     int copied = 0;
     for (uint64_t mid : mail_ids) {
         // 检查是否已在目标邮箱
-        auto existing = conn->query(
+        auto existing = db_conn->query(
             "SELECT id FROM mail_mailbox WHERE mail_id = ? AND mailbox_id = ? AND user_id = ?",
             {std::to_string(mid), std::to_string(target_id), std::to_string(ctx->user_id)});
         if (existing && existing->get_row_count() > 0) continue; // 已存在
 
         int64_t mmid = algorithm::get_snowflake_generator().next_id();
-        if (conn->execute(
+        if (db_conn->execute(
                 "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
                 "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())",
                 {std::to_string(mmid), std::to_string(mid), std::to_string(target_id),

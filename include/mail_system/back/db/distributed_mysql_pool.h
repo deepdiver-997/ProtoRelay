@@ -14,13 +14,17 @@ public:
     DistributedMySQLPool(const DBPoolConfig& config, std::shared_ptr<DBService> db_service);
     ~DistributedMySQLPool() override;
 
-    std::shared_ptr<IDBConnection> get_connection() override;
-    void release_connection(std::shared_ptr<IDBConnection> connection) override;
+    // DBPool 公开接口
     size_t get_pool_size() const override;
     size_t get_available_connections() const override;
+    size_t get_max_pool_size() const override;
+    size_t get_active_connections() const override;
     void close() override;
 
 protected:
+    // DBPool protected 接口 —— 仅友元 ScopedConnection + 子类可访问
+    std::shared_ptr<IDBConnection> get_connection() override;
+    void release_connection(std::shared_ptr<IDBConnection> connection) override;
     void initialize_pool() override;
     std::shared_ptr<IDBConnection> create_connection() override;
 

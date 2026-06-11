@@ -240,14 +240,14 @@ public:
             LOG_AUTH_ERROR("Session is null in auth_user");
             return false;
         }
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             LOG_AUTH_ERROR("Failed to get database connection");
             return false;
         }
 
         std::string sql = "SELECT id, password, status FROM users WHERE mail_address = ?";
-        auto result = connection->query(sql, {mail_address});
+        auto result = conn->query(sql, {mail_address});
         if (!result || result->get_row_count() == 0) {
             LOG_AUTH_WARN("User not found: {}", mail_address);
             return false;
@@ -273,7 +273,7 @@ public:
 
         if (ok) {
             out_user_id = std::stoull(result->get_value(0, "id"));
-            connection->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
+            conn->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
                                {mail_address});
         }
         return ok;
@@ -282,13 +282,13 @@ public:
     // 获取用户的邮箱列表
     bool get_mailboxes(uint64_t user_id,
                        std::vector<std::tuple<uint64_t, std::string, int>>& mailboxes) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             LOG_DATABASE_ERROR("Failed to get DB connection in get_mailboxes");
             return false;
         }
 
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? ORDER BY id",
             {std::to_string(user_id)});
         if (!result) {
@@ -306,8 +306,8 @@ public:
 
     // 根据邮箱名称查找邮箱 ID
     uint64_t find_mailbox_id(uint64_t user_id, const std::string& mailbox_name) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return 0;
         }
 
@@ -319,7 +319,7 @@ public:
         }
 
         // Try direct name match first (handles Chinese names like "收件箱")
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? AND name = ?",
             {std::to_string(user_id), name_utf8});
         if (result && result->get_row_count() > 0) {
@@ -330,7 +330,7 @@ public:
         std::string upper = name_utf8;
         std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
         if (upper == "INBOX") {
-            result = connection->query(
+            result = conn->query(
                 "SELECT id FROM mailboxes WHERE user_id = ? AND box_type = 1",
                 {std::to_string(user_id)});
             if (result && result->get_row_count() > 0) {
@@ -357,8 +357,8 @@ public:
 
     bool get_mailbox_mails(uint64_t mailbox_id, uint64_t user_id,
                            std::vector<MailboxMailInfo>& mails) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return false;
         }
 
@@ -374,7 +374,7 @@ public:
             "WHERE mm.mailbox_id = ? AND mm.user_id = ? "
             "ORDER BY m.send_time DESC";
 
-        auto result = connection->query(sql, {
+        auto result = conn->query(sql, {
             std::to_string(user_id),
             std::to_string(mailbox_id),
             std::to_string(user_id)
@@ -404,12 +404,12 @@ public:
     // 获取单封邮件信息
     bool get_mail_info(uint64_t mail_id,
                        MailboxMailInfo& info) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return false;
         }
 
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time FROM mails WHERE id = ?",
             {std::to_string(mail_id)});
 
@@ -426,11 +426,11 @@ public:
 
     // 获取发件人
     std::string get_mail_sender(uint64_t mail_id) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return "";
         }
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT sender FROM mail_recipients WHERE mail_id = ? LIMIT 1",
             {std::to_string(mail_id)});
         if (result && result->get_row_count() > 0) {
@@ -442,11 +442,11 @@ public:
     // 获取收件人列表
     std::vector<std::string> get_mail_recipients(uint64_t mail_id) {
         std::vector<std::string> recipients;
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return recipients;
         }
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT recipient FROM mail_recipients WHERE mail_id = ?",
             {std::to_string(mail_id)});
         if (result) {
@@ -459,11 +459,11 @@ public:
 
     // 获取用户邮箱地址
     std::string get_user_email(uint64_t user_id) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return "";
         }
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT mail_address FROM users WHERE id = ?",
             {std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
@@ -474,34 +474,34 @@ public:
 
     // 更新邮件已读/未读状态
     bool update_mail_seen(uint64_t mail_id, const std::string& recipient, bool seen) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return false;
         }
         int new_status = seen ? 0 : 1; // 0=read, 1=unread
-        return connection->execute(
+        return conn->execute(
             "UPDATE mail_recipients SET status = ? WHERE mail_id = ? AND recipient = ?",
             {std::to_string(new_status), std::to_string(mail_id), recipient});
     }
 
     // 更新已删除标记
     bool update_mail_deleted(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool deleted) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return false;
         }
-        return connection->execute(
+        return conn->execute(
             "UPDATE mail_mailbox SET is_deleted = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
             {deleted ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
     }
 
     // 更新标星标记
     bool update_mail_flagged(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool flagged) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return false;
         }
-        return connection->execute(
+        return conn->execute(
             "UPDATE mail_mailbox SET is_starred = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
             {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
     }
@@ -538,8 +538,8 @@ public:
         }
 
         // 插入 mails 表
-        auto conn = m_dbPool->get_connection();
-        if (!conn || !conn->is_connected()) { error = "DB connection failed"; return 0; }
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) { error = "DB connection failed"; return 0; }
         auto ts = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -558,8 +558,8 @@ public:
     bool link_mail_to_mailbox(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id,
                               const std::string& sender, const std::string& recipient,
                               int status) {
-        auto conn = m_dbPool->get_connection();
-        if (!conn || !conn->is_connected()) return false;
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) return false;
 
         int64_t rid = algorithm::get_snowflake_generator().next_id();
         bool ok = conn->execute(
@@ -712,11 +712,11 @@ public:
 
     // 获取邮箱的总邮件数
     size_t get_mailbox_count(uint64_t mailbox_id, uint64_t user_id) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return 0;
         }
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT COUNT(*) as cnt FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?",
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
@@ -727,12 +727,12 @@ public:
 
     // 获取邮箱的未读邮件数
     size_t get_mailbox_unseen_count(uint64_t mailbox_id, uint64_t user_id) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return 0;
         }
         // 通过 mail_recipients.status=1 (unread) 统计
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT COUNT(*) as cnt FROM mail_mailbox mm "
             "JOIN mail_recipients mr ON mm.mail_id = mr.mail_id "
             "JOIN users u ON u.id = ? AND mr.recipient = u.mail_address "
@@ -746,11 +746,11 @@ public:
 
     // 获取邮箱的最近邮件 UID（这里直接用 mail_id 充当 UID）
     uint64_t get_mailbox_uidnext(uint64_t mailbox_id, uint64_t user_id) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return 1;
         }
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT COALESCE(MAX(mm.mail_id), 0) + 1 as uidnext "
             "FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?",
             {std::to_string(mailbox_id), std::to_string(user_id)});
@@ -762,12 +762,12 @@ public:
 
     // EXPUNGE：真正从邮箱删除打了 \Deleted 标记的邮件
     void expunge_mailbox(uint64_t mailbox_id, uint64_t user_id) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return;
         }
         // 删除 mail_mailbox 中 is_deleted=1 且在此邮箱的记录
-        connection->execute(
+        conn->execute(
             "DELETE FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1",
             {std::to_string(mailbox_id), std::to_string(user_id)});
     }
@@ -775,11 +775,11 @@ public:
     // 获取 EXPUNGE 序列（返回被删邮件的 mail_id 列表）
     std::vector<uint64_t> get_expunged_ids(uint64_t mailbox_id, uint64_t user_id) {
         std::vector<uint64_t> ids;
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             return ids;
         }
-        auto result = connection->query(
+        auto result = conn->query(
             "SELECT mail_id FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1",
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result) {

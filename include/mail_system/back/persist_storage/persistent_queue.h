@@ -70,19 +70,13 @@ public:
 
     ~PersistentQueue();
 
+    // ---- 公开接口 ----
     SubmitOwnedMailResult submit_owned_mail(std::unique_ptr<mail> mail_data);
-    
-    // 提交多个邮件到持久化队列
     bool submit_mails(std::vector<mail*>& mail_list);
-
     void delete_task(mail* mail_data);
-
     void delete_multi_tasks(std::vector<mail*>& mail_list);
 
-    // 获取队列大小
     size_t queue_size() const;
-
-    // 获取当前在途邮件数（用于负载门控）
     size_t inflight_count() const {
         return inflight_mail_count_.load(std::memory_order_relaxed);
     }
@@ -93,76 +87,57 @@ public:
     void set_storage_provider(std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider);
     void set_pressure_config(PersistentQueuePressureConfig config);
 
-    // 关闭队列，等待所有任务完成
     void shutdown();
-
-    // 检查是否已关闭
     bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
 
-// private:
-    // 处理单个持久化任务
+private:
+    // ---- 工作线程 ----
+    void worker_loop();
     bool process_task();
 
-    // 批量插入邮件元数据到数据库（一次连接，一条SQL）
-    bool batch_insert_metadata(mail* mail_data, std::string& error);
-    bool batch_insert_metadata(mail* mail_data, MySQLConnection* conn, std::string& error);
-
-#if ENABLE_INBOUND_DEDUP_CHECK
-    bool is_probable_duplicate_mail(mail* mail_data, MySQLConnection* conn);
-#endif
-
-    bool is_duplicate_by_source_message_id(mail* mail_data, MySQLConnection* conn);
-
-    bool batch_delete_metadata(mail* mail_data, std::string& error);
-
-    // 批量插入附件元数据到数据库
-    bool batch_insert_attachments(mail* mail_data, std::string& error);
-    bool batch_insert_attachments(mail* mail_data, MySQLConnection* conn, std::string& error);
-
-    // 
-    bool batch_delete_attachments(mail* mail_data, std::string& error);
-
-    // 保存邮件正文到文件
-    // bool save_mail_body(mail* mail_data, const std::string& file_path, std::string& error);
-
-    // 保存附件到文件
-    // bool save_attachments(mail* mail_data, std::string& error);
-
-    // 主工作循环
-    void worker_loop();
-
-    bool enqueue_outbox_tasks(const mail& mail_data);
-    bool enqueue_outbox_tasks(mail* mail_data,
-                              MySQLConnection* conn,
-                              const std::string& reserve_owner,
-                              int reserve_lease_seconds,
-                              std::vector<outbound::OutboxRecord>* reserved_records,
-                              std::string& error);
+    // ---- 持久化内部方法（接受裸 MySQLConnection*，由入口统一管理连接） ----
     bool persist_mail_transactional(mail* mail_data,
                                     const std::string& reserve_owner,
                                     int reserve_lease_seconds,
                                     std::vector<outbound::OutboxRecord>* reserved_records,
                                     std::string& error);
+    bool batch_insert_metadata(mail* mail_data, class MySQLConnection* conn, std::string& error);
+    bool batch_insert_attachments(mail* mail_data, class MySQLConnection* conn, std::string& error);
+    bool enqueue_outbox_tasks(mail* mail_data,
+                              class MySQLConnection* conn,
+                              const std::string& reserve_owner,
+                              int reserve_lease_seconds,
+                              std::vector<outbound::OutboxRecord>* reserved_records,
+                              std::string& error);
+#if ENABLE_INBOUND_DEDUP_CHECK
+    bool is_probable_duplicate_mail(mail* mail_data, class MySQLConnection* conn);
+#endif
+    bool is_duplicate_by_source_message_id(mail* mail_data, class MySQLConnection* conn);
+
+    // ---- 清理 ----
     void cleanup_mail_files(mail* mail_data);
     void cleanup_failed_mail(mail* mail_data);
+
+    // ---- 背压检查 ----
     bool should_reject_submission(const mail& mail_data, std::string& reason);
     bool is_db_under_pressure(std::string& reason) const;
     bool is_memory_under_pressure(std::string& reason) const;
 
+    // ---- 成员变量 ----
     std::shared_ptr<DBPool> db_pool_;
     std::shared_ptr<ThreadPoolBase> worker_pool_;
     std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider_;
     std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client_;
     std::string local_domain_{"example.com"};
     PersistentQueuePressureConfig pressure_config_{};
-    
+
     std::deque<std::pair<std::unique_ptr<mail>, PersistSubmissionTicket>> task_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::atomic<size_t> queued_task_count_{0};
     std::atomic<size_t> inflight_mail_count_{0};
     std::atomic<size_t> batch_pop_size_{16};
-    
+
     std::atomic<bool> shutdown_;
     std::thread worker_thread_;
 };

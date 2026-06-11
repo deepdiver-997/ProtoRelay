@@ -22,7 +22,7 @@ bool is_deadlock_error(const std::string& error_message) {
            error_message.find("ERROR 1213") != std::string::npos;
 }
 
-bool execute_with_deadlock_retry(const std::shared_ptr<IDBConnection>& conn,
+bool execute_with_deadlock_retry(IDBConnection* conn,
                                  const std::string& sql,
                                  const char* operation_name,
                                  std::uint64_t outbox_id) {
@@ -66,14 +66,9 @@ bool OutboxRepository::enqueue_from_mail(const mail& mail_data,
         return false;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        LOG_OUTBOUND_ERROR("OutboxRepository: db_pool is not MySQLPool");
-        return false;
-    }
+    auto connection = db_pool_->acquire_connection();
 
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         LOG_OUTBOUND_ERROR("OutboxRepository: failed to get DB connection");
         return false;
@@ -127,13 +122,9 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(const std::string& worke
         return claimed;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return claimed;
-    }
+    auto connection = db_pool_->acquire_connection();
 
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return claimed;
     }
@@ -205,13 +196,9 @@ std::unique_ptr<mail> OutboxRepository::load_mail(std::uint64_t mail_id) {
         return nullptr;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return nullptr;
-    }
+    auto connection = db_pool_->acquire_connection();
 
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return nullptr;
     }
@@ -304,13 +291,9 @@ bool OutboxRepository::release_local_reservations(const std::vector<std::uint64_
         return true;
     }
 
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return false;
-    }
+    auto connection = db_pool_->acquire_connection();
 
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return false;
     }
@@ -337,12 +320,9 @@ bool OutboxRepository::mark_sent(std::uint64_t outbox_id, const std::string& smt
     if (!db_pool_) {
         return false;
     }
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return false;
-    }
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto connection = db_pool_->acquire_connection();
+
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return false;
     }
@@ -361,12 +341,9 @@ bool OutboxRepository::mark_retry(std::uint64_t outbox_id,
     if (!db_pool_) {
         return false;
     }
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return false;
-    }
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto connection = db_pool_->acquire_connection();
+
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return false;
     }
@@ -398,12 +375,9 @@ bool OutboxRepository::mark_dead(std::uint64_t outbox_id, const std::string& err
     if (!db_pool_) {
         return false;
     }
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return false;
-    }
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto connection = db_pool_->acquire_connection();
+
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return false;
     }
@@ -420,12 +394,9 @@ bool OutboxRepository::requeue_expired_leases() {
     if (!db_pool_) {
         return false;
     }
-    auto mysql_pool = std::dynamic_pointer_cast<MySQLPool>(db_pool_);
-    if (!mysql_pool) {
-        return false;
-    }
-    auto raii_conn = mysql_pool->get_raii_connection();
-    auto conn = raii_conn.get();
+    auto connection = db_pool_->acquire_connection();
+
+    auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) {
         return false;
     }
@@ -447,7 +418,7 @@ std::string OutboxRepository::extract_domain(const std::string& email) {
     return email.substr(at_pos + 1);
 }
 
-std::string OutboxRepository::escape_or_empty(const std::shared_ptr<IDBConnection>& conn,
+std::string OutboxRepository::escape_or_empty(IDBConnection* conn,
                                               const std::string& value) {
     if (!conn) {
         return value;

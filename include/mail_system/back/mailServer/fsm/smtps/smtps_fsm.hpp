@@ -237,8 +237,8 @@ public:
             LOG_AUTH_ERROR("Session is null in auth_user");
             return false;
         }
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             LOG_AUTH_ERROR("Failed to get database connection in auth_user");
             return false;
         }
@@ -247,7 +247,7 @@ public:
         std::string sql = "SELECT password, status FROM users "
                          "WHERE mail_address = ?";
         LOG_AUTH_DEBUG("SQL: {}  param=[{}]", sql, mail_address);
-        auto result = connection->query(sql, {mail_address});
+        auto result = conn->query(sql, {mail_address});
         if (!result) {
             LOG_AUTH_WARN("Query returned null result for: {}", mail_address);
             return false;
@@ -283,8 +283,8 @@ public:
         }
 
         if (ok) {
-            connection->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
-                               {mail_address});
+            conn->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
+                          {mail_address});
         }
         return ok;
     }
@@ -299,8 +299,8 @@ public:
             return;
         }
 
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             LOG_AUTH_ERROR("Failed to get database connection in get_mail_data");
             return;
         }
@@ -310,7 +310,7 @@ public:
 
         // 使用参数化查询
         std::string sql = "SELECT subject, body FROM mails WHERE sender = ? ORDER BY send_time DESC LIMIT 1";
-        auto result = connection->query(sql, {sender});
+        auto result = conn->query(sql, {sender});
         if (result && result->get_row_count() > 0) {
             std::string subject = result->get_value(0, "subject");
             std::string body = result->get_value(0, "body");
@@ -345,13 +345,13 @@ public:
 
 
         auto task = [this, file_path_prefix, mail_data]() -> bool {
-            auto connection = this->m_dbPool->get_connection();
-            if (!connection || !connection->is_connected()) {
+            auto conn = this->m_dbPool->acquire_connection();
+            if (!conn.is_valid()) {
                 LOG_DATABASE_ERROR("Failed to get database connection in async task");
                 return false;
             }
 
-            auto mysql_connection = std::dynamic_pointer_cast<MySQLConnection>(connection);
+            auto mysql_connection = conn.template as<MySQLConnection>();
 
             bool success = true;
 
@@ -423,13 +423,13 @@ public:
         }
 
         auto task = [this, att, mail_id]() -> bool {
-            auto connection = this->m_dbPool->get_connection();
-            if (!connection || !connection->is_connected()) {
+            auto conn = this->m_dbPool->acquire_connection();
+            if (!conn.is_valid()) {
                 LOG_DATABASE_ERROR("Failed to get database connection in save_attachment_metadata_async");
                 return false;
             }
 
-            auto mysql_connection = std::dynamic_pointer_cast<MySQLConnection>(connection);
+            auto mysql_connection = conn.template as<MySQLConnection>();
             if (!mysql_connection) {
                 LOG_DATABASE_ERROR("Failed to cast to MySQLConnection");
                 return false;
@@ -455,8 +455,8 @@ public:
 
     // 根据文件路径删除邮件元数据 假定数据库操作一定成功
     void remove_metadata_by_file_path(const std::vector<std::string>& file_paths) {
-        auto connection = m_dbPool->get_connection();
-        if (!connection || !connection->is_connected()) {
+        auto conn = m_dbPool->acquire_connection();
+        if (!conn.is_valid()) {
             LOG_DATABASE_ERROR("Failed to get database connection in remove_metadata_by_file_path");
             return;
         }
@@ -464,7 +464,7 @@ public:
         // 注意：数据库中 body_path 字段存储的是文件路径
         std::string sql = "DELETE FROM mails WHERE body_path = ?";
         for (const auto& file_path : file_paths) {
-            if (!connection->execute(sql, {file_path})) {
+            if (!conn->execute(sql, {file_path})) {
                 LOG_DATABASE_ERROR("Failed to delete mail metadata for file path: {}", file_path);
             }
         }

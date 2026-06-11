@@ -172,14 +172,17 @@ void MySQLPool::initialize_pool() {
         }
     }
 
-    // 执行SQL脚本
-    try {
-        execute_sql_script(m_config.initialize_script);
-        reconnect_pool_connections();
-    } catch (const std::exception& e) {
-        LOG_DATABASE_ERROR("Failed to execute SQL script: {}", e.what());
-        close();
-        LOG_DATABASE_ERROR("Database pool closed due to initialization failure.");
+    // 执行SQL脚本（仅当配置了脚本路径时）
+    if (!m_config.initialize_script.empty()) {
+        try {
+            execute_sql_script(m_config.initialize_script);
+            reconnect_pool_connections();
+        } catch (const std::exception& e) {
+            LOG_DATABASE_ERROR("Failed to execute SQL script: {}", e.what());
+            close();
+            LOG_DATABASE_ERROR("Database pool closed due to initialization failure.");
+            return;
+        }
     }
 }
 
@@ -336,6 +339,18 @@ size_t MySQLPool::get_pool_size() const {
 size_t MySQLPool::get_available_connections() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_availableConnections.size();
+}
+
+size_t MySQLPool::get_max_pool_size() const {
+    return m_config.max_pool_size;
+}
+
+size_t MySQLPool::get_active_connections() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    // 活跃连接 = 总连接数 - 可用连接数
+    size_t total = m_connections.size();
+    size_t avail = m_availableConnections.size();
+    return total > avail ? total - avail : 0;
 }
 
 void MySQLPool::close() {

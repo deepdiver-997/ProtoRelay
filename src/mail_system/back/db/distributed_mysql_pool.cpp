@@ -157,6 +157,28 @@ size_t DistributedMySQLPool::get_available_connections() const {
     return total;
 }
 
+size_t DistributedMySQLPool::get_max_pool_size() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    size_t total = 0;
+    for (const auto& node : m_nodes) {
+        if (node && node->pool) {
+            total += node->pool->get_max_pool_size();
+        }
+    }
+    return total;
+}
+
+size_t DistributedMySQLPool::get_active_connections() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    size_t total = 0;
+    for (const auto& node : m_nodes) {
+        if (node && node->pool) {
+            total += node->pool->get_active_connections();
+        }
+    }
+    return total;
+}
+
 void DistributedMySQLPool::close() {
     std::lock_guard<std::mutex> lock(m_mutex);
 

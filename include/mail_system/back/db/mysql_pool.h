@@ -16,14 +16,13 @@ public:
     MySQLPool(const DBPoolConfig& config, std::shared_ptr<DBService> db_service);
     ~MySQLPool() override;
 
-    // DBPool接口实现
-    std::shared_ptr<IDBConnection> get_connection() override;
-    void release_connection(std::shared_ptr<IDBConnection> connection) override;
+    // DBPool 公开接口
     size_t get_pool_size() const override;
     size_t get_available_connections() const override;
+    size_t get_max_pool_size() const override;
+    size_t get_active_connections() const override;
     void close() override;
 
-// protected:
     // 连接包装类，用于跟踪连接的使用情况
     struct ConnectionWrapper {
         std::shared_ptr<IDBConnection> connection;
@@ -36,62 +35,10 @@ public:
               in_use(false) {}
     };
 
-    // RAII 连接包装类，自动释放连接回连接池
-    class RAIIConnection {
-    private:
-        std::shared_ptr<IDBConnection> connection_;
-        MySQLPool* pool_;
-
-    public:
-        RAIIConnection(std::shared_ptr<IDBConnection> conn, MySQLPool* pool)
-            : connection_(conn), pool_(pool) {}
-
-        // 禁止拷贝
-        RAIIConnection(const RAIIConnection&) = delete;
-        RAIIConnection& operator=(const RAIIConnection&) = delete;
-
-        // 允许移动
-        RAIIConnection(RAIIConnection&& other) noexcept
-            : connection_(std::move(other.connection_)), pool_(other.pool_) {
-            other.pool_ = nullptr;
-        }
-
-        RAIIConnection& operator=(RAIIConnection&& other) noexcept {
-            if (this != &other) {
-                release();
-                connection_ = std::move(other.connection_);
-                pool_ = other.pool_;
-                other.pool_ = nullptr;
-            }
-            return *this;
-        }
-
-        ~RAIIConnection() {
-            release();
-        }
-
-        // 获取原始连接
-        std::shared_ptr<IDBConnection> get() const { return connection_; }
-
-        // 显式释放连接
-        void release() {
-            if (connection_ && pool_) {
-                pool_->release_connection(connection_);
-                connection_.reset();
-                pool_ = nullptr;
-            }
-        }
-
-        // 智能指针操作符
-        std::shared_ptr<IDBConnection> operator->() const { return connection_; }
-        explicit operator bool() const { return connection_ != nullptr; }
-    };
-
-    // 获取 RAII 连接，自动管理生命周期
-    RAIIConnection get_raii_connection() {
-        return RAIIConnection(get_connection(), this);
-    }
-
+protected:
+    // DBPool protected 接口 —— 仅友元 ScopedConnection + 子类可访问
+    std::shared_ptr<IDBConnection> get_connection() override;
+    void release_connection(std::shared_ptr<IDBConnection> connection) override;
     void initialize_pool() override;
     std::shared_ptr<IDBConnection> create_connection() override;
 
