@@ -36,6 +36,11 @@ public:
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<SmtpsFsm<ConnectionType>> fsm);
 
+    ~SmtpsSession() {
+        // 同步 FSM 中的认证状态到基类，供 SessionBase::close() 上报入侵检测
+        this->session_authenticated_ = context_.is_authenticated;
+    }
+
     static void start(std::unique_ptr<SmtpsSession> self);
     static void start_after_starttls(std::unique_ptr<SmtpsSession> self);
 

@@ -17,13 +17,6 @@ Current implementation status:
 - Outbound (SMTP): queue-driven delivery worker with retry/backoff and lease-style claiming.
 - Operations: service-manager-first deployment (systemd/launchd), configurable log sinks.
 
-This document reflects the current state of the repository and replaces older V7-era descriptions.
-- Persistence: local filesystem, distributed filesystem roots, optional WebHDFS provider.
-- Outbound: queue-driven delivery worker with retry/backoff and lease-style claiming.
-- Operations: service-manager-first deployment (systemd/launchd), configurable log sinks.
-
-This document reflects the current state of the repository and replaces older V7-era descriptions.
-
 ## 2. Design Principles
 
 - Foreground process first: let systemd/launchd/Docker supervise lifecycle.
@@ -161,6 +154,12 @@ Responsibilities:
 - Persist user/mail metadata and queue/outbox related records.
 - Support for distributed database pool scenarios where configured.
 
+Connection ownership model:
+
+- Raw connections restricted to subclasses and friend classes only.
+- External users must acquire connections through `ConnectionGuard` (RAII), which automatically returns the connection to the pool on destruction.
+- Empty `initialize_script` config gracefully skipped (no pool shutdown).
+
 Reliability practices:
 
 - RAII for connection ownership.
@@ -188,6 +187,48 @@ Recommended production profile under systemd:
 
 - `log_to_console=true`
 - `log_to_file=false`
+
+## 4.6 Intrusion Detection
+
+Per-IP failed-authentication tracking with automatic ban and lazy disk persistence.
+
+**Tracking:** each session's authentication outcome is reported to `IntrusionDetector` at session close. SMTP/IMAP session destructors sync the FSM context's `is_authenticated` flag into the base class before `SessionBase::close()` records the result. Private/local IPs (127.0.0.1, 10.x, 192.168.x, 172.16-31.x) are skipped.
+
+**Ban check:** at `MAIL FROM` stage, before the AUTH policy check, the IP is tested against the ban threshold. Banned IPs receive `550 5.7.1 Too many authentication failures, access denied temporarily` and the session is closed.
+
+**Memory bound:** LRU eviction caps the in-memory record count at `intrusion_max_records` (default 10000). When exceeded, the least-recently-seen entry is evicted.
+
+**Lazy persistence:** instead of a timer thread, `record_session()` increments a dirty counter. When the counter exceeds `intrusion_persist_dirty_threshold` (default 256), the current time is checked. If more than `intrusion_persist_interval_sec` (default 60s) has elapsed since the last flush, the full record set is written to JSON synchronously under the lock. Additionally, a full flush is triggered on graceful server shutdown.
+
+**Config keys:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `intrusion_detection_enabled` | bool | false | Enable IP failure tracking |
+| `intrusion_ban_threshold` | int | 0 | Failed count to trigger ban (0=disabled) |
+| `intrusion_max_records` | int | 10000 | Max IP records before LRU eviction |
+| `intrusion_persist_interval_sec` | int | 60 | Min seconds between lazy flushes |
+| `intrusion_persist_dirty_threshold` | int | 256 | Record count to trigger flush check |
+
+## 4.7 Registration Service
+
+A companion FastAPI service (`register-service/`) provides invite-code-based account registration with automatic expiry and cleanup.
+
+**Features:**
+- Invite codes with per-code usage limits and account expiry (default 90 days)
+- Sequential email assignment: `invitor_N@<domain>`
+- Rate limiting per IP (configurable)
+- Password hashing via C++ `hash_tool` (matching the server's bcrypt implementation)
+- Cleanup script (`cleanup.py`) removes expired accounts and all associated data (mails, attachments, mailboxes, outbox entries) from both the database and filesystem
+
+**API endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/stats/{code}` | Query remaining uses for an invite code |
+| POST | `/register` | Register with `{"invite_code":"...", "password":"..."}` |
+
+**Deployment:** runs as a separate systemd unit (`protorelay-register`) listening on `127.0.0.1:8080`. External access through nginx reverse proxy with TLS.
 
 ## 5. Concurrency Model
 
@@ -287,8 +328,8 @@ Implemented now:
 
 Expected extension directions:
 
-- IMAP/POP retrieval plane.
-- Richer policy engine (rate limits, ACL, anti-abuse hooks).
+- POP3 retrieval plane.
+- DKIM signing policy and key rotation tooling.
 - Metrics/trace export for observability stacks.
 - Certificate hot-reload and rolling restart ergonomics.
 - File-free in-memory outbound MIME construction for the hot-dispatch path.

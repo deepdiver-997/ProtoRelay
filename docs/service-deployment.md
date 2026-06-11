@@ -142,7 +142,51 @@ openssl req -x509 -nodes -newkey rsa:2048 \
 
 适用于无 journald 的场景，但要自行做好文件轮转与收集。
 
-## 6. 可选构建：禁用 WebHDFS/libcurl
+## 6. 数据库连接池接口
+
+v8 重构后连接池强制 RAII：
+
+- 原始连接（`MYSQL*`/裸指针）仅对**子类和友元**可见。
+- 外部使用者（持久化队列、发件箱等）必须通过 `ConnectionGuard` 获取连接，析构时自动归还。
+- `initialize_script` 为空时不再错误关闭连接池。
+
+## 7. 配套服务
+
+### 7.1 注册服务
+
+`register-service/` 提供邀请码注册 API，详见 `ARCHITECTURE.md` 4.7 节。
+
+systemd 部署：
+
+```bash
+cp register-service/protorelay-register.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now protorelay-register
+```
+
+自动清理过期账号（建议 crontab 周更）：
+
+```bash
+0 3 * * 1 cd /opt/smtpServer/register-service && python3 cleanup.py
+```
+
+### 7.2 入侵检测
+
+IP 失败认证追踪和自动封禁，配置示例：
+
+```json
+{
+  "intrusion_detection_enabled": true,
+  "intrusion_ban_threshold": 5,
+  "intrusion_max_records": 10000,
+  "intrusion_persist_interval_sec": 60,
+  "intrusion_persist_dirty_threshold": 256
+}
+```
+
+数据持久化到 `logs/intrusion_data.json`，服务正常退出时全量刷盘。
+
+## 8. 可选构建：禁用 WebHDFS/libcurl
 
 如果不使用 `storage_provider=hdfs_web`，可在构建时禁用 WebHDFS：
 

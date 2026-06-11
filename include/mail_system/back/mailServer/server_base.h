@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include "server_config.h"
+#include "intrusion_detector.h"
 
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/thread_pool/io_thread_pool.h"
@@ -115,6 +116,13 @@ public:
     // 运行时重载配置文件（SIGHUP 或 /reload 触发）
     bool reload_config(const std::string& json_file);
 
+    // 入侵检测（IP 失败尝试追踪）
+    IntrusionDetector m_intrusionDetector;
+
+    void record_session_end(const std::string& ip, bool authenticated) {
+        m_intrusionDetector.record_session(ip, authenticated);
+    }
+
     // 连接负载门控
     std::atomic<size_t> active_connections_{0};
 
@@ -178,6 +186,21 @@ public:
             add_gauge("protorelay_inflight_mails",
                       "Current inflight mails in persistence pipeline",
                       m_persistentQueue->inflight_count());
+        }
+
+        if (m_dbPool) {
+            add_gauge("protorelay_db_pool_size",
+                      "Current total connections in DB pool",
+                      m_dbPool->get_pool_size());
+            add_gauge("protorelay_db_available",
+                      "Available idle connections in DB pool",
+                      m_dbPool->get_available_connections());
+            add_gauge("protorelay_db_active",
+                      "Active (in-use) connections in DB pool",
+                      m_dbPool->get_active_connections());
+            add_gauge("protorelay_db_pool_max",
+                      "Maximum connections in DB pool",
+                      m_dbPool->get_max_pool_size());
         }
 
         return out;

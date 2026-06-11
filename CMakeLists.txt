@@ -364,7 +364,7 @@ if(NOT BUILD_OBJECT_ONLY)
 endif()
 
 # -----------------------------
-# 包含目录（优先使用项目内的 OuterLib），并以 SYSTEM 标记外部库头以抑制警告
+# 包含目录，以 SYSTEM 标记外部库头以抑制警告
 # -----------------------------
 # 项目头
 target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/include")
@@ -375,8 +375,9 @@ if(spdlog_FOUND)
     target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
 endif()
 
-# OuterLib (外部依赖库，如 nlohmann/json)
-target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/OuterLib/json")
+# nlohmann/json
+find_package(nlohmann_json REQUIRED)
+target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
 
 # Boost
 if(Boost_FOUND)
@@ -472,7 +473,7 @@ if(NOT BUILD_OBJECT_ONLY)
     if(spdlog_FOUND)
         target_include_directories(imapsServer PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
     endif()
-    target_include_directories(imapsServer PRIVATE "${CMAKE_SOURCE_DIR}/OuterLib/json")
+    target_include_directories(imapsServer PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
     target_include_directories(imapsServer PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
     if(MYSQL_INCLUDE_DIRS)
         target_include_directories(imapsServer PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
@@ -514,7 +515,7 @@ if(NOT BUILD_OBJECT_ONLY)
     if(spdlog_FOUND)
         target_include_directories(mailServer PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
     endif()
-    target_include_directories(mailServer PRIVATE "${CMAKE_SOURCE_DIR}/OuterLib/json")
+    target_include_directories(mailServer PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
     target_include_directories(mailServer PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
     if(MYSQL_INCLUDE_DIRS)
         target_include_directories(mailServer PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})

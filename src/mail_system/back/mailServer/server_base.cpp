@@ -310,6 +310,18 @@ void ServerBase::start() {
     if(m_state.load() == ServerState::Running) {
         return;
     }
+
+    // 初始化入侵检测
+    {
+        auto cfg = std::atomic_load(&m_config);
+        m_intrusionDetector.set_enabled(cfg->intrusion_detection_enabled);
+        m_intrusionDetector.set_max_records(static_cast<size_t>(cfg->intrusion_max_records));
+        m_intrusionDetector.set_ban_threshold(cfg->intrusion_ban_threshold);
+        m_intrusionDetector.set_persist_interval(cfg->intrusion_persist_interval_sec);
+        m_intrusionDetector.set_persist_dirty_threshold(cfg->intrusion_persist_dirty_threshold);
+    }
+    m_intrusionDetector.restore();
+
     if (m_state.load() != ServerState::Stopped) {
         m_state.store(ServerState::Running);
         start_metrics_server();
@@ -400,6 +412,9 @@ void ServerBase::stop(ServerState next_state) {
             if(m_workerThreadPool)
                 m_workerThreadPool->stop();
             LOG_SERVER_INFO("ThreadPools stopped");
+
+            // 持久化入侵检测数据
+            m_intrusionDetector.persist();
 
             // 关闭接受器
             boost::system::error_code ec;

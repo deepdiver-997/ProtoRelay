@@ -26,6 +26,10 @@ public:
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<ImapsFsm<ConnectionType>> fsm);
 
+    ~ImapsSession() {
+        this->session_authenticated_ = context_.is_authenticated;
+    }
+
     static void start(std::unique_ptr<ImapsSession> self);
     static void start_after_starttls(std::unique_ptr<ImapsSession> self);
 

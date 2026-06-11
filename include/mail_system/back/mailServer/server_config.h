@@ -157,6 +157,11 @@ struct ServerConfig {
     std::string inbound_dmarc_mode;    // DMARC 验证模式："off"/"soft"/"hard"
     uint32_t inbound_auth_timeout_ms;  // hard 模式下等待验证的最大时间
     InboundAuthPolicy inbound_auth_policy;  // AUTH 策略：off/auto/on
+    bool intrusion_detection_enabled;        // IP 失败追踪开关
+    int  intrusion_persist_interval_sec;     // 懒刷盘间隔（秒，默认 60）
+    int  intrusion_persist_dirty_threshold;  // 触发检查的记录数阈值（默认 256）
+    int  intrusion_max_records;              // IP 记录上限（默认 10000）
+    int  intrusion_ban_threshold;            // 失败次数封禁阈值（0=禁用）
 
     ServerConfig()
         : address("0.0.0.0")
@@ -217,6 +222,11 @@ struct ServerConfig {
         , inbound_dmarc_mode("off")
         , inbound_auth_timeout_ms(30000)
         , inbound_auth_policy(InboundAuthPolicy::OFF)
+        , intrusion_detection_enabled(false)
+        , intrusion_persist_interval_sec(60)
+        , intrusion_persist_dirty_threshold(256)
+        , intrusion_max_records(10000)
+        , intrusion_ban_threshold(0)
     {}
 
     ServerConfig(const ServerConfig& other) = default;
@@ -298,6 +308,7 @@ struct ServerConfig {
                   << "\ninbound_dmarc_mode = " << inbound_dmarc_mode
                   << "\ninbound_auth_timeout_ms = " << inbound_auth_timeout_ms
                   << "\ninbound_auth_policy = " << inbound_auth_policy_to_string(inbound_auth_policy)
+                  << "\nintrusion_detection_enabled = " << (intrusion_detection_enabled ? "true" : "false")
                   << std::endl;
 
         std::cout << "outbound_ports = [";
@@ -532,6 +543,11 @@ struct ServerConfig {
         inbound_auth_policy = inbound_auth_policy_from_string(
             json_config.value("inbound_auth_policy",
                               std::string(inbound_auth_policy_to_string(inbound_auth_policy))));
+        intrusion_detection_enabled = json_config.value("intrusion_detection_enabled", false);
+        intrusion_persist_interval_sec = json_config.value("intrusion_persist_interval_sec", 60);
+        intrusion_persist_dirty_threshold = json_config.value("intrusion_persist_dirty_threshold", 256);
+        intrusion_max_records = json_config.value("intrusion_max_records", 10000);
+        intrusion_ban_threshold = json_config.value("intrusion_ban_threshold", 0);
 
         if (json_config.contains("outbound_ports") && json_config["outbound_ports"].is_array()) {
             std::vector<uint16_t> parsed_ports;

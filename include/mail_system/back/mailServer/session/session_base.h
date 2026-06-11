@@ -50,6 +50,7 @@ public:
         , use_buffer_(8192)
         , mail_(nullptr)
         , closed_(false)
+        , session_authenticated_(false)
         , m_server(server) {}
 
     // 移动构造函数
@@ -64,6 +65,7 @@ public:
         , mail_(std::move(other.mail_))
         , usr_(std::move(other.usr_))
         , closed_(other.closed_)
+        , session_authenticated_(other.session_authenticated_)
         , m_server(other.m_server) {
         other.closed_ = true;
         other.m_server = nullptr;
@@ -85,6 +87,7 @@ public:
         closed_ = true;
 
         if (m_server) {
+            m_server->record_session_end(get_client_ip(), session_authenticated_);
             m_server->decrement_connection_count();
         }
 
@@ -222,8 +225,15 @@ protected:
     // 会话是否已关闭
     bool closed_;
 
+    // 本会话是否通过了认证
+    bool session_authenticated_;
+
     // 指向服务器的指针，用于访问 IO 线程池
     ServerBase* m_server;
+
+public:
+    void set_authenticated(bool v) { session_authenticated_ = v; }
+    bool is_authenticated() const { return session_authenticated_; }
 
 public:
     // 回调类型定义
