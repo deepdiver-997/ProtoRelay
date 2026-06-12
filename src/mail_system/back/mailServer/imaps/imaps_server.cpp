@@ -43,20 +43,18 @@ ImapsServer::~ImapsServer() {
 
 void ImapsServer::handle_accept(
     std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
-    const boost::system::error_code& error)
+    const boost::system::error_code& error, ListenerConfig lc)
 {
     using SslSession = ImapsSession<SslConnection>;
     auto ssl_connection = std::make_unique<SslConnection>(std::move(ssl_socket));
-    std::unique_ptr<SslSession> session = std::make_unique<SslSession>(
-        this, std::move(ssl_connection), m_ssl_fsm);
-
+    auto session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
+    (void)lc;
     if (!error) {
         try {
             LOG_NETWORK_INFO("New IMAPS connection from {}", session->get_client_ip());
             increment_connection_count();
             SslSession::start(std::move(session));
-        }
-        catch (const std::exception& e) {
+        } catch (const std::exception& e) {
             LOG_NETWORK_ERROR("Error starting IMAPS session: {}", e.what());
         }
     } else {
@@ -66,20 +64,18 @@ void ImapsServer::handle_accept(
 
 void ImapsServer::handle_tcp_accept(
     std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
-    const boost::system::error_code& error)
+    const boost::system::error_code& error, ListenerConfig lc)
 {
     using TcpSession = ImapsSession<TcpConnection>;
-    std::unique_ptr<TcpConnection> tcp_connection = std::make_unique<TcpConnection>(std::move(socket));
-    std::unique_ptr<TcpSession> session = std::make_unique<TcpSession>(
-        this, std::move(tcp_connection), m_tcp_fsm);
-
+    auto tcp_connection = std::make_unique<TcpConnection>(std::move(socket));
+    auto session = std::make_unique<TcpSession>(this, std::move(tcp_connection), m_tcp_fsm);
+    (void)lc;
     if (!error) {
         try {
             LOG_NETWORK_INFO("New IMAP connection from {}", session->get_client_ip());
             increment_connection_count();
             TcpSession::start(std::move(session));
-        }
-        catch (const std::exception& e) {
+        } catch (const std::exception& e) {
             LOG_NETWORK_ERROR("Error starting IMAP session: {}", e.what());
         }
     } else {

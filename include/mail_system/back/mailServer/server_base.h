@@ -6,6 +6,8 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <vector>
+#include <unordered_map>
 #include "server_config.h"
 #include "intrusion_detector.h"
 
@@ -23,19 +25,10 @@
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/mailServer/metrics_server.h"
-// #include "mail_system/back/mailServer/session/session_base.h"
-
-// #include "mail_system/back/mailServer/fsm/client/client_fsm.hpp"
 
 namespace mail_system {
 
-enum class ServerState {
-    Stopped,    // 未启动或完全关闭
-    Running,    // 正常服务
-    Pausing,    // 停止接受新连接，但处理存量请求
-    Paused      // 完全暂停（无新连接，无请求处理，随时可以启动服务）
-};
-
+enum class ServerState { Stopped, Running, Pausing, Paused };
 
 class ServerBase {
 class SessionBase;
@@ -43,7 +36,7 @@ public:
     ServerBase(const ServerConfig& config,
          std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
          std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
-         std::shared_ptr<DBPool> dbPool = nullptr); //allowing sharing pool with other servers
+         std::shared_ptr<DBPool> dbPool = nullptr);
     virtual ~ServerBase();
 
     ServerBase(const ServerBase&) = delete;
@@ -51,45 +44,37 @@ public:
     ServerBase(ServerBase&&) = delete;
     ServerBase& operator=(ServerBase&&) = delete;
 
-    // 启动服务器
     void start();
-    // 运行服务器（阻塞直到停止）
     void run();
-    // 停止服务器
     void stop(ServerState state = ServerState::Pausing);
-    // 是否正在运行
     ServerState get_state() const;
 
-    void pass_stream(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket) {
-        this->handle_accept(std::move(ssl_socket), boost::system::error_code());
+    void pass_stream(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
+                     const ListenerConfig& lc) {
+        this->handle_accept(std::move(ssl_socket), boost::system::error_code(), lc);
     }
 
-    // Upgrade an accepted plain TCP socket to TLS and continue SMTP session flow.
     virtual void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket);
 
+    const ListenerConfig* get_listener_config(uint16_t port) const;
+
 protected:
-    // 创建新会话
-    virtual void accept_ssl_connection();
-    virtual void accept_tcp_connection();
-    // 向后兼容的接口
-    virtual void accept_connection();
-    virtual void non_ssl_accept_connection();
-    // 处理新连接
-    virtual void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket, const boost::system::error_code& error) = 0;
-    // virtual void handle_ssl_connection() = 0;
-    virtual void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket, const boost::system::error_code& error) = 0;
+    // 启动所有 listener 的异步 accept
+    virtual void start_all_tcp_acceptors();
+    virtual void start_all_ssl_acceptors();
+    void do_tcp_accept(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, const ListenerConfig& lc);
+    void do_ssl_accept(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, const ListenerConfig& lc);
+
+    // 处理 TLS acceptor 来的新连接
+    virtual void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
+                               const boost::system::error_code& error, ListenerConfig lc) = 0;
+    // 处理 TCP acceptor 来的新连接
+    virtual void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
+                                   const boost::system::error_code& error, ListenerConfig lc) = 0;
 
 public:
-    // 获取IO上下文
     std::shared_ptr<boost::asio::io_context> get_io_context();
-    // 获取SSL上下文
     boost::asio::ssl::context& get_ssl_context();
-    // 获取SSL接受器
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> get_ssl_acceptor();
-    // 获取TCP接受器
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> get_tcp_acceptor();
-    // 向后兼容
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> get_acceptor();
 
 public:
     std::shared_ptr<mail_system::ThreadPoolBase> m_ioThreadPool;
@@ -99,10 +84,7 @@ public:
     std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
     std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
     std::shared_ptr<storage::IStorageProvider> m_storageProvider;
-    // std::shared_ptr<ClientFSM> m_client_fsm;
 
-    // 可选：邮箱缓存（SMTP 投递后通知，IMAP 查询时使用）
-    // 由外部注入，可为 nullptr。注入后可调用 get_mailbox_cache() 获取
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
 
@@ -110,142 +92,91 @@ public:
     std::shared_ptr<IMailboxCache> m_mailboxCache;
     std::string m_domain;
     std::string m_configFilePath;
-    // 热可重载配置（copy-on-write，读路径无锁，通过 std::atomic_load/store 保护）
     std::shared_ptr<ServerConfig> m_config;
 
-    // 运行时重载配置文件（SIGHUP 或 /reload 触发）
     bool reload_config(const std::string& json_file);
 
-    // 入侵检测（IP 失败尝试追踪）
     IntrusionDetector m_intrusionDetector;
-
     void record_session_end(const std::string& ip, bool authenticated) {
         m_intrusionDetector.record_session(ip, authenticated);
     }
 
-    // 连接负载门控
+    // IP 封禁检查（在 accept 层调用）
+    bool is_ip_banned(const std::string& ip) const {
+        auto cfg = std::atomic_load(&m_config);
+        if (!cfg->intrusion_detection_enabled || cfg->intrusion_ban_threshold <= 0) return false;
+        return m_intrusionDetector.is_banned(ip);
+    }
+
     std::atomic<size_t> active_connections_{0};
+    void increment_connection_count() { active_connections_.fetch_add(1, std::memory_order_relaxed); }
+    void decrement_connection_count() { active_connections_.fetch_sub(1, std::memory_order_relaxed); }
 
-    void increment_connection_count() {
-        active_connections_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    void decrement_connection_count() {
-        active_connections_.fetch_sub(1, std::memory_order_relaxed);
-    }
-
-    // Metrics 计数器
     std::atomic<size_t> connections_total_{0};
     std::atomic<size_t> connections_rejected_total_{0};
     std::atomic<size_t> mails_accepted_total_{0};
+    void increment_connections_total() { connections_total_.fetch_add(1, std::memory_order_relaxed); }
+    void increment_connections_rejected() { connections_rejected_total_.fetch_add(1, std::memory_order_relaxed); }
+    void increment_mails_accepted() { mails_accepted_total_.fetch_add(1, std::memory_order_relaxed); }
 
-    void increment_connections_total() {
-        connections_total_.fetch_add(1, std::memory_order_relaxed);
-    }
-    void increment_connections_rejected() {
-        connections_rejected_total_.fetch_add(1, std::memory_order_relaxed);
-    }
-    void increment_mails_accepted() {
-        mails_accepted_total_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    // Prometheus 格式 metrics 输出
     std::string build_metrics_response() const {
         std::string out;
         out.reserve(1024);
-
         auto add_gauge = [&](const char* name, const char* help, size_t val) {
             out.append("# HELP ").append(name).append(" ").append(help).append("\n");
             out.append("# TYPE ").append(name).append(" gauge\n");
             out.append(name).append(" ").append(std::to_string(val)).append("\n");
         };
-
         auto add_counter = [&](const char* name, const char* help, size_t val) {
             out.append("# HELP ").append(name).append(" ").append(help).append("\n");
             out.append("# TYPE ").append(name).append(" counter\n");
             out.append(name).append(" ").append(std::to_string(val)).append("\n");
         };
-
-        add_gauge("protorelay_active_connections",
-                  "Current active connections",
+        add_gauge("protorelay_active_connections", "Current active connections",
                   active_connections_.load(std::memory_order_relaxed));
-
-        add_counter("protorelay_connections_total",
-                    "Total connections accepted since start",
+        add_counter("protorelay_connections_total", "Total connections accepted",
                     connections_total_.load(std::memory_order_relaxed));
-
-        add_counter("protorelay_connections_rejected_total",
-                    "Total connections rejected since start",
+        add_counter("protorelay_connections_rejected_total", "Total connections rejected",
                     connections_rejected_total_.load(std::memory_order_relaxed));
-
-        add_counter("protorelay_mails_accepted_total",
-                    "Total mails accepted (250 OK sent) since start",
+        add_counter("protorelay_mails_accepted_total", "Total mails accepted",
                     mails_accepted_total_.load(std::memory_order_relaxed));
-
-        if (m_persistentQueue) {
-            add_gauge("protorelay_inflight_mails",
-                      "Current inflight mails in persistence pipeline",
+        if (m_persistentQueue)
+            add_gauge("protorelay_inflight_mails", "Current inflight mails",
                       m_persistentQueue->inflight_count());
-        }
-
         if (m_dbPool) {
-            add_gauge("protorelay_db_pool_size",
-                      "Current total connections in DB pool",
-                      m_dbPool->get_pool_size());
-            add_gauge("protorelay_db_available",
-                      "Available idle connections in DB pool",
-                      m_dbPool->get_available_connections());
-            add_gauge("protorelay_db_active",
-                      "Active (in-use) connections in DB pool",
-                      m_dbPool->get_active_connections());
-            add_gauge("protorelay_db_pool_max",
-                      "Maximum connections in DB pool",
-                      m_dbPool->get_max_pool_size());
+            add_gauge("protorelay_db_pool_size", "DB pool size", m_dbPool->get_pool_size());
+            add_gauge("protorelay_db_available", "DB idle connections", m_dbPool->get_available_connections());
+            add_gauge("protorelay_db_active", "DB active connections", m_dbPool->get_active_connections());
+            add_gauge("protorelay_db_pool_max", "DB pool max", m_dbPool->get_max_pool_size());
         }
-
         return out;
     }
 
 protected:
-    // 加载SSL证书
     void load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file = "");
 
-    // 端点配置
-    boost::asio::ip::tcp::endpoint m_ssl_endpoint;
-    boost::asio::ip::tcp::endpoint m_tcp_endpoint;
-    // IO上下文
     std::shared_ptr<boost::asio::io_context> m_ioContext;
-    // SSL上下文（仅当启用SSL时初始化）
     boost::asio::ssl::context m_sslContext;
-    // 接受器
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> m_ssl_acceptor;  // SSL接受器
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> m_tcp_acceptor;  // TCP接受器
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> m_acceptor;       // 向后兼容
-    // 解析器
+
+    // 多监听器
+    std::vector<std::shared_ptr<boost::asio::ip::tcp::acceptor>> m_tcp_acceptors;
+    std::vector<std::shared_ptr<boost::asio::ip::tcp::acceptor>> m_ssl_acceptors;
+    std::unordered_map<uint16_t, ListenerConfig> m_listener_configs;
+
     std::shared_ptr<boost::asio::ip::tcp::resolver> m_resolver;
-    // 工作守卫
     std::unique_ptr<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> m_workGuard;
-    // 配置标志
-    bool m_enable_ssl;
-    bool m_enable_tcp;
-    // 判断是否应该拒绝新连接（纯虚函数，由子类实现具体负载检查逻辑）
+
     virtual bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const = 0;
 
-    // Metrics HTTP 服务
     void start_metrics_server();
     void stop_metrics_server();
     std::unique_ptr<MetricsServer> metrics_server_;
 
-    // 是否正在运行
     std::atomic<bool> has_listener_thread;
-    // 监听线程
     std::thread m_listenerThread;
-    // 服务器状态
     std::atomic<ServerState> m_state;
-    // 已知域名
-    std::map<std::string, std::string> m_known_domains;     //<domain, ip_address>
+    std::map<std::string, std::string> m_known_domains;
 };
 
 } // namespace mail_system
-
-#endif // MAIL_SYSTEM_SERVER_BASE_H
+#endif

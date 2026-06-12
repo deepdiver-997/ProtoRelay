@@ -249,29 +249,14 @@ int main(int argc, char* argv[]) {
         g_smtp_server = std::make_shared<SmtpsServer>(
             smtp_config, io_pool, work_pool, db_pool);
         g_smtp_server->m_configFilePath = options.smtp_config_path;
-        LOG_SERVER_INFO("SMTP server created (SSL:{}:{} / TCP:{}:{})",
-                       smtp_config.ssl_port,
-                       smtp_config.enable_ssl ? "enabled" : "disabled",
-                       smtp_config.tcp_port,
-                       smtp_config.enable_tcp ? "enabled" : "disabled");
+        LOG_SERVER_INFO("SMTP server created with {} listener(s)", smtp_config.listeners.size());
 
-        // ================================================================
-        // 6. 创建 IMAP 服务器
-        //    共享线程池和数据库连接池
-        // ================================================================
         LOG_SERVER_INFO("Creating IMAP server...");
         g_imap_server = std::make_shared<ImapsServer>(
             imap_config, io_pool, work_pool, db_pool);
         g_imap_server->m_configFilePath = options.imap_config_path;
-        LOG_SERVER_INFO("IMAP server created (SSL:{}:{} / TCP:{}:{})",
-                       imap_config.ssl_port,
-                       imap_config.enable_ssl ? "enabled" : "disabled",
-                       imap_config.tcp_port,
-                       imap_config.enable_tcp ? "enabled" : "disabled");
+        LOG_SERVER_INFO("IMAP server created with {} listener(s)", imap_config.listeners.size());
 
-        // ================================================================
-        // 7. 启动服务器
-        // ================================================================
         LOG_SERVER_INFO("Starting SMTP server...");
         g_smtp_server->start();
 
@@ -280,12 +265,12 @@ int main(int argc, char* argv[]) {
 
         LOG_SERVER_INFO("");
         LOG_SERVER_INFO("=== ProtoRelay Combined Server is RUNNING ===");
-        LOG_SERVER_INFO("  SMTP(S):  {}:{} (SSL) / {}:{} (TCP)",
-                       smtp_config.address, smtp_config.ssl_port,
-                       smtp_config.address, smtp_config.tcp_port);
-        LOG_SERVER_INFO("  IMAP(S):  {}:{} (SSL) / {}:{} (TCP)",
-                       imap_config.address, imap_config.ssl_port,
-                       imap_config.address, imap_config.tcp_port);
+        for (auto& l : smtp_config.listeners)
+            LOG_SERVER_INFO("  SMTP: {}:{} auth={}", listener_type_to_string(l.type), l.port,
+                           inbound_auth_policy_to_string(l.auth_policy));
+        for (auto& l : imap_config.listeners)
+            LOG_SERVER_INFO("  IMAP: {}:{} auth={}", listener_type_to_string(l.type), l.port,
+                           inbound_auth_policy_to_string(l.auth_policy));
         if (smtp_config.metrics_enabled) {
             LOG_SERVER_INFO("  Metrics:  http://{}:{}", smtp_config.metrics_bind_address, smtp_config.metrics_port);
         }

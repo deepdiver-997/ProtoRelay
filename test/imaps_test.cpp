@@ -154,19 +154,17 @@ int main(int argc, char* argv[]) {
         );
         LOG_SERVER_INFO("Loaded config file: {}", config_path);
         LOG_SERVER_INFO("IMAP Server configuration:");
-        LOG_SERVER_INFO("  SSL port: {}", config.ssl_port);
-        LOG_SERVER_INFO("  TCP port: {}", config.tcp_port);
         LOG_SERVER_INFO("  System domain: {}", config.system_domain);
         LOG_SERVER_INFO("  Storage: {} @ {}", config.storage_provider, config.mail_storage_path);
+        for (auto& l : config.listeners)
+            LOG_SERVER_INFO("  Listener: {}:{} auth={}", listener_type_to_string(l.type), l.port,
+                           inbound_auth_policy_to_string(l.auth_policy));
 
-        // 创建服务器
         g_server = std::make_unique<ImapsServer>(config);
         g_server->m_configFilePath = config_path;
-
-        // 启动服务器
         g_server->start();
 
-        LOG_SERVER_INFO("IMAPS Server is running on port {} (SSL) / {} (TCP)", config.ssl_port, config.tcp_port);
+        LOG_SERVER_INFO("IMAPS Server running with {} listener(s)", config.listeners.size());
         LOG_SERVER_INFO("Press Ctrl+C to stop");
 
         // 主循环

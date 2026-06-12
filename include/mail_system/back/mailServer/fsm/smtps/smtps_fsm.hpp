@@ -55,6 +55,7 @@ enum class SmtpsEvent {
 
 // SMTPS 上下文
 struct SmtpsContext {
+    ListenerConfig listener_config;               // 当前连接所属监听器配置
     bool is_authenticated = false;               // AUTH 是否通过，决定后续命令是否允许
     bool plain_auth_expected = false;            // AUTH PLAIN 多步流程：等待客户端发送 base64 凭证
     std::string client_username;                 // AUTH 登录名；MAIL FROM 缺省时作为发件人

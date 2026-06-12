@@ -355,18 +355,22 @@ if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
 fi
 
 EXPORT_DIR="${ARTIFACT_DIR}/${TARGET_TAG}/${BUILD_TYPE}/${MODE_TAG}"
+rm -rf "$EXPORT_DIR"
 mkdir -p "$EXPORT_DIR"
 
 if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
-    OBJ_ROOT="${BUILD_DIR}/CMakeFiles/smtpsServer_obj.dir"
-    if [ -d "$OBJ_ROOT" ]; then
+    # 导出所有对象库的 .o 文件
+    for obj_dir in "$BUILD_DIR"/CMakeFiles/*.dir; do
+        [ -d "$obj_dir" ] || continue
         while IFS= read -r obj; do
-            rel="${obj#${OBJ_ROOT}/}"
+            # 路径格式: build/CMakeFiles/<target>.dir/src/.../file.cpp.o
+            # 去除 build/ 前缀，保留 CMakeFiles/<target>.dir/ 后面的部分
+            rel="${obj#${BUILD_DIR}/}"
             out_dir="${EXPORT_DIR}/$(dirname "$rel")"
             mkdir -p "$out_dir"
             cp "$obj" "$out_dir/"
-        done < <(find "$OBJ_ROOT" -type f -name '*.o' | sort)
-    fi
+        done < <(find "$obj_dir" -type f -name '*.o' | sort)
+    done
 
     # 把链接脚本也放进去，目标机可直接复用。
     if [ -f "${SCRIPT_DIR}/link.sh" ]; then

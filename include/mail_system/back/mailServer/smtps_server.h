@@ -25,10 +25,10 @@ namespace mail_system {
 
     protected:
         // 处理新连接
-        void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket,
-           const boost::system::error_code& error) override;
+        void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
+           const boost::system::error_code& error, ListenerConfig lc) override;
         void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
-           const boost::system::error_code& error) override;
+           const boost::system::error_code& error, ListenerConfig lc) override;
           void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) override;
 
         // 连接负载门控：判断是否应拒绝新连接

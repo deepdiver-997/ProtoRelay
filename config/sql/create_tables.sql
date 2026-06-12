@@ -23,7 +23,10 @@ CREATE TABLE IF NOT EXISTS mails (
     subject VARCHAR(255) NOT NULL COMMENT '邮件主题',
     body_path VARCHAR(512) COMMENT '邮件正文文件路径',
     send_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
-    INDEX idx_send_time (send_time)
+    spam_status TINYINT NOT NULL DEFAULT 0 COMMENT '0=未检测 1=正常 2=垃圾 3=检测中',
+    spam_score FLOAT DEFAULT NULL COMMENT '垃圾概率分数（LLM 模式）',
+    INDEX idx_send_time (send_time),
+    INDEX idx_spam_status (spam_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件元数据表';
 
 -- 创建邮件收发件人关系表（一份邮件可能有多个收件人）
@@ -150,3 +153,12 @@ BEGIN
     CALL create_default_mailboxes(NEW.id);
 END //
 DELIMITER ;
+
+-- ============================================================
+-- 迁移：已有数据库加垃圾检测字段
+-- ============================================================
+-- 新版本 mails 表增加了 spam_status 和 spam_score 列。
+-- 对已有数据库执行：
+--   ALTER TABLE mails ADD COLUMN spam_status TINYINT NOT NULL DEFAULT 0;
+--   ALTER TABLE mails ADD COLUMN spam_score FLOAT DEFAULT NULL;
+--   ALTER TABLE mails ADD INDEX idx_spam_status (spam_status);

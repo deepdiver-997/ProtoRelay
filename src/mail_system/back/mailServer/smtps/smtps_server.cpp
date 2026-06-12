@@ -83,46 +83,40 @@ SmtpsServer::~SmtpsServer() {
     stop();
 }
 
-void SmtpsServer::handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket> >&& ssl_socket, const boost::system::error_code& error) {
-    // 创建会话
+void SmtpsServer::handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
+                                 const boost::system::error_code& error, ListenerConfig lc) {
     using SslSession = SmtpsSession<mail_system::SslConnection>;
     auto ssl_connection = std::make_unique<SslConnection>(std::move(ssl_socket));
-    std::unique_ptr<SslSession> session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
+    auto session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
     if (!error) {
         try {
+            session->set_listener_config(lc);
             LOG_NETWORK_INFO("New SMTPS connection from {}", session->get_client_ip());
-
             increment_connection_count();
-            // 启动会话 - 直接在当前线程调用以避免unique_ptr复制问题
             SslSession::start(std::move(session));
-        }
-        catch (const std::exception& e) {
+        } catch (const std::exception& e) {
             LOG_NETWORK_ERROR("Error starting SMTPS session: {}", e.what());
         }
-    }
-    else {
+    } else {
         LOG_NETWORK_ERROR("Accept error: {}", error.message());
     }
 }
 
-void SmtpsServer::handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket, const boost::system::error_code& error) {
-    // 创建会话
+void SmtpsServer::handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
+                                    const boost::system::error_code& error, ListenerConfig lc) {
     using TcpSession = SmtpsSession<mail_system::TcpConnection>;
-    std::unique_ptr<TcpConnection> tcp_connection = std::make_unique<TcpConnection>(std::move(socket));
-    std::unique_ptr<TcpSession> session = std::make_unique<TcpSession>(this, std::move(tcp_connection), m_tcp_fsm);
+    auto tcp_connection = std::make_unique<TcpConnection>(std::move(socket));
+    auto session = std::make_unique<TcpSession>(this, std::move(tcp_connection), m_tcp_fsm);
     if (!error) {
         try {
+            session->set_listener_config(lc);
             LOG_NETWORK_INFO("New SMTP connection from {}", session->get_client_ip());
-
             increment_connection_count();
-            // 启动会话 - 直接在当前线程调用以避免unique_ptr复制问题
             TcpSession::start(std::move(session));
-        }
-        catch (const std::exception& e) {
+        } catch (const std::exception& e) {
             LOG_NETWORK_ERROR("Error starting SMTP session: {}", e.what());
         }
-    }
-    else {
+    } else {
         LOG_NETWORK_ERROR("Accept error: {}", error.message());
     }
 }

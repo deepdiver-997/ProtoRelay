@@ -23,9 +23,9 @@ public:
 protected:
     // 处理新连接
     void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
-                       const boost::system::error_code& error) override;
+                       const boost::system::error_code& error, ListenerConfig lc) override;
     void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
-                           const boost::system::error_code& error) override;
+                           const boost::system::error_code& error, ListenerConfig lc) override;
 
     // 连接负载门控
     bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const override;

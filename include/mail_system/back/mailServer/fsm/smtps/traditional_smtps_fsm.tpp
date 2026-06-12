@@ -339,10 +339,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
         response += "250-STARTTLS\r\n";
     }
 
-    // 根据 AUTH 策略决定是否通告 AUTH 能力
+    // 根据 listener config 的 AUTH 策略决定是否通告 AUTH
     {
-        auto config = std::atomic_load(&session->get_server()->m_config);
-        if (config->inbound_auth_policy != InboundAuthPolicy::OFF) {
+        auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        if (ctx->listener_config.auth_policy != InboundAuthPolicy::OFF) {
             response += "250-AUTH LOGIN PLAIN\r\n";
         }
     }
@@ -757,32 +757,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                              static_cast<SmtpsState>(session->get_current_state())),
                          args);
 
-    // ===== 入侵检测：封禁 IP 提前拒绝 =====
-    {
-        auto config = std::atomic_load(&session->get_server()->m_config);
-        if (config->intrusion_detection_enabled && config->intrusion_ban_threshold > 0) {
-            const auto& ip = session->get_client_ip();
-            if (session->get_server()->m_intrusionDetector.is_banned(ip)) {
-                LOG_SMTP_DETAIL_WARN("Banned IP {} attempting MAIL FROM — rejected", ip);
-                SessionBase<ConnectionType>::do_async_write(
-                    std::move(session),
-                    "550 5.7.1 Too many authentication failures, access denied temporarily\r\n",
-                    [](std::unique_ptr<SessionBase<ConnectionType>> s,
-                       const boost::system::error_code&) {
-                        s->close();
-                    });
-                return;
-            }
-        }
-    }
-
-    // ===== AUTH 策略检查 =====
+    // ===== AUTH 策略检查（从 listener config 读取） =====
     {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        const auto& lc = ctx->listener_config;
         auto config = std::atomic_load(&session->get_server()->m_config);
 
         // auto 模式：尝试 EHLO 验证（PTR 反向 DNS）
-        if (config->inbound_auth_policy == InboundAuthPolicy::AUTO &&
+        if (lc.auth_policy == InboundAuthPolicy::AUTO &&
             !ctx->is_trusted_server && !ctx->ehlo_domain.empty()) {
             auto outbound = session->get_server()->m_outboundClient;
             if (outbound) {
@@ -817,7 +799,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         }
 
         bool require_auth = false;
-        switch (config->inbound_auth_policy) {
+        switch (lc.auth_policy) {
         case InboundAuthPolicy::ON:
             require_auth = true;
             break;

@@ -350,7 +350,12 @@ if(BUILD_OBJECT_ONLY)
 else()
     add_executable(smtpsServer ${SMTP_SRCS})
     set(SMTP_TARGET smtpsServer)
+endif()
 
+# 对象库模式：额外入口点（IMAP/组合服务器），只编译不链接
+if(BUILD_OBJECT_ONLY)
+    add_library(imapsServer_obj OBJECT test/imaps_test.cpp)
+    add_library(mailServer_obj OBJECT test/mail_server_combined.cpp)
 endif()
 
 # 全局输出目录 - 可执行文件到test目录，其他到build目录
@@ -456,6 +461,23 @@ if(USE_SSL)
 endif()
 
     target_link_libraries(${SMTP_TARGET} PRIVATE ${LINK_LIBRARIES})
+
+# 对象库入口点的 include 目录
+if(BUILD_OBJECT_ONLY)
+    foreach(_obj_target imapsServer_obj mailServer_obj)
+        target_include_directories(${_obj_target} PRIVATE "${CMAKE_SOURCE_DIR}/include")
+        target_include_directories(${_obj_target} PRIVATE "${CMAKE_BINARY_DIR}/generated")
+        if(spdlog_FOUND)
+            target_include_directories(${_obj_target} PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+        endif()
+        target_include_directories(${_obj_target} PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
+        target_include_directories(${_obj_target} PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+        if(MYSQL_INCLUDE_DIRS)
+            target_include_directories(${_obj_target} PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+        endif()
+        target_compile_features(${_obj_target} PRIVATE cxx_std_17)
+    endforeach()
+endif()
 
 # ===== IMAP 独立服务器 =====
 if(NOT BUILD_OBJECT_ONLY)
