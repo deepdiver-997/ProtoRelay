@@ -862,19 +862,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
 
     session->set_current_state(static_cast<int>(ImapState::SELECTED));
 
-    // Build SELECT response
+    // Build SELECT response (RFC 3501: [READ-WRITE]/[READ-ONLY] on tagged OK)
     std::string response;
     response += "* " + std::to_string(count) + " EXISTS\r\n";
-    response += "* " + std::to_string(count - unseen) + " RECENT\r\n"; // approximate
-    response += "* OK [UNSEEN " + std::to_string(unseen > 0 ? count - unseen + 1 : 0) + "]\r\n";
+    response += "* " + std::to_string(count - unseen) + " RECENT\r\n";
+    if (unseen > 0) {
+        response += "* OK [UNSEEN " + std::to_string(count - unseen + 1) + "]\r\n";
+    }
     response += "* OK [UIDVALIDITY " + std::to_string(ctx->uid_validity) + "]\r\n";
     response += "* OK [UIDNEXT " + std::to_string(uidnext) + "]\r\n";
-    if (!ctx->read_only) {
-        response += "* OK [READ-WRITE]\r\n";
-    } else {
-        response += "* OK [READ-ONLY]\r\n";
-    }
-    response += tag + " OK SELECT completed\r\n";
+    response += tag + " OK [";
+    response += ctx->read_only ? "READ-ONLY" : "READ-WRITE";
+    response += "] SELECT completed\r\n";
 
     SessionBase<ConnectionType>::do_async_write(std::move(session), response, nullptr);
 }
@@ -925,7 +924,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
     std::string response;
     response += "* " + std::to_string(count) + " EXISTS\r\n";
     response += "* " + std::to_string(count - unseen) + " RECENT\r\n";
-    response += "* OK [UNSEEN " + std::to_string(unseen > 0 ? count - unseen + 1 : 0) + "]\r\n";
+    if (unseen > 0) {
+        response += "* OK [UNSEEN " + std::to_string(count - unseen + 1) + "]\r\n";
+    }
     response += "* OK [UIDVALIDITY " + std::to_string(ctx->uid_validity) + "]\r\n";
     response += "* OK [UIDNEXT " + std::to_string(uidnext) + "]\r\n";
     response += "* OK [READ-ONLY]\r\n";
