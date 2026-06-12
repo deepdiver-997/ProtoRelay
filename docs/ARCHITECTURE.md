@@ -72,6 +72,14 @@ Key points:
 - Session logic is built around async callbacks and strict ownership rules.
 - Validation and protocol responses are generated with SMTP utility helpers.
 
+**Multi-listener architecture:** server_base manages vectors of TCP and SSL acceptors, each bound to a listener config that specifies per-port security policy. IP ban checks run at accept time (before session creation), reducing FSM complexity.
+
+| Port | Type | STARTTLS | AUTH policy | SPF/DKIM/DMARC | Use case |
+|------|------|----------|-------------|----------------|----------|
+| 25 | TCP | yes | off | hard | Server-to-server delivery |
+| 465 | SSL (implicit TLS) | no | on | off | Client submission |
+| 587 | TCP | yes | on | off | Client submission (STARTTLS) |
+
 ### 4.1.1 Inbound Sender Verification (SPF/DKIM/DMARC)
 
 At `MAIL FROM` and `DATA_END` stages, the inbound path performs sender identity verification:
