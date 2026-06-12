@@ -418,7 +418,8 @@ void ServerBase::start_metrics_server() {
             [this]() -> std::string {
                 if (m_configFilePath.empty()) return "config file path not set";
                 return reload_config(m_configFilePath) ? "OK" : "reload failed";
-            });
+            },
+            [this]() { return build_status_response(); });
         metrics_server_->start();
     } catch (const std::exception& e) {
         LOG_SERVER_ERROR("Failed to start metrics server: {}", e.what());

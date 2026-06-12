@@ -31,6 +31,15 @@ namespace mail_system {
 
 enum class ServerState { Stopped, Running, Pausing, Paused };
 
+inline const char* server_state_to_string(ServerState s) {
+    switch (s) {
+    case ServerState::Running: return "Running";
+    case ServerState::Pausing: return "Pausing";
+    case ServerState::Paused:  return "Paused";
+    default: return "Stopped";
+    }
+}
+
 class ServerBase {
 class SessionBase;
 public:
@@ -122,37 +131,166 @@ public:
 
     std::string build_metrics_response() const {
         std::string out;
-        out.reserve(1024);
-        auto add_gauge = [&](const char* name, const char* help, size_t val) {
+        out.reserve(2048);
+        auto add_gauge = [&](const char* name, const char* labels, const char* help, size_t val) {
             out.append("# HELP ").append(name).append(" ").append(help).append("\n");
             out.append("# TYPE ").append(name).append(" gauge\n");
-            out.append(name).append(" ").append(std::to_string(val)).append("\n");
+            out.append(name);
+            if (labels) out.append(labels);
+            out.append(" ").append(std::to_string(val)).append("\n");
         };
-        auto add_counter = [&](const char* name, const char* help, size_t val) {
+        auto add_counter = [&](const char* name, const char* labels, const char* help, size_t val) {
             out.append("# HELP ").append(name).append(" ").append(help).append("\n");
             out.append("# TYPE ").append(name).append(" counter\n");
-            out.append(name).append(" ").append(std::to_string(val)).append("\n");
+            out.append(name);
+            if (labels) out.append(labels);
+            out.append(" ").append(std::to_string(val)).append("\n");
         };
-        add_gauge("protorelay_active_connections", "Current active connections",
+
+        // ---- 连接/邮件计数器 ----
+        add_gauge("protorelay_active_connections", nullptr,
+                  "Current active connections",
                   active_connections_.load(std::memory_order_relaxed));
-        add_counter("protorelay_connections_total", "Total connections accepted",
+        add_counter("protorelay_connections_total", nullptr,
+                    "Total connections accepted",
                     connections_total_.load(std::memory_order_relaxed));
-        add_counter("protorelay_connections_rejected_total", "Total connections rejected",
+        add_counter("protorelay_connections_rejected_total", nullptr,
+                    "Total connections rejected",
                     connections_rejected_total_.load(std::memory_order_relaxed));
-        add_counter("protorelay_mails_accepted_total", "Total mails accepted",
+        add_counter("protorelay_mails_accepted_total", nullptr,
+                    "Total mails accepted",
                     mails_accepted_total_.load(std::memory_order_relaxed));
-        if (m_persistentQueue)
-            add_gauge("protorelay_inflight_mails", "Current inflight mails",
+
+        // ---- 队列 ----
+        if (m_persistentQueue) {
+            add_gauge("protorelay_queue_inflight", nullptr,
+                      "Current inflight persist tasks",
                       m_persistentQueue->inflight_count());
+            add_gauge("protorelay_queue_depth", nullptr,
+                      "Pending tasks in persist queue",
+                      m_persistentQueue->queue_size());
+        }
+
+        // ---- 监听器 ----
+        for (auto& [port, lc] : m_listener_configs) {
+            std::string labels = "{port=\"" + std::to_string(port)
+                               + "\",type=\"" + listener_type_to_string(lc.type) + "\"}";
+            add_gauge("protorelay_listener_info", labels.c_str(),
+                      "Listener active", 1);
+        }
+
+        // ---- Shard Router ----
         if (m_shardRouter) {
-            auto db = m_shardRouter->get_db_pool(0);
-            if (db) {
-                add_gauge("protorelay_db_pool_size", "DB pool size", db->get_pool_size());
-                add_gauge("protorelay_db_available", "DB idle connections", db->get_available_connections());
-                add_gauge("protorelay_db_active", "DB active connections", db->get_active_connections());
-                add_gauge("protorelay_db_pool_max", "DB pool max", db->get_max_pool_size());
+            size_t n = m_shardRouter->shard_count();
+            std::string info_labels = "{router=\"" + std::string(m_shardRouter->name())
+                                    + "\",shard_count=\"" + std::to_string(n) + "\"}";
+            add_gauge("protorelay_router_info", info_labels.c_str(),
+                      "Router metadata", 1);
+
+            for (size_t i = 0; i < n; ++i) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "{shard=\"%zu\"}", i);
+                auto db = m_shardRouter->get_db_pool(i);
+                if (db) {
+                    add_gauge("protorelay_db_pool_size", buf,
+                              "DB pool current size", db->get_pool_size());
+                    add_gauge("protorelay_db_available", buf,
+                              "DB idle connections", db->get_available_connections());
+                    add_gauge("protorelay_db_active", buf,
+                              "DB active connections", db->get_active_connections());
+                    add_gauge("protorelay_db_pool_max", buf,
+                              "DB pool max size", db->get_max_pool_size());
+                }
+                auto st = m_shardRouter->get_storage(i);
+                if (st) {
+                    add_gauge("protorelay_storage_ready", buf,
+                              "Storage provider ready", 1);
+                }
             }
         }
+        return out;
+    }
+
+    // JSON 格式状态摘要，供控制面板 /status 端点使用
+    std::string build_status_response() const {
+        std::string out;
+        out.reserve(1024);
+        out.append("{");
+
+        // 基础信息
+        out.append("\"state\":\"").append(server_state_to_string(m_state.load())).append("\",");
+        auto cfg = std::atomic_load(&m_config);
+        out.append("\"version\":\"").append(cfg->system_name).append("\",");
+        out.append("\"domain\":\"").append(cfg->system_domain).append("\",");
+
+        // 连接统计
+        out.append("\"connections\":{");
+        out.append("\"active\":").append(std::to_string(active_connections_.load()));
+        out.append(",\"total\":").append(std::to_string(connections_total_.load()));
+        out.append(",\"rejected\":").append(std::to_string(connections_rejected_total_.load()));
+        out.append("},");
+
+        out.append("\"mails_accepted\":").append(std::to_string(mails_accepted_total_.load())).append(",");
+
+        // Router
+        if (m_shardRouter) {
+            out.append("\"router\":{");
+            out.append("\"type\":\"").append(m_shardRouter->name()).append("\",");
+            out.append("\"shard_count\":").append(std::to_string(m_shardRouter->shard_count()));
+            out.append("},");
+
+            // 每个 shard 详情
+            out.append("\"shards\":[");
+            size_t n = m_shardRouter->shard_count();
+            for (size_t i = 0; i < n; ++i) {
+                if (i > 0) out.append(",");
+                out.append("{");
+                out.append("\"index\":").append(std::to_string(i)).append(",");
+
+                auto db = m_shardRouter->get_db_pool(i);
+                out.append("\"db\":");
+                if (db) {
+                    out.append("{\"pool_size\":").append(std::to_string(db->get_pool_size()));
+                    out.append(",\"available\":").append(std::to_string(db->get_available_connections()));
+                    out.append(",\"active\":").append(std::to_string(db->get_active_connections()));
+                    out.append(",\"max\":").append(std::to_string(db->get_max_pool_size()));
+                    out.append("}");
+                } else {
+                    out.append("null");
+                }
+                out.append(",");
+
+                auto st = m_shardRouter->get_storage(i);
+                out.append("\"storage_ready\":").append(st ? "true" : "false");
+
+                out.append("}");
+            }
+            out.append("],");
+        }
+
+        // 监听器
+        out.append("\"listeners\":[");
+        bool first = true;
+        for (auto& [port, lc] : m_listener_configs) {
+            if (!first) out.append(","); first = false;
+            out.append("{\"port\":").append(std::to_string(port));
+            out.append(",\"type\":\"").append(listener_type_to_string(lc.type)).append("\"");
+            out.append(",\"auth\":\"").append(inbound_auth_policy_to_string(lc.auth_policy)).append("\"");
+            out.append("}");
+        }
+        out.append("],");
+
+        // 队列
+        out.append("\"queue\":{");
+        if (m_persistentQueue) {
+            out.append("\"inflight\":").append(std::to_string(m_persistentQueue->inflight_count()));
+            out.append(",\"depth\":").append(std::to_string(m_persistentQueue->queue_size()));
+        } else {
+            out.append("\"inflight\":0,\"depth\":0");
+        }
+        out.append("}");
+
+        out.append("}");
         return out;
     }
 

@@ -14,18 +14,21 @@ namespace mail_system {
 class MetricsServer {
 public:
     using MetricsProvider = std::function<std::string()>;
-    using ReloadHandler = std::function<std::string()>;  // 返回 "200 OK" 或 "500 ..." body
+    using StatusProvider  = std::function<std::string()>;  // JSON 状态
+    using ReloadHandler   = std::function<std::string()>;
 
     MetricsServer(boost::asio::io_context& io_ctx,
                   uint16_t port, const std::string& bind_address,
                   MetricsProvider provider,
-                  ReloadHandler reload_handler = nullptr)
+                  ReloadHandler reload_handler = nullptr,
+                  StatusProvider status_provider = nullptr)
         : io_ctx_(io_ctx)
         , acceptor_(io_ctx_)
         , port_(port)
         , bind_address_(bind_address)
         , provider_(std::move(provider))
         , reload_handler_(std::move(reload_handler))
+        , status_provider_(std::move(status_provider))
         , running_(false) {}
 
     ~MetricsServer() { stop(); }
@@ -109,6 +112,10 @@ private:
                     status = "200 OK";
                     content_type = "text/plain; version=0.0.4";
                     body = provider_ ? provider_() : "";
+                } else if (path == "/status" && status_provider_) {
+                    status = "200 OK";
+                    content_type = "application/json";
+                    body = status_provider_();
                 } else if (path == "/health" || path == "/health/live") {
                     status = "200 OK";
                     content_type = "text/plain";
@@ -151,6 +158,7 @@ private:
     std::string bind_address_;
     MetricsProvider provider_;
     ReloadHandler reload_handler_;
+    StatusProvider status_provider_;
     std::atomic<bool> running_;
 };
 
