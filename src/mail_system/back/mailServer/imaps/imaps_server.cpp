@@ -16,13 +16,13 @@ ImapsServer::ImapsServer(const ServerConfig& config,
 
     // IMAP doesn't need PersistentQueue like SMTP (read-only retrieval)
     // but we still need storage provider for reading mail bodies
-    // ServerBase already creates m_storageProvider
+    // ServerBase already creates m_shardRouter->get_storage(0)
 
     // Create FSM instances for TCP and SSL connections
     m_tcp_fsm = std::make_shared<TraditionalImapsFsm<TcpConnection>>(
-        m_ioThreadPool, m_workerThreadPool, m_dbPool, m_storageProvider);
+        m_ioThreadPool, m_workerThreadPool, m_shardRouter);
     m_ssl_fsm = std::make_shared<TraditionalImapsFsm<SslConnection>>(
-        m_ioThreadPool, m_workerThreadPool, m_dbPool, m_storageProvider);
+        m_ioThreadPool, m_workerThreadPool, m_shardRouter);
 
     // 创建并注入共享的 LRU 邮箱统计缓存（容量 20000，TTL 8 秒）
     auto stats_cache = std::make_shared<

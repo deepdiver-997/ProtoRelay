@@ -80,16 +80,23 @@ std::optional<std::uint64_t> query_available_memory_bytes() {
 } // namespace
 
 PersistentQueue::PersistentQueue(
-    std::shared_ptr<DBPool> db_pool,
-    std::shared_ptr<ThreadPoolBase> worker_pool,
-    std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider
-) : db_pool_(std::move(db_pool)),
+    std::shared_ptr<router::IShardRouter> shard_router,
+    std::shared_ptr<ThreadPoolBase> worker_pool
+) : m_shardRouter(std::move(shard_router)),
     worker_pool_(std::move(worker_pool)),
-    storage_provider_(std::move(storage_provider)),
     shutdown_(false) {
     // 启动工作线程
     worker_thread_ = std::thread(&PersistentQueue::worker_loop, this);
     LOG_PERSISTENT_QUEUE_INFO("PersistentQueue initialized and worker thread started");
+}
+
+int PersistentQueue::shard_from_mail(const mail* m) const {
+    if (!m_shardRouter || !m) return 0;
+    const std::string& key = !m->from.empty() ? m->from :
+                             (!m->to.empty() ? m->to.front() : "");
+    if (key.empty()) return 0;
+    int shard = m_shardRouter->route(key);
+    return shard >= 0 ? shard : 0;
 }
 
 PersistentQueue::~PersistentQueue() {
@@ -154,7 +161,8 @@ void PersistentQueue::delete_task(mail* mail_data) {
         return;
     }
 
-    auto conn = db_pool_->acquire_connection();
+    int shard = shard_from_mail(mail_data);
+    auto conn = m_shardRouter->get_db_pool(shard)->acquire_connection();
     if (!conn.is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for deleting mail ID {}", mail_data->id);
         return;
@@ -186,7 +194,8 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
         return;
     }
 
-    auto conn = db_pool_->acquire_connection();
+    int shard = shard_from_mail(mail_list.front());
+    auto conn = m_shardRouter->get_db_pool(shard)->acquire_connection();
     if (!conn.is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for batch delete");
         return;
@@ -237,10 +246,6 @@ void PersistentQueue::set_local_domain(std::string local_domain) {
     if (!local_domain.empty()) {
         local_domain_ = std::move(local_domain);
     }
-}
-
-void PersistentQueue::set_storage_provider(std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider) {
-    storage_provider_ = std::move(storage_provider);
 }
 
 void PersistentQueue::set_pressure_config(PersistentQueuePressureConfig config) {
@@ -352,8 +357,8 @@ bool PersistentQueue::process_task() {
                                                                           std::move(reserved_records))) {
                         LOG_PERSISTENT_QUEUE_WARN("Failed to hand reserved outbox records to local outbound client, mail_id={}",
                                                   mail_id);
-                        outbound::OutboxRepository repository(db_pool_);
-                        if (!repository.release_local_reservations(reserved_ids)) {
+                        outbound::OutboxRepository repository;
+                        if (!repository.release_local_reservations(*m_shardRouter->get_db_pool(0), reserved_ids)) {
                             LOG_PERSISTENT_QUEUE_WARN("Failed to release local outbox reservations for mail_id={}",
                                                       mail_id);
                         }
@@ -716,7 +721,8 @@ bool PersistentQueue::persist_mail_transactional(mail* mail_data,
         return false;
     }
 
-    auto scoped = db_pool_->acquire_connection();
+    int shard = shard_from_mail(mail_data);
+    auto scoped = m_shardRouter->get_db_pool(shard)->acquire_connection();
     if (!scoped.is_valid()) {
         error = "Failed to get database connection";
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for message-id dedup check, mail_id={}",
@@ -774,9 +780,9 @@ void PersistentQueue::cleanup_mail_files(mail* mail_data) {
     }
 
     if (!mail_data->body_path.empty()) {
-        if (storage_provider_) {
+        if (m_shardRouter->get_storage(0)) {
             std::string error;
-            if (!storage_provider_->remove_object(mail_data->body_path, error)) {
+            if (!m_shardRouter->get_storage(0)->remove_object(mail_data->body_path, error)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail body object: {}, error={}",
                                           mail_data->body_path,
                                           error);
@@ -790,9 +796,9 @@ void PersistentQueue::cleanup_mail_files(mail* mail_data) {
         if (attachment.filepath.empty()) {
             continue;
         }
-        if (storage_provider_) {
+        if (m_shardRouter->get_storage(0)) {
             std::string error;
-            if (!storage_provider_->remove_object(attachment.filepath, error)) {
+            if (!m_shardRouter->get_storage(0)->remove_object(attachment.filepath, error)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to delete attachment object: {}, error={}",
                                           attachment.filepath,
                                           error);
@@ -808,7 +814,8 @@ void PersistentQueue::cleanup_failed_mail(mail* mail_data) {
         return;
     }
 
-    auto scoped = db_pool_->acquire_connection();
+    int shard = shard_from_mail(mail_data);
+    auto scoped = m_shardRouter->get_db_pool(shard)->acquire_connection();
     if (!scoped.is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for cleaning up failed mail ID {}", mail_data->id);
         cleanup_mail_files(mail_data);
@@ -865,11 +872,12 @@ bool PersistentQueue::should_reject_submission(const mail& mail_data, std::strin
 }
 
 bool PersistentQueue::is_db_under_pressure(std::string& reason) const {
-    if (!db_pool_ || pressure_config_.min_db_available_connections == 0) {
+    auto db = m_shardRouter->get_db_pool(0);
+    if (!db || pressure_config_.min_db_available_connections == 0) {
         return false;
     }
 
-    const auto available = db_pool_->get_available_connections();
+    const auto available = db->get_available_connections();
     if (available >= pressure_config_.min_db_available_connections) {
         return false;
     }

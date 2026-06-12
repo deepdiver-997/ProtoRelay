@@ -116,6 +116,15 @@ CREATE TABLE IF NOT EXISTS mail_mailbox (
     INDEX idx_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件-邮箱关联表';
 
+-- 创建分片映射表（table 模式分片路由使用）
+CREATE TABLE IF NOT EXISTS user_shards (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(320) NOT NULL UNIQUE COMMENT '用户邮箱',
+    shard_id INT UNSIGNED NOT NULL COMMENT '分片索引',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户-分片映射表';
+
 -- 创建系统默认邮箱的存储过程
 DROP PROCEDURE IF EXISTS create_default_mailboxes;
 DELIMITER //

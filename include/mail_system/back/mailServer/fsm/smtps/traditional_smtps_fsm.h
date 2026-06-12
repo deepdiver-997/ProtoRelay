@@ -9,6 +9,7 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include <boost/asio/ssl.hpp>
 #include <atomic>
 #include <chrono>
@@ -38,8 +39,8 @@ public:
         std::shared_ptr<ThreadPoolBase> io_thread_pool,
         std::shared_ptr<ThreadPoolBase> worker_thread_pool,
         std::shared_ptr<persist_storage::PersistentQueue> persistent_queue,
-        std::shared_ptr<DBPool> db_pool
-    ) : SmtpsFsm<ConnectionType>(io_thread_pool, worker_thread_pool, persistent_queue, db_pool) {
+        std::shared_ptr<router::IShardRouter> shard_router
+    ) : SmtpsFsm<ConnectionType>(io_thread_pool, worker_thread_pool, persistent_queue, std::move(shard_router)) {
         init_transition_table();
         init_state_handlers();
     }

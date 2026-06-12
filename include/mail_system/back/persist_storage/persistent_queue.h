@@ -6,6 +6,7 @@
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/common/logger.h"
 #include <atomic>
@@ -63,9 +64,8 @@ struct PersistentQueuePressureConfig {
 class PersistentQueue {
 public:
     PersistentQueue(
-        std::shared_ptr<DBPool> db_pool,
-        std::shared_ptr<ThreadPoolBase> worker_pool,
-        std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider = nullptr
+        std::shared_ptr<router::IShardRouter> shard_router,
+        std::shared_ptr<ThreadPoolBase> worker_pool
     );
 
     ~PersistentQueue();
@@ -84,7 +84,6 @@ public:
     void set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client);
     void set_local_domain(std::string local_domain);
     void set_batch_pop_size(size_t batch_size);
-    void set_storage_provider(std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider);
     void set_pressure_config(PersistentQueuePressureConfig config);
 
     void shutdown();
@@ -123,10 +122,12 @@ private:
     bool is_db_under_pressure(std::string& reason) const;
     bool is_memory_under_pressure(std::string& reason) const;
 
+    // ---- 分片辅助 ----
+    int shard_from_mail(const mail* m) const;
+
     // ---- 成员变量 ----
-    std::shared_ptr<DBPool> db_pool_;
+    std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<ThreadPoolBase> worker_pool_;
-    std::shared_ptr<mail_system::storage::IStorageProvider> storage_provider_;
     std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client_;
     std::string local_domain_{"example.com"};
     PersistentQueuePressureConfig pressure_config_{};

@@ -24,6 +24,7 @@
 #include "mail_system/back/outbound/smtp_outbound_client.h"
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/mailServer/metrics_server.h"
 
 namespace mail_system {
@@ -79,14 +80,14 @@ public:
 public:
     std::shared_ptr<mail_system::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<mail_system::ThreadPoolBase> m_workerThreadPool;
-    std::shared_ptr<DBPool> m_dbPool;
     std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;
     std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
     std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
-    std::shared_ptr<storage::IStorageProvider> m_storageProvider;
+    std::shared_ptr<router::IShardRouter> m_shardRouter;
 
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
+    std::shared_ptr<router::IShardRouter> get_shard_router() const { return m_shardRouter; }
 
     bool ssl_in_worker;
     std::shared_ptr<IMailboxCache> m_mailboxCache;
@@ -143,11 +144,14 @@ public:
         if (m_persistentQueue)
             add_gauge("protorelay_inflight_mails", "Current inflight mails",
                       m_persistentQueue->inflight_count());
-        if (m_dbPool) {
-            add_gauge("protorelay_db_pool_size", "DB pool size", m_dbPool->get_pool_size());
-            add_gauge("protorelay_db_available", "DB idle connections", m_dbPool->get_available_connections());
-            add_gauge("protorelay_db_active", "DB active connections", m_dbPool->get_active_connections());
-            add_gauge("protorelay_db_pool_max", "DB pool max", m_dbPool->get_max_pool_size());
+        if (m_shardRouter) {
+            auto db = m_shardRouter->get_db_pool(0);
+            if (db) {
+                add_gauge("protorelay_db_pool_size", "DB pool size", db->get_pool_size());
+                add_gauge("protorelay_db_available", "DB idle connections", db->get_available_connections());
+                add_gauge("protorelay_db_active", "DB active connections", db->get_active_connections());
+                add_gauge("protorelay_db_pool_max", "DB pool max", db->get_max_pool_size());
+            }
         }
         return out;
     }

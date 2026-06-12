@@ -147,8 +147,8 @@ void SmtpsSession<ConnectionType>::flush_buffer_to_disk() {
     }
 
     std::string error;
-    if (this->m_server->m_storageProvider) {
-        if (!this->m_server->m_storageProvider->append_binary(this->get_mail()->body_path,
+    if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
+        if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(this->get_mail()->body_path,
                                                               buffer_.get(),
                                                               buffer_used_,
                                                               error)) {
@@ -218,9 +218,9 @@ void SmtpsSession<ConnectionType>::async_flush_buffer_to_disk() {
 
     auto future = this->m_server->m_workerThreadPool->submit([this, body_path, buffer_data]() -> bool {
         try {
-            if (this->m_server->m_storageProvider) {
+            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
                 std::string error;
-                if (!this->m_server->m_storageProvider->append_binary(body_path,
+                if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(body_path,
                                                                       buffer_data.data(),
                                                                       buffer_data.size(),
                                                                       error)) {
@@ -286,9 +286,9 @@ void SmtpsSession<ConnectionType>::append_to_buffer(const char* data, size_t siz
 
         if (size > buffer_size_) {
             if (this->get_mail()) {
-                if (this->m_server->m_storageProvider) {
+                if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
                     std::string error;
-                    if (!this->m_server->m_storageProvider->append_binary(this->get_mail()->body_path,
+                    if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(this->get_mail()->body_path,
                                                                           data,
                                                                           size,
                                                                           error)) {
@@ -336,8 +336,8 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     this->get_mail()->subject = "(无主题)";
     this->get_mail()->persist_status = persist_storage::PersistStatus::PENDING;
 
-    if (this->m_server->m_storageProvider) {
-        this->get_mail()->body_path = this->m_server->m_storageProvider->build_mail_body_key(this->get_mail()->id);
+    if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
+        this->get_mail()->body_path = this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->build_mail_body_key(this->get_mail()->id);
     } else {
         auto cfg = std::atomic_load(&this->m_server->m_config);
         std::string body_path = cfg->mail_storage_path;
@@ -479,9 +479,9 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
     }
 
     if (!mail_ptr->body_path.empty()) {
-        if (this->m_server->m_storageProvider) {
+        if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
             std::string error;
-            if (this->m_server->m_storageProvider->remove_object(mail_ptr->body_path, error)) {
+            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(mail_ptr->body_path, error)) {
                 LOG_SESSION_INFO("Deleted mail body file: {}", mail_ptr->body_path);
             } else {
                 LOG_SESSION_WARN("Failed to delete mail body file: {}, error={}", mail_ptr->body_path, error);
@@ -495,9 +495,9 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
 
     for (const auto& att : mail_ptr->attachments) {
         if (!att.filepath.empty()) {
-            if (this->m_server->m_storageProvider) {
+            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
                 std::string error;
-                if (this->m_server->m_storageProvider->remove_object(att.filepath, error)) {
+                if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(att.filepath, error)) {
                     LOG_SESSION_INFO("Deleted attachment file: {}", att.filepath);
                 } else {
                     LOG_SESSION_WARN("Failed to delete attachment file: {}, error={}", att.filepath, error);
@@ -620,9 +620,9 @@ void SmtpsSession<ConnectionType>::flush_attachment_buffer_to_disk() {
     }
 
     try {
-        if (this->m_server->m_storageProvider) {
+        if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
             std::string error;
-            if (!this->m_server->m_storageProvider->append_binary(context_.current_attachment_path,
+            if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(context_.current_attachment_path,
                                                                   context_.attachment_buffer.get(),
                                                                   context_.attachment_buffer_used,
                                                                   error)) {
@@ -668,9 +668,9 @@ void SmtpsSession<ConnectionType>::async_flush_attachment_buffer_to_disk() {
 
     auto future = this->m_server->m_workerThreadPool->submit([this, attachment_path, buffer_data]() -> bool {
         try {
-            if (this->m_server->m_storageProvider) {
+            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
                 std::string error;
-                if (!this->m_server->m_storageProvider->append_binary(attachment_path,
+                if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(attachment_path,
                                                                       buffer_data.data(),
                                                                       buffer_data.size(),
                                                                       error)) {
@@ -710,8 +710,8 @@ void SmtpsSession<ConnectionType>::async_flush_attachment_buffer_to_disk() {
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data, size_t size) {
     if (context_.current_attachment_path.empty() && this->get_mail() && context_.current_part_is_attachment) {
-        if (this->m_server->m_storageProvider) {
-            context_.current_attachment_path = this->m_server->m_storageProvider->build_attachment_key(
+        if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
+            context_.current_attachment_path = this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->build_attachment_key(
                 this->get_mail()->id,
                 context_.current_attachment_filename);
         } else {
@@ -741,9 +741,9 @@ void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data,
 
         if (size > context_.attachment_buffer_size) {
             try {
-                if (this->m_server->m_storageProvider) {
+                if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
                     std::string error;
-                    if (this->m_server->m_storageProvider->append_binary(context_.current_attachment_path,
+                    if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(context_.current_attachment_path,
                                                                           data,
                                                                           size,
                                                                           error)) {

@@ -3,6 +3,7 @@
 
 #include "mail_system/back/outbound/dns_resolver.h"
 #include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include <atomic>
 #include <condition_variable>
@@ -66,7 +67,7 @@ struct HotDeliveryTask {
 
 class SmtpOutboundClient {
 public:
-    SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
+    SmtpOutboundClient(std::shared_ptr<router::IShardRouter> shard_router,
                        std::shared_ptr<ThreadPoolBase> io_thread_pool,
                        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
                        std::shared_ptr<IDnsResolver> dns_resolver,
@@ -103,7 +104,7 @@ private:
                                   std::vector<OutboxRecord>& reserved_records);
 
 private:
-    std::shared_ptr<DBPool> db_pool_;
+    std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<ThreadPoolBase> io_thread_pool_;
     std::shared_ptr<ThreadPoolBase> worker_thread_pool_;
     std::shared_ptr<IDnsResolver> dns_resolver_;
@@ -115,6 +116,8 @@ private:
     std::vector<std::uint16_t> outbound_ports_;
     int max_delivery_attempts_{8};
     std::string worker_id_;
+    size_t home_shard_{0};                           // 本地优先 shard
+    std::vector<size_t> steal_shard_order_;          // 偷任务时的 shard 顺序（按延迟/优先级）
 
     std::thread orchestrator_thread_;
     std::atomic<bool> running_{false};

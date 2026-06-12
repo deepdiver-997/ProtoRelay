@@ -318,6 +318,7 @@ set(COMMON_SRCS
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp
+    src/mail_system/back/router/table_shard_router.cpp
 )
 
 if(ENABLE_HDFS_WEB_STORAGE)

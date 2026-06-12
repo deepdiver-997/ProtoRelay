@@ -428,8 +428,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 ctx->client_username = username;
             }
 
-            if (this->auth_user(session.get(), username, password)) {
+            int shard = 0;
+            if (this->auth_user(session.get(), username, password, shard)) {
                 ctx->is_authenticated = true;
+                ctx->shard_index = shard;
                 SessionBase<ConnectionType>::do_async_write(
                     std::move(session),
                     "235 Authentication successful\r\n",
@@ -539,8 +541,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 LOG_AUTH_DEBUG("[AUTH PLAIN 1-step] auto-domain → {}", username);
             }
 
-            if (this->auth_user(session.get(), username, password)) {
+            int shard = 0;
+            if (this->auth_user(session.get(), username, password, shard)) {
                 ctx->is_authenticated = true;
+                ctx->shard_index = shard;
                 SessionBase<ConnectionType>::do_async_write(
                     std::move(session),
                     "235 Authentication successful\r\n",
@@ -689,8 +693,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
     }
 
     LOG_AUTH_DEBUG("[AUTH LOGIN] attempting auth: username=[{}] password_len={}", username, password.length());
-    if (this->auth_user(session.get(), username, password)) {
+    int shard = 0;
+            if (this->auth_user(session.get(), username, password, shard)) {
         static_cast<SmtpsContext*>(session->get_context())->is_authenticated = true;
+        static_cast<SmtpsContext*>(session->get_context())->shard_index = shard;
         SessionBase<ConnectionType>::do_async_write(
             std::move(session),
             "235 Authentication successful\r\n",

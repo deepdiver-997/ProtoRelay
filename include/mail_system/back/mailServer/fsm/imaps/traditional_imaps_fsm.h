@@ -8,6 +8,7 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include <boost/asio/ssl.hpp>
 #include <atomic>
 #include <chrono>
@@ -39,9 +40,8 @@ public:
     TraditionalImapsFsm(
         std::shared_ptr<ThreadPoolBase> io_thread_pool,
         std::shared_ptr<ThreadPoolBase> worker_thread_pool,
-        std::shared_ptr<DBPool> db_pool,
-        std::shared_ptr<storage::IStorageProvider> storage_provider
-    ) : ImapsFsm<ConnectionType>(io_thread_pool, worker_thread_pool, db_pool, storage_provider) {
+        std::shared_ptr<router::IShardRouter> shard_router
+    ) : ImapsFsm<ConnectionType>(io_thread_pool, worker_thread_pool, std::move(shard_router)) {
         init_transition_table();
         init_state_handlers();
     }

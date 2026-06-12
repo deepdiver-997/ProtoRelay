@@ -19,12 +19,11 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
 
     // SMTP 专用：创建持久化队列和出站投递客户端
     // 这些是 SMTP 私有的，IMAP 不需要
-    if (m_dbPool) {
+    if (m_shardRouter) {
         if (!m_persistentQueue) {
             m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(
-                m_dbPool,
-                m_workerThreadPool,
-                m_storageProvider);
+                m_shardRouter,
+                m_workerThreadPool);
             m_persistentQueue->set_local_domain(m_domain);
             persist_storage::PersistentQueuePressureConfig pressure_config;
             pressure_config.max_inflight_mails = cfg->persist_max_inflight_mails;
@@ -55,7 +54,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             outbound_polling.backoff_shift_cap = static_cast<std::size_t>(cfg->outbound_poll_backoff_shift_cap);
 
             m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
-                m_dbPool,
+                m_shardRouter,
                 m_ioThreadPool,
                 m_workerThreadPool,
                 std::make_shared<outbound::CaresDnsResolver>(),
@@ -74,8 +73,8 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         LOG_SERVER_WARN("No database pool — SMTP outbound delivery disabled");
     }
 
-    m_tcp_fsm = std::make_shared<TraditionalSmtpsFsm<TcpConnection>>(m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_dbPool);
-    m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_dbPool);
+    m_tcp_fsm = std::make_shared<TraditionalSmtpsFsm<TcpConnection>>(m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
+    m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
 }
 
 SmtpsServer::~SmtpsServer() {

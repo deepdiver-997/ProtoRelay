@@ -1,5 +1,8 @@
 #include "mail_system/back/mailServer/server_base.h"
 #include "mail_system/back/outbound/cares_dns_resolver.h"
+#include "mail_system/back/router/hash_shard_router.h"
+#include "mail_system/back/router/static_shard_router.h"
+#include "mail_system/back/router/table_shard_router.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/distributed_mysql_pool.h"
@@ -19,7 +22,6 @@ ServerBase::ServerBase(const ServerConfig& config,
        std::shared_ptr<DBPool> dbPool)
     : m_ioThreadPool(ioThreadPool),
       m_workerThreadPool(wokerThreadPool),
-      m_dbPool(dbPool),
       ssl_in_worker(false),
       m_domain(config.system_domain.empty() ? std::string("example.com") : config.system_domain),
       m_config(std::make_shared<ServerConfig>(config)),
@@ -34,13 +36,35 @@ ServerBase::ServerBase(const ServerConfig& config,
             config.log_to_console, config.log_to_file);
         LOG_SERVER_INFO("Logger initialized with level: {}", config.log_level);
 
-        // storage provider
+        // ---- 1. 创建 DB 池 ----
+        auto main_db_pool = dbPool;  // 可能从外部注入
+        if (config.use_database && main_db_pool == nullptr) {
+            if (config.db_pool_config.achieve.find("mysql") == 0) {
+                try {
+                    if (config.db_pool_config.achieve == "mysql_distributed")
+                        main_db_pool = DistributedMySQLPoolFactory::get_instance().create_pool(
+                            config.db_pool_config, std::make_shared<MySQLService>());
+                    else
+                        main_db_pool = MySQLPoolFactory::get_instance().create_pool(
+                            config.db_pool_config, std::make_shared<MySQLService>());
+                } catch (const std::exception& e) {
+                    LOG_SERVER_ERROR("Failed to create MySQL pool: {}", e.what());
+                }
+            }
+        }
+        if (main_db_pool)
+            LOG_SERVER_INFO("Database pool initialized successfully");
+        else
+            LOG_SERVER_WARN("Database pool is not initialized");
+
+        // ---- 2. 创建存储 ----
+        std::shared_ptr<storage::IStorageProvider> main_storage;
         if (config.storage_provider == "distributed") {
-            m_storageProvider = std::make_shared<storage::DistributedFileStorageProvider>(
+            main_storage = std::make_shared<storage::DistributedFileStorageProvider>(
                 config.distributed_storage_roots, config.distributed_storage_replica_count);
         } else if (config.storage_provider == "hdfs_web") {
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
-            m_storageProvider = std::make_shared<storage::HdfsWebStorageProvider>(
+            main_storage = std::make_shared<storage::HdfsWebStorageProvider>(
                 config.hdfs_endpoint, config.hdfs_base_path, config.hdfs_user,
                 config.hdfs_replication, static_cast<long>(config.hdfs_timeout_ms));
 #else
@@ -51,14 +75,74 @@ ServerBase::ServerBase(const ServerConfig& config,
                 std::filesystem::create_directories(config.mail_storage_path);
             if (!std::filesystem::exists(config.attachment_storage_path))
                 std::filesystem::create_directories(config.attachment_storage_path);
-            m_storageProvider = std::make_shared<storage::LocalFileStorageProvider>(
+            main_storage = std::make_shared<storage::LocalFileStorageProvider>(
                 config.mail_storage_path, config.attachment_storage_path);
         }
-        std::string err;
-        if (!m_storageProvider->ensure_ready(err))
-            throw std::runtime_error("Storage init failed: " + err);
+        {
+            std::string err;
+            if (!main_storage->ensure_ready(err))
+                throw std::runtime_error("Storage init failed: " + err);
+        }
 
-        // thread pools
+        // ---- 3. 创建 Shard Router（包装 DB 池和存储） ----
+        auto& rc = config.router_config;
+        std::vector<std::shared_ptr<DBPool>> shard_db_pools;
+        std::vector<std::shared_ptr<storage::IStorageProvider>> shard_storages;
+
+        if (!rc.shards.empty()) {
+            for (size_t i = 0; i < rc.shards.size() && i < rc.shard_count; ++i) {
+                auto& se = rc.shards[i];
+                std::shared_ptr<DBPool> sdb;
+                if (!se.db_config_file.empty()) {
+                    DBPoolConfig scfg;
+                    if (scfg.loadFromJson(se.db_config_file)) {
+                        if (scfg.achieve == "mysql_distributed")
+                            sdb = DistributedMySQLPoolFactory::get_instance().create_pool(
+                                scfg, std::make_shared<MySQLService>());
+                        else
+                            sdb = MySQLPoolFactory::get_instance().create_pool(
+                                scfg, std::make_shared<MySQLService>());
+                    }
+                }
+                shard_db_pools.push_back(sdb ? sdb : main_db_pool);
+
+                std::shared_ptr<storage::IStorageProvider> sst;
+                if (!se.storage_root.empty()) {
+                    auto mail_dir = se.storage_root + "/mail";
+                    auto att_dir  = se.storage_root + "/attachments";
+                    if (!std::filesystem::exists(mail_dir))
+                        std::filesystem::create_directories(mail_dir);
+                    if (!std::filesystem::exists(att_dir))
+                        std::filesystem::create_directories(att_dir);
+                    sst = std::make_shared<storage::LocalFileStorageProvider>(mail_dir, att_dir);
+                }
+                shard_storages.push_back(sst ? sst : main_storage);
+            }
+        } else {
+            shard_db_pools = {main_db_pool};
+            shard_storages = {main_storage};
+        }
+
+        if (rc.type == "table") {
+            if (!main_db_pool)
+                throw std::runtime_error("table router requires a database pool");
+            m_shardRouter = std::make_shared<router::TableShardRouter>(
+                main_db_pool,
+                rc.table_name, rc.email_column, rc.shard_column,
+                rc.shard_count, rc.cache_capacity,
+                shard_db_pools, shard_storages);
+        } else if (rc.type == "static") {
+            m_shardRouter = std::make_shared<router::StaticShardRouter>(
+                rc.static_mappings, rc.default_shard,
+                shard_db_pools, shard_storages);
+        } else {
+            m_shardRouter = std::make_shared<router::HashShardRouter>(
+                rc.shard_count, shard_db_pools, shard_storages);
+        }
+        LOG_SERVER_INFO("Shard router initialized: type={} shard_count={}",
+                        m_shardRouter->name(), m_shardRouter->shard_count());
+
+        // ---- 4. 线程池 ----
         if (config.io_thread_count > 0 && m_ioThreadPool == nullptr) {
             m_ioThreadPool = std::make_shared<IOThreadPool>(config.io_thread_count);
             m_ioThreadPool->start();
@@ -67,28 +151,6 @@ ServerBase::ServerBase(const ServerConfig& config,
             m_workerThreadPool = std::make_shared<BoostThreadPool>(config.worker_thread_count);
             m_workerThreadPool->start();
         }
-
-        // database
-        if (config.use_database && m_dbPool == nullptr) {
-            if (config.db_pool_config.achieve.find("mysql") == 0) {
-                try {
-                    if (config.db_pool_config.achieve == "mysql_distributed")
-                        m_dbPool = DistributedMySQLPoolFactory::get_instance().create_pool(
-                            config.db_pool_config, std::make_shared<MySQLService>());
-                    else
-                        m_dbPool = MySQLPoolFactory::get_instance().create_pool(
-                            config.db_pool_config, std::make_shared<MySQLService>());
-                } catch (const std::exception& e) {
-                    LOG_SERVER_ERROR("Failed to create MySQL pool: {}", e.what());
-                    m_dbPool = nullptr;
-                }
-                if (m_dbPool) LOG_SERVER_INFO("Database pool initialized successfully");
-                else LOG_SERVER_ERROR("Failed to initialize database pool");
-            } else {
-                LOG_SERVER_WARN("No database achieve configured");
-            }
-        }
-        if (m_dbPool == nullptr) LOG_SERVER_WARN("Database pool is not initialized");
 
         // io context
         m_ioContext = std::make_shared<boost::asio::io_context>();

@@ -10,6 +10,7 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/algorithm/snow.h"
 #include <cstddef>
@@ -82,6 +83,7 @@ struct ImapContext {
     bool is_authenticated = false;
     std::string username;                     // 登录名（邮箱地址）
     uint64_t user_id = 0;                     // users.id
+    int shard_index = 0;                     // 由 shard router 在认证时分配
 
     // 命令标签
     std::string current_tag;                  // 当前命令的 tag，响应时回显
@@ -111,6 +113,7 @@ struct ImapContext {
         is_authenticated = false;
         username.clear();
         user_id = 0;
+        shard_index = 0;
         current_tag.clear();
         mailbox_selected = false;
         selected_mailbox_name.clear();
@@ -146,27 +149,31 @@ public:
 protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
-    std::shared_ptr<DBPool> m_dbPool;
-    std::shared_ptr<storage::IStorageProvider> m_storageProvider;
+    std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
 
 
 public:
-    // 邮箱摘要 LRU 缓存类型（外部注入时使用）
     ImapsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
              std::shared_ptr<ThreadPoolBase> worker_thread_pool,
-             std::shared_ptr<DBPool> db_pool,
-             std::shared_ptr<storage::IStorageProvider> storage_provider)
+             std::shared_ptr<router::IShardRouter> shard_router)
         : m_ioThreadPool(io_thread_pool),
           m_workerThreadPool(worker_thread_pool),
-          m_dbPool(db_pool),
-          m_storageProvider(storage_provider) {}
+          m_shardRouter(std::move(shard_router)) {}
 
     virtual ~ImapsFsm() = default;
 
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
-    
+
+    ScopedConnection acquire_connection(int shard) {
+        auto pool = m_shardRouter->get_db_pool(static_cast<size_t>(shard));
+        return pool->acquire_connection();
+    }
+
+    std::shared_ptr<storage::IStorageProvider> get_storage(int shard) {
+        return m_shardRouter->get_storage(static_cast<size_t>(shard));
+    }
 
     // 处理事件 —— 纯虚接口
     virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session,
@@ -230,19 +237,30 @@ public:
     // ========== 数据库操作 ==========
 
     // 用户认证（复用和 SMTP 相同的 users 表）
+    // out_shard 返回该用户所在的 shard 索引，供 session 存储
     bool auth_user(SessionBase<ConnectionType>* session,
                    const std::string& mail_address,
                    const std::string& password,
-                   uint64_t& out_user_id) {
+                   uint64_t& out_user_id,
+                   int& out_shard) {
         LOG_AUTH_INFO("IMAP AUTH attempt: mail_address=[{}]", mail_address);
 
         if (!session) {
             LOG_AUTH_ERROR("Session is null in auth_user");
             return false;
         }
-        auto conn = m_dbPool->acquire_connection();
+
+        // 通过 shard router 确定用户所在 shard
+        int shard = 0;
+        if (m_shardRouter) {
+            int r = m_shardRouter->route(mail_address);
+            if (r >= 0) shard = r;
+        }
+        out_shard = shard;
+
+        auto conn = acquire_connection(shard);
         if (!conn.is_valid()) {
-            LOG_AUTH_ERROR("Failed to get database connection");
+            LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
             return false;
         }
 
@@ -282,7 +300,7 @@ public:
     // 获取用户的邮箱列表
     bool get_mailboxes(uint64_t user_id,
                        std::vector<std::tuple<uint64_t, std::string, int>>& mailboxes) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             LOG_DATABASE_ERROR("Failed to get DB connection in get_mailboxes");
             return false;
@@ -306,7 +324,7 @@ public:
 
     // 根据邮箱名称查找邮箱 ID
     uint64_t find_mailbox_id(uint64_t user_id, const std::string& mailbox_name) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return 0;
         }
@@ -357,7 +375,7 @@ public:
 
     bool get_mailbox_mails(uint64_t mailbox_id, uint64_t user_id,
                            std::vector<MailboxMailInfo>& mails) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return false;
         }
@@ -404,7 +422,7 @@ public:
     // 获取单封邮件信息
     bool get_mail_info(uint64_t mail_id,
                        MailboxMailInfo& info) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return false;
         }
@@ -426,7 +444,7 @@ public:
 
     // 获取发件人
     std::string get_mail_sender(uint64_t mail_id) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return "";
         }
@@ -442,7 +460,7 @@ public:
     // 获取收件人列表
     std::vector<std::string> get_mail_recipients(uint64_t mail_id) {
         std::vector<std::string> recipients;
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return recipients;
         }
@@ -459,7 +477,7 @@ public:
 
     // 获取用户邮箱地址
     std::string get_user_email(uint64_t user_id) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return "";
         }
@@ -474,7 +492,7 @@ public:
 
     // 更新邮件已读/未读状态
     bool update_mail_seen(uint64_t mail_id, const std::string& recipient, bool seen) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return false;
         }
@@ -486,7 +504,7 @@ public:
 
     // 更新已删除标记
     bool update_mail_deleted(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool deleted) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return false;
         }
@@ -497,7 +515,7 @@ public:
 
     // 更新标星标记
     bool update_mail_flagged(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool flagged) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return false;
         }
@@ -516,12 +534,12 @@ public:
         out_body_path.clear();
 
         // 保存正文
-        std::string storage_key = m_storageProvider
-            ? m_storageProvider->build_mail_body_key(static_cast<uint64_t>(mail_id))
+        std::string storage_key = get_storage(0)
+            ? get_storage(0)->build_mail_body_key(static_cast<uint64_t>(mail_id))
             : "";
         if (!storage_key.empty()) {
             std::string err;
-            if (!m_storageProvider->append_binary(storage_key, body_content.data(),
+            if (!get_storage(0)->append_binary(storage_key, body_content.data(),
                                                   body_content.size(), err)) {
                 error = "Storage error: " + err;
                 return 0;
@@ -538,7 +556,7 @@ public:
         }
 
         // 插入 mails 表
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) { error = "DB connection failed"; return 0; }
         auto ts = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -558,7 +576,7 @@ public:
     bool link_mail_to_mailbox(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id,
                               const std::string& sender, const std::string& recipient,
                               int status) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) return false;
 
         int64_t rid = algorithm::get_snowflake_generator().next_id();
@@ -712,7 +730,7 @@ public:
 
     // 获取邮箱的总邮件数
     size_t get_mailbox_count(uint64_t mailbox_id, uint64_t user_id) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return 0;
         }
@@ -727,7 +745,7 @@ public:
 
     // 获取邮箱的未读邮件数
     size_t get_mailbox_unseen_count(uint64_t mailbox_id, uint64_t user_id) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return 0;
         }
@@ -746,7 +764,7 @@ public:
 
     // 获取邮箱的最近邮件 UID（这里直接用 mail_id 充当 UID）
     uint64_t get_mailbox_uidnext(uint64_t mailbox_id, uint64_t user_id) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return 1;
         }
@@ -762,7 +780,7 @@ public:
 
     // EXPUNGE：真正从邮箱删除打了 \Deleted 标记的邮件
     void expunge_mailbox(uint64_t mailbox_id, uint64_t user_id) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return;
         }
@@ -775,7 +793,7 @@ public:
     // 获取 EXPUNGE 序列（返回被删邮件的 mail_id 列表）
     std::vector<uint64_t> get_expunged_ids(uint64_t mailbox_id, uint64_t user_id) {
         std::vector<uint64_t> ids;
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             return ids;
         }

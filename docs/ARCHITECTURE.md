@@ -324,7 +324,20 @@ Recommended production shape:
 - External MySQL and optional HDFS cluster endpoints.
 - TLS certificates provisioned externally (self-signed for dev, CA-issued for prod).
 
-## 9. Current Scope and Extension Points
+## 9. Sharding / Horizontal Scaling
+
+ProtoRelay supports user-based sharding via the `IShardRouter` abstraction. Each shard owns an independent database pool and storage provider. The router maps `email → shard_index`, and all components (FSMs, PersistentQueue, OutboundClient) access DB and storage exclusively through the router—no raw DBPool or IStorageProvider references are held anywhere.
+
+Three routing strategies are provided:
+- **Hash** — `hash(email) % N`, deterministic, zero-config
+- **Table** — queries `user_shards` table, with in-memory `LruCache` (TTL=0, immutable mappings)
+- **Static** — config-file domain-to-shard mapping
+
+The delivery worker polls all shards with a local-first policy: claim from the home shard, then steal from higher-latency shards when idle. `OutboxRepository` is fully stateless—it receives `DBPool&` at call time rather than holding a connection pool.
+
+See [docs/sharding-refactor.md](sharding-refactor.md) for the full design discussion and refactoring history.
+
+## 10. Current Scope and Extension Points
 
 Implemented now:
 
@@ -342,10 +355,11 @@ Expected extension directions:
 - Certificate hot-reload and rolling restart ergonomics.
 - File-free in-memory outbound MIME construction for the hot-dispatch path.
 
-## 10. Related Docs
+## 11. Related Docs
 
 - `README.md`
 - `README_zh.md`
+- `docs/sharding-refactor.md`
 - `docs/smtp-outbound-client-design.md`
 - `docs/service-deployment.md`
 - `docs/domain-deployment-guide.md`

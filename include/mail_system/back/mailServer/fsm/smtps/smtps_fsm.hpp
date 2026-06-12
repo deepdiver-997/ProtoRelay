@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <vector>
 #include "mail_system/back/common/bcrypt.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include <fstream>
 
 namespace mail_system {
@@ -99,6 +100,7 @@ struct SmtpsContext {
     bool spf_checked = false;                  // SPF 已在 MAIL FROM 阶段验证
     std::string spf_result;                    // MAIL FROM 阶段的 SPF 结果
     std::string spf_reason;                    // SPF 失败原因
+    int shard_index = 0;                       // 由 shard router 在认证时分配
 
     // 附件缓冲区相关（采用与邮件相同的缓冲策略）
     size_t attachment_buffer_size = 0;           // 当前附件缓冲区大小
@@ -145,6 +147,7 @@ struct SmtpsContext {
         spf_checked = false;
         spf_result.clear();
         spf_reason.clear();
+        shard_index = 0;
         if (current_attachment_stream.is_open()) {
             current_attachment_stream.close();
         }
@@ -164,22 +167,27 @@ class SmtpsFsm {
 protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
-    std::shared_ptr<DBPool> m_dbPool;
+    std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<IMailboxCache> m_mailboxCache;
     std::shared_ptr<mail_system::persist_storage::PersistentQueue> m_persistentQueue;
 public:
     SmtpsFsm(std::shared_ptr<ThreadPoolBase> io_thread_pool,
              std::shared_ptr<ThreadPoolBase> worker_thread_pool,
              std::shared_ptr<persist_storage::PersistentQueue> persistent_queue,
-             std::shared_ptr<DBPool> db_pool)
+             std::shared_ptr<router::IShardRouter> shard_router)
         : m_ioThreadPool(io_thread_pool),
           m_workerThreadPool(worker_thread_pool),
-                    m_dbPool(db_pool),
-                    m_persistentQueue(persistent_queue) {}
+          m_shardRouter(std::move(shard_router)),
+          m_persistentQueue(persistent_queue) {}
     virtual ~SmtpsFsm() = default;
 
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
+
+    ScopedConnection acquire_connection(int shard) {
+        auto pool = m_shardRouter->get_db_pool(static_cast<size_t>(shard));
+        return pool->acquire_connection();
+    }
 
     // 处理事件
     virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event, const std::string& args) = 0;
@@ -231,14 +239,24 @@ public:
 
     // 数据库操作
 
-    bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address, const std::string& password) {
+    bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address,
+                   const std::string& password, int& out_shard) {
         LOG_AUTH_INFO("AUTH attempt: mail_address=[{}] password_len={}", mail_address, password.length());
 
         if (!session) {
             LOG_AUTH_ERROR("Session is null in auth_user");
             return false;
         }
-        auto conn = m_dbPool->acquire_connection();
+
+        // 通过 shard router 确定用户所在 shard
+        int shard = 0;
+        if (m_shardRouter) {
+            int r = m_shardRouter->route(mail_address);
+            if (r >= 0) shard = r;
+        }
+        out_shard = shard;
+
+        auto conn = acquire_connection(shard);
         if (!conn.is_valid()) {
             LOG_AUTH_ERROR("Failed to get database connection in auth_user");
             return false;
@@ -290,17 +308,13 @@ public:
         return ok;
     }
 
-    bool auth_user(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& mail_address, const std::string& password) {
-        return auth_user(session.get(), mail_address, password);
-    }
-
     void get_mail_data(SessionBase<ConnectionType>* session, std::string& mail_data) {
         if (!session) {
             LOG_AUTH_ERROR("Session is null in get_mail_data");
             return;
         }
 
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             LOG_AUTH_ERROR("Failed to get database connection in get_mail_data");
             return;
@@ -332,11 +346,6 @@ public:
             return std::future<bool>();
         }
 
-        if (!m_dbPool) {
-            LOG_DATABASE_ERROR("DBPool is null in save_mail_metadata_async");
-            return std::future<bool>();
-        }
-
         if (!m_workerThreadPool) {
             LOG_DATABASE_ERROR("WorkerThreadPool is null in save_mail_metadata_async");
             return std::future<bool>();
@@ -346,7 +355,7 @@ public:
 
 
         auto task = [this, file_path_prefix, mail_data]() -> bool {
-            auto conn = this->m_dbPool->acquire_connection();
+            auto conn = this->acquire_connection(0);
             if (!conn.is_valid()) {
                 LOG_DATABASE_ERROR("Failed to get database connection in async task");
                 return false;
@@ -418,13 +427,13 @@ public:
 
     // 保存附件元数据到数据库（异步），返回 future
     std::future<bool> save_attachment_metadata_async(const attachment& att, size_t mail_id) {
-        if (!m_dbPool || !m_workerThreadPool) {
+        if (!m_workerThreadPool) {
             LOG_DATABASE_ERROR("DBPool or WorkerThreadPool is null in save_attachment_metadata_async");
             return std::future<bool>();
         }
 
         auto task = [this, att, mail_id]() -> bool {
-            auto conn = this->m_dbPool->acquire_connection();
+            auto conn = this->acquire_connection(0);
             if (!conn.is_valid()) {
                 LOG_DATABASE_ERROR("Failed to get database connection in save_attachment_metadata_async");
                 return false;
@@ -456,7 +465,7 @@ public:
 
     // 根据文件路径删除邮件元数据 假定数据库操作一定成功
     void remove_metadata_by_file_path(const std::vector<std::string>& file_paths) {
-        auto conn = m_dbPool->acquire_connection();
+        auto conn = acquire_connection(0);
         if (!conn.is_valid()) {
             LOG_DATABASE_ERROR("Failed to get database connection in remove_metadata_by_file_path");
             return;

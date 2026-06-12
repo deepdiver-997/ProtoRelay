@@ -586,7 +586,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
 
 }
 
-SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
+SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<router::IShardRouter> shard_router,
                                        std::shared_ptr<ThreadPoolBase> io_thread_pool,
                                        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
                                        std::shared_ptr<IDnsResolver> dns_resolver,
@@ -596,14 +596,13 @@ SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
                                                                              std::string local_domain,
                                                                              std::vector<std::uint16_t> outbound_ports,
                                                                              int max_delivery_attempts)
-    : db_pool_(std::move(db_pool)),
+    : m_shardRouter(std::move(shard_router)),
       io_thread_pool_(std::move(io_thread_pool)),
       worker_thread_pool_(std::move(worker_thread_pool)),
       dns_resolver_(std::move(dns_resolver)),
             server_interrupt_flag_(std::move(server_interrupt_flag)),
             identity_config_(std::move(identity_config)),
         polling_config_(std::move(polling_config)),
-      repository_(db_pool_),
             local_domain_(std::move(local_domain)),
             outbound_ports_(std::move(outbound_ports)),
             max_delivery_attempts_(std::max(1, max_delivery_attempts)) {
@@ -614,6 +613,12 @@ SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<DBPool> db_pool,
     std::ostringstream oss;
     oss << "outbound-worker-" << std::this_thread::get_id();
     worker_id_ = oss.str();
+
+    // 初始化 shard 优先级顺序（后续可按延迟排序）
+    if (m_shardRouter) {
+        steal_shard_order_ = m_shardRouter->shard_priority_order();
+        home_shard_ = steal_shard_order_.empty() ? 0 : steal_shard_order_.front();
+    }
 
     polling_config_.busy_sleep_ms = std::max(1, polling_config_.busy_sleep_ms);
     polling_config_.backoff_base_ms = std::max(1, polling_config_.backoff_base_ms);
@@ -703,13 +708,25 @@ void SmtpOutboundClient::run_loop() {
     while (running_.load()) {
         drain_notifications();
         drain_completion_queue();
-        repository_.requeue_expired_leases();
+
+        // 回收所有 shard 的过期租约
+        for (auto shard_idx : steal_shard_order_) {
+            auto db = m_shardRouter->get_db_pool(shard_idx);
+            if (db) repository_.requeue_expired_leases(*db);
+        }
 
         const auto hot_dispatched = drain_hot_records();
         if (hot_dispatched > 0) {
             empty_claim_rounds = 0;
         } else {
-            auto records = repository_.claim_batch(worker_id_, kClaimBatchSize, kLeaseSeconds);
+            // 本地优先 → 按优先级顺序偷任务
+            std::vector<OutboxRecord> records;
+            for (auto shard_idx : steal_shard_order_) {
+                auto db = m_shardRouter->get_db_pool(shard_idx);
+                if (!db) continue;
+                records = repository_.claim_batch(*db, worker_id_, kClaimBatchSize, kLeaseSeconds);
+                if (!records.empty()) break;
+            }
             if (!records.empty()) {
                 empty_claim_rounds = 0;
                 schedule_claimed_records(std::move(records));
@@ -803,7 +820,7 @@ void SmtpOutboundClient::schedule_claimed_records(std::vector<OutboxRecord> clai
             continue;
         }
 
-        auto mail_ptr = repository_.load_mail(mail_id);
+        auto mail_ptr = repository_.load_mail(*m_shardRouter->get_db_pool(0), mail_id);
         if (!mail_ptr) {
             LOG_OUTBOUND_WARN("Outbound flow failed to hydrate mail from DB, fallback to direct dispatch, mail_id={}, claimed_records={}",
                               mail_id,
@@ -838,11 +855,11 @@ void SmtpOutboundClient::drain_completion_queue() {
 
         bool ok = false;
         if (completion.success) {
-            ok = repository_.mark_sent(completion.outbox_id, completion.smtp_response);
+            ok = repository_.mark_sent(*m_shardRouter->get_db_pool(0), completion.outbox_id, completion.smtp_response);
         } else if (completion.permanent_failure) {
-            ok = repository_.mark_dead(completion.outbox_id, completion.error_message);
+            ok = repository_.mark_dead(*m_shardRouter->get_db_pool(0), completion.outbox_id, completion.error_message);
         } else {
-            ok = repository_.mark_retry(completion.outbox_id,
+            ok = repository_.mark_retry(*m_shardRouter->get_db_pool(0), completion.outbox_id,
                                        completion.error_message,
                                        completion.retry_delay_seconds);
         }

@@ -87,6 +87,65 @@ struct ListenerConfig {
 };
 
 // ============================================================
+// 分片路由配置
+// ============================================================
+struct ShardRouterConfig {
+    std::string type = "hash";           // "hash" / "table" / "static"
+    std::string table_name = "user_shards";
+    std::string email_column = "email";
+    std::string shard_column = "shard_id";
+    size_t shard_count = 1;
+    size_t cache_capacity = 100000;
+
+    // static 模式
+    std::vector<std::pair<std::string, int>> static_mappings;
+    int default_shard = 0;
+
+    // 每个 shard 的资源配置（table/static 模式使用）
+    struct ShardEntry {
+        std::string db_config_file;
+        std::string storage_root;
+    };
+    std::vector<ShardEntry> shards;
+
+    bool loadFromJson(const std::string& filename) {
+        std::ifstream f(filename);
+        if (!f.is_open()) return false;
+        nlohmann::json j;
+        f >> j;
+
+        type            = j.value("type", type);
+        table_name      = j.value("table_name", table_name);
+        email_column    = j.value("email_column", email_column);
+        shard_column    = j.value("shard_column", shard_column);
+        shard_count     = j.value("shard_count", shard_count);
+        cache_capacity  = j.value("cache_capacity", cache_capacity);
+        default_shard   = j.value("default_shard", default_shard);
+
+        if (j.contains("mappings") && j["mappings"].is_array()) {
+            static_mappings.clear();
+            for (auto& m : j["mappings"]) {
+                static_mappings.emplace_back(
+                    m.value("domain", ""),
+                    m.value("shard", 0));
+            }
+        }
+
+        if (j.contains("shards") && j["shards"].is_array()) {
+            shards.clear();
+            for (auto& s : j["shards"]) {
+                ShardEntry e;
+                e.db_config_file = s.value("db_config_file", "");
+                e.storage_root   = s.value("storage_root", "");
+                shards.push_back(e);
+            }
+        }
+
+        return true;
+    }
+};
+
+// ============================================================
 // 服务器配置
 // ============================================================
 struct ServerConfig {
@@ -120,6 +179,10 @@ struct ServerConfig {
     std::string log_file;
     bool log_to_console;
     bool log_to_file;
+
+    std::string router_type;
+    std::string router_config_file;
+    ShardRouterConfig router_config;
 
     std::string storage_provider;
     std::string mail_storage_path;
@@ -199,6 +262,7 @@ struct ServerConfig {
         , log_level("info")
         , log_to_console(true)
         , log_to_file(true)
+        , router_type("hash")
         , storage_provider("local")
         , distributed_storage_replica_count(1)
         , hdfs_endpoint("http://127.0.0.1:9870")
@@ -251,7 +315,9 @@ struct ServerConfig {
         std::cout << "\n\nlisteners:";
         for (auto& l : listeners) l.show();
 
-        std::cout << "\nSSL certs: cert=" << (certFile.empty() ? "(none)" : certFile)
+        std::cout << "\nrouter: type=" << router_type
+                  << " shards=" << router_config.shard_count
+                  << "\nSSL certs: cert=" << (certFile.empty() ? "(none)" : certFile)
                   << " key=" << (keyFile.empty() ? "(none)" : keyFile)
                   << "\ninbound_auth_policy = " << inbound_auth_policy_to_string(inbound_auth_policy)
                   << "\ninbound_spf_mode = " << inbound_spf_mode
@@ -346,6 +412,15 @@ struct ServerConfig {
         log_file           = resolve_path(filename, j.value("log_file", log_file));
         log_to_console     = j.value("log_to_console", log_to_console);
         log_to_file        = j.value("log_to_file", log_to_file);
+        router_type        = j.value("router_type", router_type);
+        router_config_file = resolve_path(filename, j.value("router_config_file", ""));
+        if (!router_config_file.empty() && std::filesystem::exists(router_config_file)) {
+            router_config.loadFromJson(router_config_file);
+        } else {
+            router_config.type = router_type;
+            router_config.shard_count = 1;
+        }
+
         storage_provider   = j.value("storage_provider", storage_provider);
         mail_storage_path  = resolve_path(filename, j.value("mail_storage_path", mail_storage_path));
         attachment_storage_path = resolve_path(filename, j.value("attachment_storage_path", attachment_storage_path));
