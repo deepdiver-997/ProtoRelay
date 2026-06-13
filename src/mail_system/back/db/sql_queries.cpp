@@ -1,0 +1,470 @@
+#include "mail_system/back/db/sql_queries.h"
+#include "mail_system/back/outbound/outbox_repository.h"
+
+#include <algorithm>
+#include <sstream>
+#include <string>
+
+namespace mail_system {
+namespace db {
+namespace sql {
+
+namespace {
+    std::string extract_domain_lower(const std::string& email) {
+        const auto at_pos = email.find('@');
+        if (at_pos == std::string::npos || at_pos + 1 >= email.size()) return {};
+        std::string domain = email.substr(at_pos + 1);
+        std::transform(domain.begin(), domain.end(), domain.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return domain;
+    }
+}
+
+// ============================================================
+// 邮件持久化
+// ============================================================
+
+std::string build_insert_mail(std::uint64_t mail_id,
+                               const std::string& subject,
+                               const std::string& body_path,
+                               std::time_t send_time,
+                               IDBConnection* conn) {
+    return "INSERT INTO mails (id, subject, body_path, send_time) VALUES (" +
+           std::to_string(mail_id) + ", '" +
+           (conn ? conn->escape_string(subject) : subject) + "', '" +
+           (conn ? conn->escape_string(body_path) : body_path) + "', FROM_UNIXTIME(" +
+           std::to_string(static_cast<long long>(send_time)) + "))";
+}
+
+std::string build_insert_recipients(const mail& mail_data,
+                                     const std::string& local_domain,
+                                     IDBConnection* conn) {
+    const std::string source_message_id = conn ? conn->escape_string(mail_data.source_message_id) : mail_data.source_message_id;
+    const std::string escaped_sender = conn ? conn->escape_string(mail_data.from) : mail_data.from;
+
+    auto local_lower = local_domain;
+    std::transform(local_lower.begin(), local_lower.end(), local_lower.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+    std::string sql = "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status, source_message_id) VALUES";
+    for (size_t i = 0; i < mail_data.to.size(); ++i) {
+        const auto domain = extract_domain_lower(mail_data.to[i]);
+        const int status = (!domain.empty() && domain == local_lower) ? 1 : 2;
+        const std::string escaped_rcpt = conn ? conn->escape_string(mail_data.to[i]) : mail_data.to[i];
+
+        sql += " (" + std::to_string(mail_data.ids[i]) + ", " +
+               std::to_string(mail_data.id) + ", '" +
+               escaped_sender + "', '" +
+               escaped_rcpt + "', " +
+               std::to_string(status) + ", '" +
+               source_message_id + "'),";
+    }
+    sql.back() = ';';
+    return sql;
+}
+
+std::string build_insert_recipient_single(std::uint64_t mail_id,
+                                           std::uint64_t recipient_row_id,
+                                           const std::string& sender,
+                                           const std::string& recipient,
+                                           int status,
+                                           const std::string& source_message_id,
+                                           IDBConnection* conn) {
+    return "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status, source_message_id) VALUES (" +
+           std::to_string(recipient_row_id) + ", " +
+           std::to_string(mail_id) + ", '" +
+           (conn ? conn->escape_string(sender) : sender) + "', '" +
+           (conn ? conn->escape_string(recipient) : recipient) + "', " +
+           std::to_string(status) + ", '" +
+           (conn ? conn->escape_string(source_message_id) : source_message_id) + "')";
+}
+
+std::string build_insert_mailbox_for_recipient(std::uint64_t mail_id,
+                                                const std::string& recipient_address,
+                                                IDBConnection* conn) {
+    return "INSERT INTO mail_mailbox (mail_id, mailbox_id, user_id) "
+           "SELECT " + std::to_string(mail_id) + ", mb.id, u.id "
+           "FROM users u "
+           "JOIN mailboxes mb ON mb.user_id = u.id AND mb.box_type = 1 "
+           "WHERE u.mail_address = '" +
+           (conn ? conn->escape_string(recipient_address) : recipient_address) + "'";
+}
+
+std::string build_insert_attachments(std::uint64_t mail_id,
+                                      const std::vector<attachment>& attachments,
+                                      IDBConnection* conn) {
+    if (attachments.empty()) return {};
+    std::string sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type) VALUES";
+    for (const auto& att : attachments) {
+        sql += " (" + std::to_string(mail_id) + ", '" +
+               (conn ? conn->escape_string(att.filename) : att.filename) + "', '" +
+               (conn ? conn->escape_string(att.filepath) : att.filepath) + "', " +
+               std::to_string(att.file_size) + ", '" +
+               (conn ? conn->escape_string(att.mime_type) : att.mime_type) + "'),";
+    }
+    sql.back() = ';';
+    return sql;
+}
+
+// ============================================================
+// 出站队列
+// ============================================================
+
+std::string build_insert_outbox_pending(std::uint64_t mail_id,
+                                         const std::string& sender,
+                                         const std::string& recipient,
+                                         int max_attempts,
+                                         IDBConnection* conn) {
+    std::ostringstream s;
+    s << "INSERT INTO mail_outbox (mail_id, sender, recipient, status, priority, "
+      << "attempt_count, max_attempts, next_attempt_at) VALUES ("
+      << mail_id << ", '"
+      << (conn ? conn->escape_string(sender) : sender) << "', '"
+      << (conn ? conn->escape_string(recipient) : recipient) << "', "
+      << static_cast<int>(outbound::OutboxStatus::PENDING) << ", 0, 0, "
+      << max_attempts << ", NOW())";
+    return s.str();
+}
+
+std::string build_insert_outbox_reserved(std::uint64_t mail_id,
+                                          const std::string& sender,
+                                          const std::string& recipient,
+                                          const std::string& lease_owner,
+                                          int lease_seconds,
+                                          IDBConnection* conn) {
+    std::ostringstream s;
+    s << "INSERT INTO mail_outbox (mail_id, sender, recipient, status, priority, "
+      << "attempt_count, max_attempts, next_attempt_at, lease_owner, lease_until) VALUES ("
+      << mail_id << ", '"
+      << (conn ? conn->escape_string(sender) : sender) << "', '"
+      << (conn ? conn->escape_string(recipient) : recipient) << "', "
+      << static_cast<int>(outbound::OutboxStatus::SENDING) << ", 0, 1, 8, NOW(), '"
+      << (conn ? conn->escape_string(lease_owner) : lease_owner) << "', "
+      << "DATE_ADD(NOW(), INTERVAL " << std::max(1, lease_seconds) << " SECOND))";
+    return s.str();
+}
+
+std::string build_outbox_claim_select(int limit) {
+    std::ostringstream s;
+    s << "SELECT o.id, o.mail_id, o.sender, o.recipient, o.attempt_count, o.max_attempts, m.body_path "
+      << "FROM mail_outbox o LEFT JOIN mails m ON m.id = o.mail_id "
+      << "WHERE (status = " << static_cast<int>(outbound::OutboxStatus::PENDING)
+      << " OR status = " << static_cast<int>(outbound::OutboxStatus::RETRY) << ") "
+      << "AND next_attempt_at <= NOW() "
+      << "AND (lease_until IS NULL OR lease_until <= NOW()) "
+      << "ORDER BY o.priority DESC, o.id ASC LIMIT " << limit;
+    return s.str();
+}
+
+std::string build_outbox_claim_update(std::uint64_t outbox_id,
+                                       const std::string& worker_id,
+                                       int lease_seconds,
+                                       IDBConnection* conn) {
+    std::ostringstream s;
+    s << "UPDATE mail_outbox SET status = " << static_cast<int>(outbound::OutboxStatus::SENDING)
+      << ", lease_owner = '" << (conn ? conn->escape_string(worker_id) : worker_id) << "'"
+      << ", lease_until = DATE_ADD(NOW(), INTERVAL " << lease_seconds << " SECOND)"
+      << ", attempt_count = attempt_count + 1, updated_at = NOW()"
+      << " WHERE id = " << outbox_id
+      << " AND (status = " << static_cast<int>(outbound::OutboxStatus::PENDING)
+      << " OR status = " << static_cast<int>(outbound::OutboxStatus::RETRY) << ")"
+      << " AND (lease_until IS NULL OR lease_until <= NOW())";
+    return s.str();
+}
+
+std::string build_outbox_release_reservations(const std::vector<std::uint64_t>& outbox_ids) {
+    if (outbox_ids.empty()) return {};
+    std::ostringstream id_list;
+    for (size_t i = 0; i < outbox_ids.size(); ++i) {
+        id_list << outbox_ids[i];
+        if (i + 1 < outbox_ids.size()) id_list << ",";
+    }
+    std::ostringstream s;
+    s << "UPDATE mail_outbox SET status = " << static_cast<int>(outbound::OutboxStatus::PENDING)
+      << ", attempt_count = GREATEST(attempt_count - 1, 0)"
+      << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
+      << " WHERE id IN (" << id_list.str() << ")"
+      << " AND status = " << static_cast<int>(outbound::OutboxStatus::SENDING);
+    return s.str();
+}
+
+std::string build_outbox_mark_sent(std::uint64_t outbox_id,
+                                    const std::string& smtp_response,
+                                    IDBConnection* conn) {
+    std::ostringstream s;
+    s << "UPDATE mail_outbox SET status = " << static_cast<int>(outbound::OutboxStatus::SENT)
+      << ", sent_at = NOW(), smtp_response = '"
+      << (conn ? conn->escape_string(smtp_response) : smtp_response) << "'"
+      << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
+      << " WHERE id = " << outbox_id;
+    return s.str();
+}
+
+std::string build_outbox_select_attempts(std::uint64_t outbox_id) {
+    return "SELECT attempt_count, max_attempts FROM mail_outbox WHERE id = " + std::to_string(outbox_id);
+}
+
+std::string build_outbox_mark_retry_or_dead(std::uint64_t outbox_id,
+                                             int status,
+                                             const std::string& error_message,
+                                             int retry_delay_seconds,
+                                             IDBConnection* conn) {
+    std::ostringstream s;
+    s << "UPDATE mail_outbox SET status = " << status
+      << ", last_error_message = '"
+      << (conn ? conn->escape_string(error_message) : error_message) << "'"
+      << ", lease_owner = NULL, lease_until = NULL"
+      << ", next_attempt_at = DATE_ADD(NOW(), INTERVAL " << std::max(1, retry_delay_seconds) << " SECOND)"
+      << ", updated_at = NOW()"
+      << " WHERE id = " << outbox_id;
+    return s.str();
+}
+
+std::string build_outbox_mark_dead(std::uint64_t outbox_id,
+                                    const std::string& error_message,
+                                    IDBConnection* conn) {
+    std::ostringstream s;
+    s << "UPDATE mail_outbox SET status = " << static_cast<int>(outbound::OutboxStatus::DEAD)
+      << ", last_error_message = '"
+      << (conn ? conn->escape_string(error_message) : error_message) << "'"
+      << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
+      << " WHERE id = " << outbox_id;
+    return s.str();
+}
+
+std::string build_outbox_requeue_expired_leases() {
+    std::ostringstream s;
+    s << "UPDATE mail_outbox SET status = " << static_cast<int>(outbound::OutboxStatus::RETRY)
+      << ", lease_owner = NULL, lease_until = NULL"
+      << ", next_attempt_at = NOW(), updated_at = NOW()"
+      << " WHERE status = " << static_cast<int>(outbound::OutboxStatus::SENDING)
+      << " AND lease_until IS NOT NULL AND lease_until <= NOW()";
+    return s.str();
+}
+
+// ============================================================
+// 邮件加载
+// ============================================================
+
+std::string build_load_mail_metadata(std::uint64_t mail_id) {
+    return "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time_epoch "
+           "FROM mails WHERE id = " + std::to_string(mail_id) + " LIMIT 1";
+}
+
+std::string build_load_mail_recipients(std::uint64_t mail_id) {
+    return "SELECT id, sender, recipient, status, source_message_id, UNIX_TIMESTAMP(send_time) AS send_time_epoch "
+           "FROM mail_recipients WHERE mail_id = " + std::to_string(mail_id) + " ORDER BY id ASC";
+}
+
+std::string build_load_mail_attachments(std::uint64_t mail_id) {
+    return "SELECT id, filename, filepath, file_size, mime_type, UNIX_TIMESTAMP(upload_time) AS upload_time_epoch "
+           "FROM attachments WHERE mail_id = " + std::to_string(mail_id) + " ORDER BY id ASC";
+}
+
+// ============================================================
+// 入站去重
+// ============================================================
+
+std::string build_dedup_by_subject_sender(const std::string& subject,
+                                           const std::string& sender,
+                                           int window_seconds,
+                                           IDBConnection* conn) {
+    return "SELECT id FROM mails WHERE subject = '" +
+           (conn ? conn->escape_string(subject) : subject) + "' "
+           "AND id IN (SELECT mail_id FROM mail_recipients WHERE sender = '" +
+           (conn ? conn->escape_string(sender) : sender) + "') "
+           "AND TIMESTAMPDIFF(SECOND, send_time, NOW()) BETWEEN 0 AND " +
+           std::to_string(window_seconds) + " LIMIT 20";
+}
+
+std::string build_dedup_by_subject_sender_recipient(const std::string& subject,
+                                                     const std::string& sender,
+                                                     const std::string& recipient,
+                                                     int window_seconds,
+                                                     IDBConnection* conn) {
+    return "SELECT 1 FROM mail_recipients r "
+           "JOIN mails m ON m.id = r.mail_id "
+           "WHERE r.sender='" + (conn ? conn->escape_string(sender) : sender) + "' "
+           "AND r.recipient='" + (conn ? conn->escape_string(recipient) : recipient) + "' "
+           "AND m.subject='" + (conn ? conn->escape_string(subject) : subject) + "' "
+           "AND TIMESTAMPDIFF(SECOND, m.send_time, NOW()) BETWEEN 0 AND " +
+           std::to_string(window_seconds) + " LIMIT 1";
+}
+
+std::string build_dedup_by_message_id(const std::string& sender,
+                                       const std::string& recipient,
+                                       const std::string& message_id,
+                                       IDBConnection* conn) {
+    return "SELECT 1 FROM mail_recipients WHERE sender='" +
+           (conn ? conn->escape_string(sender) : sender) + "' "
+           "AND recipient='" + (conn ? conn->escape_string(recipient) : recipient) + "' "
+           "AND source_message_id='" +
+           (conn ? conn->escape_string(message_id) : message_id) + "' LIMIT 1";
+}
+
+// ============================================================
+// 认证
+// ============================================================
+
+std::string build_auth_user_query() {
+    return "SELECT password, status FROM users WHERE mail_address = ?";
+}
+
+std::string build_update_last_login() {
+    return "UPDATE users SET last_login_time = NOW() WHERE mail_address = ?";
+}
+
+// ============================================================
+// IMAP
+// ============================================================
+
+std::string build_imap_list_mailboxes() {
+    return "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? ORDER BY id";
+}
+
+std::string build_imap_get_mailbox_by_name() {
+    return "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? AND name = ?";
+}
+
+std::string build_imap_get_inbox_id() {
+    return "SELECT id FROM mailboxes WHERE user_id = ? AND box_type = 1";
+}
+
+std::string build_imap_get_mailbox_mails() {
+    return "SELECT m.id, mr.sender, mr.recipient, m.subject, m.body_path, "
+           "mm.is_starred, mm.is_deleted, mm.is_important, "
+           "mr.status, UNIX_TIMESTAMP(m.send_time) AS send_time "
+           "FROM mail_mailbox mm "
+           "JOIN mails m ON mm.mail_id = m.id "
+           "JOIN mail_recipients mr ON mr.mail_id = m.id AND mr.recipient = ("
+           "  SELECT mail_address FROM users WHERE id = ?"
+           ") "
+           "WHERE mm.mailbox_id = ? AND mm.user_id = ? "
+           "ORDER BY m.send_time DESC";
+}
+
+std::string build_imap_mailbox_exists_count() {
+    return "SELECT COUNT(*) as cnt FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?";
+}
+
+std::string build_imap_mailbox_unseen_count() {
+    return "SELECT COUNT(*) as cnt FROM mail_mailbox mm "
+           "JOIN mail_recipients mr ON mr.mail_id = mm.mail_id AND mr.recipient = ("
+           "  SELECT mail_address FROM users WHERE id = ?"
+           ") "
+           "WHERE mm.mailbox_id = ? AND mm.user_id = ? AND mr.status = 1";
+}
+
+std::string build_imap_mailbox_uidnext() {
+    return "SELECT MAX(mail_id) AS uidnext FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?";
+}
+
+std::string build_imap_update_mail_flag_deleted() {
+    return "UPDATE mail_mailbox SET is_deleted = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?";
+}
+
+std::string build_imap_update_mail_flag_starred() {
+    return "UPDATE mail_mailbox SET is_starred = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?";
+}
+
+std::string build_imap_append_mail_metadata() {
+    return "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, FROM_UNIXTIME(?))";
+}
+
+std::string build_imap_append_mail_recipient() {
+    return "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status) VALUES (?, ?, ?, ?, ?)";
+}
+
+std::string build_imap_append_mailbox() {
+    return "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
+           "is_deleted, is_important) VALUES (?, ?, ?, ?, ?, ?, ?)";
+}
+
+std::string build_imap_select_status_total() {
+    return "SELECT COUNT(*) as cnt FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?";
+}
+
+std::string build_imap_select_status_recent() {
+    return "SELECT COUNT(*) as cnt FROM mail_mailbox mm "
+           "JOIN mail_recipients mr ON mr.mail_id = mm.mail_id AND mr.recipient = ("
+           "  SELECT mail_address FROM users WHERE id = ?"
+           ") "
+           "WHERE mm.mailbox_id = ? AND mm.user_id = ? AND mr.status = 1";
+}
+
+std::string build_imap_expunge_delete_mailbox() {
+    return "DELETE FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1";
+}
+
+std::string build_imap_expunge_select_ids() {
+    return "SELECT mail_id FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1";
+}
+
+std::string build_imap_check_mailbox_is_system() {
+    return "SELECT is_system FROM mailboxes WHERE id = ?";
+}
+
+std::string build_imap_delete_mailbox() {
+    return "DELETE FROM mailboxes WHERE id = ?";
+}
+
+std::string build_imap_copy_check_exists() {
+    return "SELECT id FROM mail_mailbox WHERE mail_id = ? AND mailbox_id = ? AND user_id = ?";
+}
+
+std::string build_imap_copy_insert_mailbox() {
+    return "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
+           "is_deleted, is_important) VALUES (?, ?, ?, ?, ?, ?, ?)";
+}
+
+// ============================================================
+// 分片路由
+// ============================================================
+
+std::string build_shard_lookup(const std::string& table_name,
+                                const std::string& email_column,
+                                const std::string& shard_column,
+                                const std::string& escaped_email) {
+    return "SELECT " + shard_column + " FROM " + table_name +
+           " WHERE " + email_column + " = '" + escaped_email + "'";
+}
+
+// ============================================================
+// 清理
+// ============================================================
+
+std::string build_delete_attachments_by_mail(std::uint64_t mail_id) {
+    return "DELETE FROM attachments WHERE mail_id = " + std::to_string(mail_id);
+}
+
+std::string build_delete_recipients_by_mail(std::uint64_t mail_id) {
+    return "DELETE FROM mail_recipients WHERE mail_id = " + std::to_string(mail_id);
+}
+
+std::string build_delete_mail_by_id(std::uint64_t mail_id) {
+    return "DELETE FROM mails WHERE id = " + std::to_string(mail_id);
+}
+
+std::string build_delete_mail_recipients_by_id_list(const std::string& id_list) {
+    return "DELETE FROM mail_recipients WHERE mail_id IN (" + id_list + ")";
+}
+
+std::string build_delete_mails_by_id_list(const std::string& id_list) {
+    return "DELETE FROM mails WHERE id IN (" + id_list + ")";
+}
+
+// ============================================================
+// 工具
+// ============================================================
+
+std::string build_select_last_insert_id() {
+    return "SELECT LAST_INSERT_ID() AS id";
+}
+
+std::string build_select_row_count() {
+    return "SELECT ROW_COUNT() AS affected";
+}
+
+} // namespace sql
+} // namespace db
+} // namespace mail_system

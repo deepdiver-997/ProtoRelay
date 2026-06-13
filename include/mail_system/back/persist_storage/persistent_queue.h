@@ -125,6 +125,12 @@ private:
     // ---- 分片辅助 ----
     int shard_from_mail(const mail* m) const;
 
+    // ---- 跨分片本域投递 ----
+    // 将邮件元数据、收件人关系、mailbox 关联写入收件人所在分片（独立事务）
+    // 用于收件人与发件人在不同分片的情况，避免走 SMTP 投递
+    bool persist_to_recipient_shard(mail* mail_data, const std::string& recipient,
+                                    std::uint64_t recipient_id, int sender_shard);
+
     // ---- 成员变量 ----
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<ThreadPoolBase> worker_pool_;

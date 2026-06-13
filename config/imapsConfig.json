@@ -31,7 +31,7 @@
   "max_auth_attempts": 3,
 
   "system_name": "mail-system-imap",
-  "system_domain": "mail.hgmail.xin",
+  "system_domain": "scut.email",
 
   "log_level": "info",
   "log_to_console": true,

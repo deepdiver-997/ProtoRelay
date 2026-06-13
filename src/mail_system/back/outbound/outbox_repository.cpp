@@ -3,6 +3,7 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/mysql_pool.h"
+#include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/outbound/outbound_utils.h"
 #include <algorithm>
 #include <chrono>
@@ -57,21 +58,16 @@ bool OutboxRepository::enqueue_from_mail(DBPool& db,
         return false;
     }
 
-    auto escaped_sender = escape_or_empty(conn, mail_data.from);
     bool inserted_any = false;
 
     for (const auto& recipient : mail_data.to) {
         const auto recipient_domain = extract_domain(recipient);
         if (recipient_domain.empty() || recipient_domain == local_domain) continue;
 
-        std::ostringstream sql;
-        sql << "INSERT INTO mail_outbox (mail_id, sender, recipient, status, priority, attempt_count, max_attempts, next_attempt_at) VALUES ("
-            << mail_data.id << ", '" << escaped_sender << "', '"
-            << escape_or_empty(conn, recipient) << "', "
-            << static_cast<int>(OutboxStatus::PENDING) << ", 0, 0, "
-            << kDefaultMaxAttempts << ", NOW())";
+        std::string sql = db::sql::build_insert_outbox_pending(mail_data.id, mail_data.from, recipient,
+                                                                kDefaultMaxAttempts, conn);
 
-        if (!conn->execute(sql.str())) {
+        if (!conn->execute(sql)) {
             LOG_OUTBOUND_ERROR("OutboxRepository: failed to insert outbox row, mail_id={}, recipient={}, error={}",
                              mail_data.id, recipient, conn->get_last_error());
             continue;
@@ -79,7 +75,7 @@ bool OutboxRepository::enqueue_from_mail(DBPool& db,
 
         inserted_any = true;
         if (outbox_ids) {
-            auto result = conn->query("SELECT LAST_INSERT_ID() AS id");
+            auto result = conn->query(db::sql::build_select_last_insert_id());
             if (result && result->get_row_count() > 0) {
                 auto row = result->get_row(0);
                 auto it = row.find("id");
@@ -103,37 +99,19 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(DBPool& db,
     auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) return claimed;
 
-    std::ostringstream select_sql;
-    select_sql << "SELECT o.id, o.mail_id, o.sender, o.recipient, o.attempt_count, o.max_attempts, m.body_path "
-               << "FROM mail_outbox o LEFT JOIN mails m ON m.id = o.mail_id "
-               << "WHERE (status = " << static_cast<int>(OutboxStatus::PENDING)
-               << " OR status = " << static_cast<int>(OutboxStatus::RETRY) << ") "
-               << "AND next_attempt_at <= NOW() "
-               << "AND (lease_until IS NULL OR lease_until <= NOW()) "
-               << "ORDER BY o.priority DESC, o.id ASC LIMIT " << limit;
-
-    auto result = conn->query(select_sql.str());
+    auto result = conn->query(db::sql::build_outbox_claim_select(static_cast<int>(limit)));
     if (!result || result->get_row_count() == 0) return claimed;
 
-    const auto escaped_worker = escape_or_empty(conn, worker_id);
     const auto rows = result->get_all_rows();
     for (const auto& row : rows) {
         if (row.find("id") == row.end() || row.find("mail_id") == row.end()) continue;
 
         const auto outbox_id = static_cast<std::uint64_t>(std::stoull(row.at("id")));
-        std::ostringstream update_sql;
-        update_sql << "UPDATE mail_outbox SET status = " << static_cast<int>(OutboxStatus::SENDING)
-                   << ", lease_owner = '" << escaped_worker << "'"
-                   << ", lease_until = DATE_ADD(NOW(), INTERVAL " << lease_seconds << " SECOND)"
-                   << ", attempt_count = attempt_count + 1, updated_at = NOW()"
-                   << " WHERE id = " << outbox_id
-                   << " AND (status = " << static_cast<int>(OutboxStatus::PENDING)
-                   << " OR status = " << static_cast<int>(OutboxStatus::RETRY) << ")"
-                   << " AND (lease_until IS NULL OR lease_until <= NOW())";
+        std::string update_sql = db::sql::build_outbox_claim_update(outbox_id, worker_id, lease_seconds, conn);
 
-        if (!execute_with_deadlock_retry(conn, update_sql.str(), "claim_batch", outbox_id)) continue;
+        if (!execute_with_deadlock_retry(conn, update_sql, "claim_batch", outbox_id)) continue;
 
-        auto row_count_result = conn->query("SELECT ROW_COUNT() AS affected");
+        auto row_count_result = conn->query(db::sql::build_select_row_count());
         if (!row_count_result || row_count_result->get_row_count() == 0) continue;
         auto affected_row = row_count_result->get_row(0);
         if (affected_row.find("affected") == affected_row.end() ||
@@ -158,10 +136,7 @@ std::unique_ptr<mail> OutboxRepository::load_mail(DBPool& db, std::uint64_t mail
     auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) return nullptr;
 
-    std::ostringstream mail_sql;
-    mail_sql << "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time_epoch "
-             << "FROM mails WHERE id = " << mail_id << " LIMIT 1";
-    auto mail_result = conn->query(mail_sql.str());
+    auto mail_result = conn->query(db::sql::build_load_mail_metadata(mail_id));
     if (!mail_result || mail_result->get_row_count() == 0) return nullptr;
 
     auto mail_row = mail_result->get_row(0);
@@ -174,10 +149,7 @@ std::unique_ptr<mail> OutboxRepository::load_mail(DBPool& db, std::uint64_t mail
     loaded_mail->mail_over = true;
     (void)ensure_mail_raw_payload_loaded(*loaded_mail);
 
-    std::ostringstream rcpt_sql;
-    rcpt_sql << "SELECT id, sender, recipient, status, source_message_id, UNIX_TIMESTAMP(send_time) AS send_time_epoch "
-             << "FROM mail_recipients WHERE mail_id = " << mail_id << " ORDER BY id ASC";
-    auto rcpt_result = conn->query(rcpt_sql.str());
+    auto rcpt_result = conn->query(db::sql::build_load_mail_recipients(mail_id));
     if (rcpt_result) {
         for (const auto& row : rcpt_result->get_all_rows()) {
             if (row.count("id") && !row.at("id").empty())
@@ -195,10 +167,7 @@ std::unique_ptr<mail> OutboxRepository::load_mail(DBPool& db, std::uint64_t mail
         }
     }
 
-    std::ostringstream att_sql;
-    att_sql << "SELECT id, filename, filepath, file_size, mime_type, UNIX_TIMESTAMP(upload_time) AS upload_time_epoch "
-            << "FROM attachments WHERE mail_id = " << mail_id << " ORDER BY id ASC";
-    auto att_result = conn->query(att_sql.str());
+    auto att_result = conn->query(db::sql::build_load_mail_attachments(mail_id));
     if (att_result) {
         for (const auto& row : att_result->get_all_rows()) {
             attachment att;
@@ -227,19 +196,8 @@ bool OutboxRepository::release_local_reservations(DBPool& db,
     auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) return false;
 
-    std::ostringstream id_list;
-    for (std::size_t i = 0; i < outbox_ids.size(); ++i) {
-        id_list << outbox_ids[i];
-        if (i + 1 < outbox_ids.size()) id_list << ",";
-    }
-
-    std::ostringstream sql;
-    sql << "UPDATE mail_outbox SET status = " << static_cast<int>(OutboxStatus::PENDING)
-        << ", attempt_count = GREATEST(attempt_count - 1, 0)"
-        << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
-        << " WHERE id IN (" << id_list.str() << ")"
-        << " AND status = " << static_cast<int>(OutboxStatus::SENDING);
-    return conn->execute(sql.str());
+    std::string sql = db::sql::build_outbox_release_reservations(outbox_ids);
+    return conn->execute(sql);
 }
 
 // ---- mark_sent ----
@@ -250,12 +208,8 @@ bool OutboxRepository::mark_sent(DBPool& db,
     auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) return false;
 
-    std::ostringstream sql;
-    sql << "UPDATE mail_outbox SET status = " << static_cast<int>(OutboxStatus::SENT)
-        << ", sent_at = NOW(), smtp_response = '" << escape_or_empty(conn, smtp_response) << "'"
-        << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
-        << " WHERE id = " << outbox_id;
-    return execute_with_deadlock_retry(conn, sql.str(), "mark_sent", outbox_id);
+    std::string sql = db::sql::build_outbox_mark_sent(outbox_id, smtp_response, conn);
+    return execute_with_deadlock_retry(conn, sql, "mark_sent", outbox_id);
 }
 
 // ---- mark_retry ----
@@ -268,9 +222,8 @@ bool OutboxRepository::mark_retry(DBPool& db,
     if (!conn || !conn->is_connected()) return false;
 
     auto status = OutboxStatus::RETRY;
-    std::ostringstream check_sql;
-    check_sql << "SELECT attempt_count, max_attempts FROM mail_outbox WHERE id = " << outbox_id;
-    auto result = conn->query(check_sql.str());
+    std::string check_sql = db::sql::build_outbox_select_attempts(outbox_id);
+    auto result = conn->query(check_sql);
     if (result && result->get_row_count() > 0) {
         auto row = result->get_row(0);
         const int attempts = row.count("attempt_count") ? std::stoi(row.at("attempt_count")) : 0;
@@ -278,14 +231,9 @@ bool OutboxRepository::mark_retry(DBPool& db,
         if (attempts >= max_attempts) status = OutboxStatus::DEAD;
     }
 
-    std::ostringstream sql;
-    sql << "UPDATE mail_outbox SET status = " << static_cast<int>(status)
-        << ", last_error_message = '" << escape_or_empty(conn, error_message) << "'"
-        << ", lease_owner = NULL, lease_until = NULL"
-        << ", next_attempt_at = DATE_ADD(NOW(), INTERVAL " << std::max(1, retry_delay_seconds) << " SECOND)"
-        << ", updated_at = NOW()"
-        << " WHERE id = " << outbox_id;
-    return execute_with_deadlock_retry(conn, sql.str(), "mark_retry", outbox_id);
+    std::string sql = db::sql::build_outbox_mark_retry_or_dead(outbox_id,
+        static_cast<int>(status), error_message, retry_delay_seconds, conn);
+    return execute_with_deadlock_retry(conn, sql, "mark_retry", outbox_id);
 }
 
 // ---- mark_dead ----
@@ -296,12 +244,8 @@ bool OutboxRepository::mark_dead(DBPool& db,
     auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) return false;
 
-    std::ostringstream sql;
-    sql << "UPDATE mail_outbox SET status = " << static_cast<int>(OutboxStatus::DEAD)
-        << ", last_error_message = '" << escape_or_empty(conn, error_message) << "'"
-        << ", lease_owner = NULL, lease_until = NULL, updated_at = NOW()"
-        << " WHERE id = " << outbox_id;
-    return execute_with_deadlock_retry(conn, sql.str(), "mark_dead", outbox_id);
+    std::string sql = db::sql::build_outbox_mark_dead(outbox_id, error_message, conn);
+    return execute_with_deadlock_retry(conn, sql, "mark_dead", outbox_id);
 }
 
 // ---- requeue_expired_leases ----
@@ -310,13 +254,8 @@ bool OutboxRepository::requeue_expired_leases(DBPool& db) {
     auto conn = connection.as<MySQLConnection>();
     if (!conn || !conn->is_connected()) return false;
 
-    std::ostringstream sql;
-    sql << "UPDATE mail_outbox SET status = " << static_cast<int>(OutboxStatus::RETRY)
-        << ", lease_owner = NULL, lease_until = NULL"
-        << ", next_attempt_at = NOW(), updated_at = NOW()"
-        << " WHERE status = " << static_cast<int>(OutboxStatus::SENDING)
-        << " AND lease_until IS NOT NULL AND lease_until <= NOW()";
-    return execute_with_deadlock_retry(conn, sql.str(), "requeue_expired_leases", 0);
+    std::string sql = db::sql::build_outbox_requeue_expired_leases();
+    return execute_with_deadlock_retry(conn, sql, "requeue_expired_leases", 0);
 }
 
 // ---- helpers ----

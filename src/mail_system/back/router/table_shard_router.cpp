@@ -1,5 +1,6 @@
 #include "mail_system/back/router/table_shard_router.h"
 #include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/common/logger.h"
 #include <algorithm>
 #include <cctype>
@@ -54,10 +55,8 @@ int TableShardRouter::route(const std::string& email) {
         return -1;
     }
 
-    std::string sql = "SELECT " + m_shard_column
-                    + " FROM " + m_table_name
-                    + " WHERE " + m_email_column + " = '"
-                    + conn->escape_string(key) + "'";
+    std::string sql = db::sql::build_shard_lookup(m_table_name, m_email_column, m_shard_column,
+                                                    conn->escape_string(key));
 
     auto result = conn->query(sql);
     if (result && result->get_row_count() > 0) {
