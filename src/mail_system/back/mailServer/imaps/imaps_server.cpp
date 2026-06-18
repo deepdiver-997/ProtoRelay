@@ -83,6 +83,24 @@ void ImapsServer::handle_tcp_accept(
     }
 }
 
+void ImapsServer::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) {
+    using SslSession = ImapsSession<SslConnection>;
+    if (!socket) return;
+
+    try {
+        auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
+            std::move(*socket), get_ssl_context());
+        auto ssl_connection = std::make_unique<SslConnection>(std::move(ssl_stream));
+        auto session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
+
+        LOG_NETWORK_INFO("IMAP STARTTLS upgraded, continue on TLS from {}", session->get_client_ip());
+        increment_connection_count();
+        SslSession::start_after_starttls(std::move(session));
+    } catch (const std::exception& e) {
+        LOG_NETWORK_ERROR("Error handing off IMAP STARTTLS socket: {}", e.what());
+    }
+}
+
 bool ImapsServer::should_reject_connection(std::string& reason, const std::string&) const {
     auto cfg = std::atomic_load(&m_config);
     if (cfg->maxConnections > 0 &&

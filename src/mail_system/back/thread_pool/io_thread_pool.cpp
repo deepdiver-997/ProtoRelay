@@ -38,28 +38,24 @@ void IOThreadPool::start() {
 }
 
 void IOThreadPool::stop(bool wait_for_tasks) {
-    std::unique_lock<std::mutex> lock(m_mutex);
-    if (!m_running) return;
-
-    m_running = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running) return;
+        m_running = false;  // 阻止 get_io_context() 继续分发任务
+    }
     std::cout << "Stopping IOThreadPool..." << std::endl;
 
-    for(auto& m_work_guard : m_work_guards) {
-        if (m_work_guard.owns_work()) {
-            m_work_guard.reset();
-        }
-    }
+    // 释放 work guard → 各工作线程的 run() 在待处理任务完成后返回
+    for (auto& wg : m_work_guards) wg.reset();
 
-    if (wait_for_tasks) {
-        for (auto& io_context : m_io_contexts) {
-            io_context->run();
-        }
+    if (!wait_for_tasks) {
+        // 强制打断：stop() 使所有 run()/run_one() 立即返回
+        for (auto& ctx : m_io_contexts) ctx->stop();
     }
+    // wait_for_tasks=true: 工作线程自然排空队列后 run() 返回
 
-    for (auto& thread : m_threads) {
-        if (thread.joinable()) {
-            thread.join();
-        }
+    for (auto& t : m_threads) {
+        if (t.joinable()) t.join();
     }
 }
 

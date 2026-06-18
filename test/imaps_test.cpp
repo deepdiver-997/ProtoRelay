@@ -80,25 +80,13 @@ std::unique_ptr<ImapsServer> g_server = nullptr;
 
 // 信号处理函数
 void signal_handler(int signal) {
-    if (signal == SIGHUP) {
-        LOG_SERVER_INFO("Received SIGHUP, reloading config...");
-        if (g_server) {
-            auto ctx = g_server->get_io_context();
-            if (ctx) {
-                boost::asio::post(*ctx, []() {
-                    if (g_server) {
-                        bool ok = g_server->reload_config(g_server->m_configFilePath);
-                        LOG_SERVER_INFO("Config reload from SIGHUP: {}", ok ? "success" : "failed");
-                    }
-                });
-            }
-        }
-        return;
+    if (signal == 1) {
+        if (g_server) g_server->request_stop();
     }
-    LOG_SERVER_INFO("\nReceived signal {}, shutting down...", signal);
-    if (g_server) {
-        g_server->stop();
-        g_server.reset();
+    if (signal == 2) {
+        if (g_server) {
+            g_server->reload_config(g_server->m_configFilePath);
+        }
     }
 }
 

@@ -855,7 +855,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     if (std::regex_search(args, matches, mail_from_regex) && matches.size() > 1) {
         LOG_SMTP_DETAIL_DEBUG("MAIL FROM accepted: sender={}", matches[1].str());
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
-        ctx->sender_address = matches[1];
+        // 认证用户强制使用 AUTH 邮箱作为发件人，忽略客户端 MAIL FROM 参数
+        if (ctx->is_authenticated && !ctx->client_username.empty()) {
+            LOG_SMTP_DETAIL_DEBUG("MAIL FROM overridden: {} -> {} (authenticated)",
+                                  matches[1].str(), ctx->client_username);
+            ctx->sender_address = ctx->client_username;
+        } else {
+            ctx->sender_address = matches[1];
+        }
         // New MAIL FROM starts/restarts the envelope transaction.
         ctx->recipient_addresses.clear();
         ctx->spf_checked = false;

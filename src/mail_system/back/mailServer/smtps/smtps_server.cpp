@@ -134,6 +134,7 @@ void SmtpsServer::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::
         auto session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
 
         LOG_NETWORK_INFO("STARTTLS upgraded, continue SMTP on TLS from {}", session->get_client_ip());
+        increment_connection_count();
         SslSession::start_after_starttls(std::move(session));
     } catch (const std::exception& e) {
         LOG_NETWORK_ERROR("Error handing off STARTTLS socket: {}", e.what());

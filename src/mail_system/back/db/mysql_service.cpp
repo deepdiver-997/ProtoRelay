@@ -177,6 +177,7 @@ bool MySQLConnection::connect() {
             0
         ) != nullptr) {
         m_connected = true;
+        mysql_set_character_set(m_mysql, "utf8mb4");
         LOG_DATABASE_DEBUG("Successfully connected to MySQL server and database");
         return true;
     }
@@ -209,6 +210,7 @@ bool MySQLConnection::connect() {
                 0
             ) != nullptr) {
             m_connected = true;
+            mysql_set_character_set(m_mysql, "utf8mb4");
             LOG_DATABASE_DEBUG("Successfully connected to MySQL server (without database)");
             return true;
         }

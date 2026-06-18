@@ -1,5 +1,5 @@
 // Standalone bcrypt password hash tool
-// Compile: g++ -std=c++17 -o hash_tool hash_tool.cpp -lssl -lcrypto
+// Compile: g++ -std=c++17 -o hash_tool hash_tool.cpp -lssl -lcrypto -I/opt/homebrew/include -L/opt/homebrew/lib
 // Usage:   ./hash_tool <password> [cost]
 // Output:  bcrypt hash string ($2b$...)
 

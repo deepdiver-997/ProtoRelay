@@ -306,7 +306,13 @@ void ServerBase::start_all_tcp_acceptors() {
     }
 }
 
-// ---------------------------------------------------------------------------
+// ====================================================================
+// start — 非阻塞启动所有子系统
+//  1. 恢复入侵检测器状态
+//  2. 状态切换为 Running
+//  3. 启动 metrics HTTP server
+//  4. 创建 listener 线程: 注册 async_accept → io_context::run()
+// ====================================================================
 void ServerBase::start() {
     if (m_state.load() == ServerState::Running) return;
 
@@ -333,7 +339,7 @@ void ServerBase::start() {
                     m_ioContext->run();
                 });
                 has_listener_thread = true;
-                m_listenerThread.detach();
+                // m_listenerThread.detach();
             } else {
                 boost::asio::post(*m_ioContext, [this]() {
                     start_all_ssl_acceptors();
@@ -348,41 +354,68 @@ void ServerBase::start() {
     }
 }
 
+// ====================================================================
+// run — 阻塞当前线程直到收到停止信号
+//  信号处理器调用 request_stop() 将状态置为 Pausing 后，此函数返回。
+//  返回后外部 shared_ptr 析构 → stop() → RAII 清理所有资源。
+// ====================================================================
 void ServerBase::run() {
     while (m_state.load() == ServerState::Running || m_state.load() == ServerState::Paused)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
+// ====================================================================
+// stop — 停止服务器并释放资源 (protected, 仅从 ~ServerBase 调用)
+//
+//  停止顺序（保证资源逆序释放）:
+//   1. work_guard.reset() — 移除 io_context 保活
+//   2. acceptor->close()  — 取消所有挂起的 async_accept
+//   3. io_context->stop() — 强制 listener 线程的 run() 返回
+//   4. listenerThread.join() — 等待线程结束
+//   5. stop_metrics_server() / outbound / persistent_queue — 停业务子系统
+//   6. io_thread_pool / worker_thread_pool — 最后停线程池
+//   7. intrusion_detector.persist() — 持久化 IP 封禁记录
+//
+//  外部应使用 request_stop() + 析构，不直接调用此函数。
+// ====================================================================
 void ServerBase::stop(ServerState next_state) {
     if (next_state == ServerState::Running) {
         LOG_SERVER_WARN("Can't switch to running in stop()");
         return;
     }
-    if (m_state.load() == ServerState::Running) {
-        try {
-            m_state.store(next_state);
-            stop_metrics_server();
-            if (m_outboundInterruptFlag) m_outboundInterruptFlag->store(false);
-            if (m_listenerThread.joinable()) m_listenerThread.join();
-            LOG_SERVER_INFO("Listener thread stopped");
+    if (m_state.load() != ServerState::Running) return;
+    try {
+        m_state.store(next_state);
 
-            if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
-            if (m_persistentQueue) { m_persistentQueue->shutdown(); LOG_SERVER_INFO("PersistentQueue shutdown"); }
+        // 1. 释放 work guard → io_context::run() 在无任务时退出
+        m_workGuard.reset();
 
-            if (m_ioThreadPool) m_ioThreadPool->stop();
-            if (m_workerThreadPool) m_workerThreadPool->stop();
-            LOG_SERVER_INFO("ThreadPools stopped");
+        // 2. 关闭所有 acceptor → 取消挂起的 async_accept
+        boost::system::error_code ec;
+        for (auto& a : m_ssl_acceptors) a->close(ec);
+        for (auto& a : m_tcp_acceptors) a->close(ec);
 
-            m_intrusionDetector.persist();
+        // 3. 强制 io_context 退出（即使还有未完成的任务）
+        if (m_ioContext && !m_ioContext->stopped()) m_ioContext->stop();
 
-            boost::system::error_code ec;
-            for (auto& a : m_ssl_acceptors) a->close(ec);
-            for (auto& a : m_tcp_acceptors) a->close(ec);
+        // 4. 等待 listener 线程结束
+        if (m_listenerThread.joinable()) m_listenerThread.join();
+        LOG_SERVER_INFO("Listener thread stopped");
 
-            LOG_SERVER_INFO("Server stopped");
-        } catch (const std::exception& e) {
-            LOG_SERVER_ERROR("Error stopping server: {}", e.what());
-        }
+        stop_metrics_server();
+        if (m_outboundInterruptFlag) m_outboundInterruptFlag->store(false);
+
+        if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
+        if (m_persistentQueue) { m_persistentQueue->shutdown(); LOG_SERVER_INFO("PersistentQueue shutdown"); }
+
+        if (m_ioThreadPool) m_ioThreadPool->stop();
+        if (m_workerThreadPool) m_workerThreadPool->stop();
+        LOG_SERVER_INFO("ThreadPools stopped");
+
+        m_intrusionDetector.persist();
+        LOG_SERVER_INFO("Server stopped");
+    } catch (const std::exception& e) {
+        LOG_SERVER_ERROR("Error stopping server: {}", e.what());
     }
 }
 

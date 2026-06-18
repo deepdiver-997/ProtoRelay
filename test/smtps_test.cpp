@@ -77,29 +77,10 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 
 // 全局服务器指针，用于信号处理
 std::unique_ptr<SmtpsServer> g_server = nullptr;
+volatile sig_atomic_t g_signal_flag = 0;
 
-// 信号处理函数
 void signal_handler(int signal) {
-    if (signal == SIGHUP) {
-        LOG_SERVER_INFO("Received SIGHUP, reloading config...");
-        if (g_server) {
-            auto ctx = g_server->get_io_context();
-            if (ctx) {
-                boost::asio::post(*ctx, []() {
-                    if (g_server) {
-                        bool ok = g_server->reload_config(g_server->m_configFilePath);
-                        LOG_SERVER_INFO("Config reload from SIGHUP: {}", ok ? "success" : "failed");
-                    }
-                });
-            }
-        }
-        return;
-    }
-    LOG_SERVER_INFO("\nReceived signal {}, shutting down...", signal);
-    if (g_server) {
-        g_server->stop();
-        g_server.reset();
-    }
+    g_signal_flag = (signal == SIGHUP) ? 2 : 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -166,13 +147,26 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("SMTPS Server is running");
         LOG_SERVER_INFO("Press Ctrl+C to stop");
 
-        // 主循环
-        g_server->run();
+        // 主循环：轮询信号标志，检测到后从主线程安全关闭
+        while (g_server && !g_signal_flag) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        if (g_signal_flag == 2) {
+            LOG_SERVER_INFO("SIGHUP reload");
+            g_signal_flag = 0;
+            g_server->reload_config(g_server->m_configFilePath);
+        }
+
+        if (g_signal_flag == 1) {
+            LOG_SERVER_INFO("Shutting down...");
+            g_server->request_stop();  // 原子设状态 Pausing
+        }
 
         LOG_SERVER_INFO("SMTPS Server stopped");
 
-        // 【关键】手动释放服务器资源，确保在 Logger shutdown 之前完成所有清理
-        g_server.reset();  // 触发 ServerBase 析构 → PersistentQueue 析构 → worker 线程退出
+        // request_stop + reset 触发 ServerBase 析构 → RAII 释放所有资源
+        g_server.reset();
         
         // 等待所有后台线程完全退出（PersistentQueue worker、worker_pool 任务等）
         std::this_thread::sleep_for(std::chrono::milliseconds(500));

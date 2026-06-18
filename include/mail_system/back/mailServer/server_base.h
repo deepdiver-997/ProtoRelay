@@ -40,6 +40,25 @@ inline const char* server_state_to_string(ServerState s) {
     }
 }
 
+// ====================================================================
+// 服务器基类 — 生命周期管理
+//
+// 典型用法:
+//   auto server = std::make_shared<SmtpsServer>(config);
+//   server->start();   // 非阻塞，启动 listener/outbound/metrics
+//   server->run();     // 阻塞当前线程直到收到停止信号
+//   // shared_ptr 析构 → ~ServerBase() → stop() → RAII 清理资源
+//
+// 信号处理:
+//   signal_handler → server->request_stop() (async-signal-safe)
+//   → run() 检测到 Pausing 状态 → 主线程退出
+//   → shared_ptr 析构 → stop() 完成资源释放
+//
+// 状态转换:
+//   Stopped → start() → Running → request_stop() → Pausing
+//   → stop() → 子系统和线程停止 → state 保持 Pausing
+//   ~ServerBase() 后不再访问 state
+// ====================================================================
 class ServerBase {
 class SessionBase;
 public:
@@ -54,24 +73,45 @@ public:
     ServerBase(ServerBase&&) = delete;
     ServerBase& operator=(ServerBase&&) = delete;
 
+    // 非阻塞启动：启动 listener 线程、metrics server、outbound client。
+    // 调用后应立即调用 run() 阻塞主线程，或自行循环检查 get_state()。
     void start();
+
+    // 阻塞当前线程直到服务器进入 Pausing 状态（由 request_stop() 触发）。
+    // 返回后由外部 shared_ptr 析构完成资源清理。
     void run();
-    void stop(ServerState state = ServerState::Pausing);
+
+    // 线程安全，可在任意线程调用。
     ServerState get_state() const;
 
+    // async-signal-safe: 信号处理器中唯一可调用的方法。
+    // 仅设置原子状态为 Pausing，不执行任何资源操作。
+    // run() 检测到此状态后退出，destructor 中的 stop() 执行清理。
+    void request_stop() { m_state.store(ServerState::Pausing, std::memory_order_release); }
+
+    // STARTTLS 升级：将 TCP socket 包装为 SSL stream，分派给 handle_accept。
     void pass_stream(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,
                      const ListenerConfig& lc) {
         this->handle_accept(std::move(ssl_socket), boost::system::error_code(), lc);
     }
 
+    // STARTTLS: 从已建立的 TCP 连接升级到 TLS。
+    // 派生类可覆写以直接创建 SSL session（跳过 greeting/重启协议）。
     virtual void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket);
 
     const ListenerConfig* get_listener_config(uint16_t port) const;
 
 protected:
-    // 启动所有 listener 的异步 accept
+    // 停止服务器：释放 work guard、关闭 acceptor、停止 io_context、
+    // 等待 listener 线程退出、停止 outbound/queue/thread pools。
+    // 仅从 ~ServerBase() 调用，外部应使用 request_stop() + 析构。
+    void stop(ServerState state = ServerState::Pausing);
+
+    // 启动所有 listener 的异步 accept 循环。
     virtual void start_all_tcp_acceptors();
     virtual void start_all_ssl_acceptors();
+
+    // 单个 acceptor 的 accept 循环（被 start_all_* 调用）。
     void do_tcp_accept(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, const ListenerConfig& lc);
     void do_ssl_accept(std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor, const ListenerConfig& lc);
 

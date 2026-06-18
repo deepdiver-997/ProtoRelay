@@ -123,33 +123,11 @@ std::shared_ptr<SmtpsServer> g_smtp_server = nullptr;
 std::shared_ptr<ImapsServer> g_imap_server = nullptr;
 SharedServerResources g_resources;
 
-void signal_handler(int signal) {
-    if (signal == SIGHUP) {
-        LOG_SERVER_INFO("Received SIGHUP, reloading SMTP config...");
-        if (g_smtp_server) {
-            auto ctx = g_smtp_server->get_io_context();
-            if (ctx) {
-                boost::asio::post(*ctx, [srv = g_smtp_server]() {
-                    bool ok = srv->reload_config(srv->m_configFilePath);
-                    LOG_SERVER_INFO("SMTP config reload from SIGHUP: {}", ok ? "success" : "failed");
-                });
-            }
-        }
-        return;
-    }
-    LOG_SERVER_INFO("\nReceived signal {}, shutting down all servers...", signal);
+// 信号安全：只写 volatile sig_atomic_t，让主线程轮询
+volatile sig_atomic_t g_signal_flag = 0;
 
-    // Stop in reverse order: IMAP first (reader), SMTP last (writer + outbound)
-    if (g_imap_server) {
-        LOG_SERVER_INFO("Stopping IMAP server...");
-        g_imap_server->stop();
-        g_imap_server.reset();
-    }
-    if (g_smtp_server) {
-        LOG_SERVER_INFO("Stopping SMTP server...");
-        g_smtp_server->stop();
-        g_smtp_server.reset();
-    }
+void signal_handler(int signal) {
+    g_signal_flag = (signal == SIGHUP) ? 2 : 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -277,10 +255,29 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("Press Ctrl+C to stop all servers.");
 
         // ================================================================
-        // 8. 主循环：保持进程运行直到信号来临
+        // 8. 主循环：轮询信号标志，安全关闭
         // ================================================================
-        while (g_smtp_server || g_imap_server) {
+        while (!g_signal_flag) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        if (g_signal_flag == 2) {
+            LOG_SERVER_INFO("SIGHUP reload (SMTP only)");
+            g_signal_flag = 0;
+            if (g_smtp_server) {
+                bool ok = g_smtp_server->reload_config(g_smtp_server->m_configFilePath);
+                LOG_SERVER_INFO("SMTP config reload: {}", ok ? "success" : "failed");
+            }
+        }
+
+        if (g_signal_flag == 1 || !g_smtp_server || !g_imap_server) {
+            LOG_SERVER_INFO("Shutting down...");
+            // request_stop 只设原子状态，然后 run() 检测到后退出
+            // reset() 触发析构链，在正常上下文中释放所有资源
+            if (g_smtp_server) g_smtp_server->request_stop();
+            if (g_imap_server) g_imap_server->request_stop();
+            g_smtp_server.reset();
+            g_imap_server.reset();
         }
 
         LOG_SERVER_INFO("");

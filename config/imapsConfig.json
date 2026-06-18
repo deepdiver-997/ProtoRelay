@@ -3,11 +3,10 @@
 
   "address": "0.0.0.0",
 
-  "enable_ssl": true,
-  "ssl_port": 993,
-
-  "enable_tcp": true,
-  "tcp_port": 143,
+  "listeners": [
+    { "type": "ssl", "port": 993, "auth_policy": "on" },
+    { "type": "tcp", "port": 143, "auth_policy": "on" }
+  ],
 
   "certFile": "crt/server.crt",
   "keyFile": "crt/server.key",
@@ -28,7 +27,7 @@
   "write_timeout": 600,
 
   "require_auth": true,
-  "max_auth_attempts": 3,
+  "max_auth_attempts": 3000,
 
   "system_name": "mail-system-imap",
   "system_domain": "scut.email",

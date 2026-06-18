@@ -17,7 +17,7 @@
   "connection_timeout": 300,
   "read_timeout": 60,
   "write_timeout": 60,
-  "max_auth_attempts": 3,
+  "max_auth_attempts": 300,
   "system_name": "scut-email-smtp",
   "system_domain": "scut.email",
   "outbound_helo_domain": "smtp.scut.email",

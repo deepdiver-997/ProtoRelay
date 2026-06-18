@@ -72,10 +72,10 @@ public:
      * @return std::shared_ptr<boost::asio::io_context> io_context的共享指针
      */
     boost::asio::io_context& get_io_context() {
-        static int min = 0;
-        ++min;
-        min %= m_thread_count;
-        return *m_io_contexts[min];
+        if (!m_running.load(std::memory_order_acquire))
+            throw std::runtime_error("IOThreadPool is stopped");
+        size_t idx = m_id_counter.fetch_add(1, std::memory_order_relaxed) % m_thread_count;
+        return *m_io_contexts[idx];
     }
 
 protected:
