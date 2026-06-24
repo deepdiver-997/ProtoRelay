@@ -1,25 +1,52 @@
 {
   "address": "0.0.0.0",
+  "system_name": "scut-email-smtp",
+  "system_domain": "scut.email",
+
   "listeners": [
-    { "type": "tcp", "port": 25,  "auth_policy": "off", "spf_mode": "hard", "dkim_mode": "hard", "dmarc_mode": "hard" },
-    { "type": "ssl", "port": 465, "auth_policy": "on",  "spf_mode": "off",  "dkim_mode": "off",  "dmarc_mode": "off" },
-    { "type": "tcp", "port": 587, "auth_policy": "on",  "spf_mode": "off",  "dkim_mode": "off",  "dmarc_mode": "off" }
+    { "type": "tcp", "port": 25,  "auth_policy": "off" },
+    { "type": "ssl", "port": 465, "auth_policy": "on" },
+    { "type": "tcp", "port": 587, "auth_policy": "on" }
   ],
+
   "certFile": "crt/server.crt",
   "keyFile": "crt/server.key",
-  "dhFile": "",
-  "maxMessageSize": 10485760,
-  "maxConnections": 1000,
-  "io_thread_count": 4,
-  "worker_thread_count": 2,
+
   "use_database": true,
   "db_config_file": "db_config.json",
+
+  "maxMessageSize": 10485760,
+  "maxConnections": 100000,
+
+  "io_thread_count": 12,
+  "worker_thread_count": 4,
+
   "connection_timeout": 300,
   "read_timeout": 60,
   "write_timeout": 60,
-  "max_auth_attempts": 300,
-  "system_name": "scut-email-smtp",
-  "system_domain": "scut.email",
+  "max_auth_attempts": 3,
+
+  "perf_mode": true,
+
+  "log_level": "info",
+  "log_to_console": false,
+  "log_to_file": false,
+  "log_file": "../logs/server.log",
+
+  "mail_storage_path": "../mail/",
+  "attachment_storage_path": "../attachments/",
+  "persist_min_available_memory_mb": 0,
+  "inbound_ack_mode": "after_enqueue",
+
+  "inbound_auth_policy": "off",
+  "inbound_spf_mode": "hard",
+  "inbound_dkim_mode": "soft",
+  "inbound_dmarc_mode": "soft",
+
+  "dnsbl_enabled": true,
+  "intrusion_detection_enabled": true,
+  "intrusion_ban_threshold": 5,
+
   "outbound_helo_domain": "smtp.scut.email",
   "outbound_mail_from_domain": "scut.email",
   "outbound_rewrite_header_from": true,
@@ -27,29 +54,6 @@
   "outbound_dkim_selector": "202407",
   "outbound_dkim_domain": "scut.email",
   "outbound_dkim_private_key_file": "dkim/202407.scut.email.private.pem",
-  "outbound_poll_busy_sleep_ms": 20,
-  "outbound_poll_backoff_base_ms": 50,
-  "outbound_poll_backoff_max_ms": 1200,
-  "outbound_poll_backoff_shift_cap": 6,
   "outbound_ports": [465],
-  "outbound_max_attempts": 8,
-  "inbound_persist_wait_timeout_ms": 5000,
-  "persist_max_inflight_mails": 512,
-  "persist_min_available_memory_mb": 32,
-  "persist_min_db_available_connections": 1,
-  "log_level": "info",
-  "log_to_console": true,
-  "log_to_file": true,
-  "log_file": "../logs/server.log",
-  "mail_storage_path": "../mail/",
-  "attachment_storage_path": "../attachments/",
-  "inbound_ack_mode": "after_enqueue",
-  "inbound_auth_policy": "on",
-  "metrics_enabled": false,
-  "dnsbl_enabled": true,
-  "intrusion_detection_enabled": true,
-  "intrusion_persist_interval_sec": 60,
-  "intrusion_persist_dirty_threshold": 256,
-  "intrusion_max_records": 10000,
-  "intrusion_ban_threshold": 5
+  "outbound_max_attempts": 8
 }

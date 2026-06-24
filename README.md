@@ -70,8 +70,22 @@ Operational note:
 
 - `after_enqueue` improves throughput and tail latency, but `250 OK` no longer guarantees durable persistence.
 - `after_persist` is safer for durability, but throughput is bounded by persistence completion latency.
-- Local benchmark note: on this MacBook Pro, `after_enqueue` small-mail tests with `uv run ./test/cl.py` reached roughly 1.9k-3.0k msg/s, with 1000 messages at 2976.9 msg/s and 10000 messages at 2147.5 msg/s under `--concurrency 100`.
-- These are single-machine throughput figures under the current test workload, not a production SLA.
+- **Local benchmark (connection reuse, default)**: `uv run test/cl.py --messages 10000 --concurrency 100`
+  - port 25 no-auth + perf_mode: ~3500 msg/s, p50≈21ms, p99≈80ms
+  - port 587 STARTTLS + AUTH: ~480 msg/s, p50≈200ms (TLS handshake overhead dominates)
+- **`--per-conn` mode** (new TCP connection per message):
+  - port 25 no-auth + perf_mode: ~480 msg/s, p99≈380ms
+  - Each TCP handshake costs 2-5ms; 7× gap vs connection reuse
+- M3 Pro (12-core) macOS single-machine figures, not a production SLA
+- Use `perf_mode: true` and `log_level: warn` for benchmark runs
+
+### Performance Tuning Notes
+
+1. **IO pool distribution**: TCP sockets must bind to `IOThreadPool::get_io_context()` (round-robin across N io_contexts), not `ServerBase::get_io_context()` (single listener context). A prior regression routed all TCP connections to one thread, cutting throughput 7×.
+2. **Connection reuse**: Benchmark script reuses connections by default. `--per-conn` for realistic per-message connections.
+3. **Auth cache**: `LruCache` in SmtpsFsm (TTL 5min, cap 10000) avoids DB queries for repeat auth.
+4. **Lock-free queue**: `boost::lockfree::queue` replaced `deque + mutex + cv` in PersistentQueue, with exponential backoff for the worker.
+5. **Log level**: INFO-level spdlog synchronous stdout writes become the bottleneck under concurrency; use `warn` for benchmarks.
 
 ## Current Outbound Hot-Dispatch Semantics
 

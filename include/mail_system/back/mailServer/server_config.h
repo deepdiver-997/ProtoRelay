@@ -175,6 +175,9 @@ struct ServerConfig {
     size_t max_auth_attempts;
     bool dnsbl_enabled;
 
+    // 性能测试模式：跳过 SPF/DKIM/DMARC/DNSBL/反垃圾等检查，来者不拒
+    bool perf_mode;
+
     std::string log_level;
     std::string log_file;
     bool log_to_console;
@@ -259,6 +262,7 @@ struct ServerConfig {
         , write_timeout(60)
         , max_auth_attempts(3)
         , dnsbl_enabled(true)
+        , perf_mode(false)
         , log_level("info")
         , log_to_console(true)
         , log_to_file(true)
@@ -408,6 +412,7 @@ struct ServerConfig {
         write_timeout      = j.value("write_timeout", write_timeout);
         max_auth_attempts  = j.value("max_auth_attempts", max_auth_attempts);
         dnsbl_enabled      = j.value("dnsbl_enabled", dnsbl_enabled);
+        perf_mode          = j.value("perf_mode", perf_mode);
         log_level          = j.value("log_level", log_level);
         log_file           = resolve_path(filename, j.value("log_file", log_file));
         log_to_console     = j.value("log_to_console", log_to_console);

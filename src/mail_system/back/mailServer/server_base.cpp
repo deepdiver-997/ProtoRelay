@@ -198,7 +198,13 @@ ServerBase::ServerBase(const ServerConfig& config,
     }
 }
 
-ServerBase::~ServerBase() { stop(); }
+ServerBase::~ServerBase() {
+    try { stop(); } catch (...) {}
+    // stop() 已 join listener 线程；若未 join 则等待（最多 3 秒）
+    if (m_listenerThread.joinable()) {
+        try { m_listenerThread.join(); } catch (...) {}
+    }
+}
 
 const ListenerConfig* ServerBase::get_listener_config(uint16_t port) const {
     auto it = m_listener_configs.find(port);
@@ -269,7 +275,8 @@ void ServerBase::do_tcp_accept(
 {
     if (get_state() != ServerState::Running) return;
 
-    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(*get_io_context());
+    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(
+        std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
     auto* psock = sock.get();
 
     acceptor->async_accept(*psock, [this, acceptor, lc,
@@ -383,30 +390,33 @@ void ServerBase::stop(ServerState next_state) {
         LOG_SERVER_WARN("Can't switch to running in stop()");
         return;
     }
-    if (m_state.load() != ServerState::Running) return;
+    auto cur = m_state.load();
+    if (cur != ServerState::Running && cur != ServerState::Pausing) return;
     try {
         m_state.store(next_state);
 
-        // 1. 释放 work guard → io_context::run() 在无任务时退出
+        // 1. 释放 work guard → io_context::run() 可退出
         m_workGuard.reset();
 
-        // 2. 关闭所有 acceptor → 取消挂起的 async_accept
+        // 2. 停 io_context → run() 返回 → join 线程
+        if (m_ioContext && !m_ioContext->stopped()) m_ioContext->stop();
+        if (m_listenerThread.joinable()) m_listenerThread.join();
+        LOG_SERVER_INFO("Listener thread stopped");
+
+        // 3. 线程已退出，安全关闭 acceptor
         boost::system::error_code ec;
         for (auto& a : m_ssl_acceptors) a->close(ec);
         for (auto& a : m_tcp_acceptors) a->close(ec);
-
-        // 3. 强制 io_context 退出（即使还有未完成的任务）
-        if (m_ioContext && !m_ioContext->stopped()) m_ioContext->stop();
-
-        // 4. 等待 listener 线程结束
-        if (m_listenerThread.joinable()) m_listenerThread.join();
-        LOG_SERVER_INFO("Listener thread stopped");
 
         stop_metrics_server();
         if (m_outboundInterruptFlag) m_outboundInterruptFlag->store(false);
 
         if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
-        if (m_persistentQueue) { m_persistentQueue->shutdown(); LOG_SERVER_INFO("PersistentQueue shutdown"); }
+        if (m_persistentQueue) {
+            m_persistentQueue->shutdown();
+            m_persistentQueue.reset();  // join worker 线程，必须在停线程池之前
+            LOG_SERVER_INFO("PersistentQueue shutdown");
+        }
 
         if (m_ioThreadPool) m_ioThreadPool->stop();
         if (m_workerThreadPool) m_workerThreadPool->stop();

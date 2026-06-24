@@ -126,13 +126,15 @@ SubmitOwnedMailResult PersistentQueue::submit_owned_mail(std::unique_ptr<mail> m
     result.ticket.cancel_requested = std::make_shared<std::atomic<bool>>(false);
 
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        task_queue_.push_back(std::make_pair(std::move(result.rejected_mail), result.ticket));
+        auto* item = new QueueItem{std::move(result.rejected_mail), result.ticket};
+        while (!task_queue_.push(item)) {
+            // 队列满，短暂让出
+            std::this_thread::yield();
+        }
         queued_task_count_.fetch_add(1, std::memory_order_relaxed);
         inflight_mail_count_.fetch_add(1, std::memory_order_relaxed);
     }
-
-    queue_cv_.notify_one();
+    wakeup_flag_.store(true, std::memory_order_release);
     result.accepted = true;
     LOG_PERSISTENT_QUEUE_INFO("Mail submitted to PersistentQueue, mail_id={}, queued={}, inflight={}",
                               result.ticket.mail_id,
@@ -247,30 +249,34 @@ void PersistentQueue::shutdown() {
     if (shutdown_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    // 唤醒可能在等待中的工作线程以便正常退出
-    queue_cv_.notify_all();
-    // 不在这里打印日志，因为可能在析构阶段调用，此时 Logger 可能已 shutdown
+    wakeup_flag_.store(true, std::memory_order_release);
 }
 
 bool PersistentQueue::process_task() {
-    std::unique_ptr<mail> mail_data;
-    PersistSubmissionTicket ticket;
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        queue_cv_.wait(lock, [this] {
-            return shutdown_.load(std::memory_order_relaxed) || !task_queue_.empty();
-        });
-        if (shutdown_.load(std::memory_order_relaxed) && task_queue_.empty()) {
-            return false;
+    QueueItem* item = nullptr;
+    int empty_spins = 0;
+    while (!shutdown_.load(std::memory_order_relaxed)) {
+        if (task_queue_.pop(item) && item) break;
+        wakeup_flag_.store(false, std::memory_order_release);
+        if (task_queue_.pop(item) && item) break;
+        // 指数退让：空转几次后逐渐加长休眠
+        if (empty_spins < 16) {
+            std::this_thread::yield();
+        } else if (empty_spins < 256) {
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
+        ++empty_spins;
+    }
+    if (!item) return false;
 
-        auto task = std::move(task_queue_.front());
-        task_queue_.erase(task_queue_.begin());
-        queued_task_count_.fetch_sub(1, std::memory_order_relaxed);
-        mail_data = std::move(task.first);
-        ticket = std::move(task.second);
+    auto mail_data = std::move(item->mail_data);
+    auto ticket = std::move(item->ticket);
+    delete item;
+    queued_task_count_.fetch_sub(1, std::memory_order_relaxed);
 
-        if (!mail_data) {
+    if (!mail_data) {
             inflight_mail_count_.fetch_sub(1, std::memory_order_relaxed);
             LOG_PERSISTENT_QUEUE_WARN("Skipped empty mail task");
             return true;
@@ -281,7 +287,6 @@ bool PersistentQueue::process_task() {
             inflight_mail_count_.fetch_sub(1, std::memory_order_relaxed);
             return true;
         }
-    }
 
     worker_pool_->submit([this, ticket, mail_data = std::move(mail_data)]() mutable {
         std::string error;
@@ -896,10 +901,9 @@ bool PersistentQueue::should_reject_submission(const mail& mail_data, std::strin
 }
 
 bool PersistentQueue::is_db_under_pressure(std::string& reason) const {
+    if (pressure_config_.min_db_available_connections == 0) return false;
     auto db = m_shardRouter->get_db_pool(0);
-    if (!db || pressure_config_.min_db_available_connections == 0) {
-        return false;
-    }
+    if (!db) return false;
 
     const auto available = db->get_available_connections();
     if (available >= pressure_config_.min_db_available_connections) {

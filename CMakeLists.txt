@@ -74,6 +74,9 @@ if(BUILD_OBJECT_ONLY)
     add_compile_definitions(FMT_HEADER_ONLY=1)
 endif()
 
+# Cross-compilation sysroot: inserted before all other include paths
+set(SYSROOT_INCLUDE "${SYSROOT_INCLUDE}" CACHE PATH "Sysroot include path for cross-compilation")
+
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -158,7 +161,23 @@ set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "Disable BoostConfig package mode" FORCE)
 # This project uses Boost headers (asio/beast/etc.) and std::thread; avoid
 # requiring optional Boost binary components that may be absent in Homebrew.
 find_package(Boost REQUIRED)
-find_package(spdlog REQUIRED)
+if(SYSROOT_INCLUDE)
+    # 交叉编译：使用 sysroot 的 spdlog/fmt 头文件，不依赖 homebrew
+    message(STATUS "Using sysroot spdlog/fmt: ${SYSROOT_INCLUDE}")
+    set(spdlog_FOUND TRUE)
+    set(spdlog_INCLUDE_DIRS "${SYSROOT_INCLUDE}")
+    set(spdlog_LIBRARIES "")  # header-only
+    add_compile_definitions(SPDLOG_FMT_EXTERNAL=OFF)  # 使用 spdlog 自带的 bundled fmt
+    # 创建 header-only 接口目标，替代 find_package(spdlog)
+    if(NOT TARGET spdlog::spdlog)
+        add_library(spdlog::spdlog INTERFACE IMPORTED)
+        set_target_properties(spdlog::spdlog PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${SYSROOT_INCLUDE}"
+        )
+    endif()
+else()
+    find_package(spdlog REQUIRED)
+endif()
 if(ENABLE_HDFS_WEB_STORAGE)
     find_package(CURL REQUIRED)
 endif()
@@ -377,7 +396,10 @@ endif()
 target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/include")
 target_include_directories(${SMTP_TARGET} PRIVATE "${CMAKE_BINARY_DIR}/generated")
 
-# spdlog
+# spdlog/fmt — 交叉编译时用 sysroot 头文件覆盖 homebrew
+if(SYSROOT_INCLUDE)
+    target_include_directories(${SMTP_TARGET} BEFORE PRIVATE SYSTEM ${SYSROOT_INCLUDE})
+endif()
 if(spdlog_FOUND)
     target_include_directories(${SMTP_TARGET} PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
 endif()
@@ -469,6 +491,9 @@ if(BUILD_OBJECT_ONLY)
     foreach(_obj_target imapsServer_obj mailServer_obj)
         target_include_directories(${_obj_target} PRIVATE "${CMAKE_SOURCE_DIR}/include")
         target_include_directories(${_obj_target} PRIVATE "${CMAKE_BINARY_DIR}/generated")
+        if(SYSROOT_INCLUDE)
+            target_include_directories(${_obj_target} BEFORE PRIVATE SYSTEM ${SYSROOT_INCLUDE})
+        endif()
         if(spdlog_FOUND)
             target_include_directories(${_obj_target} PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
         endif()

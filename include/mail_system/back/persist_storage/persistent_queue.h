@@ -9,9 +9,9 @@
 #include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/common/logger.h"
+#include <boost/lockfree/queue.hpp>
 #include <atomic>
-#include <condition_variable>
-#include <deque>
+#include <chrono>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -138,10 +138,14 @@ private:
     std::string local_domain_{"example.com"};
     PersistentQueuePressureConfig pressure_config_{};
 
-    std::deque<std::pair<std::unique_ptr<mail>, PersistSubmissionTicket>> task_queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
+    // 无锁队列：多生产者(session)单消费者(worker thread)
+    struct QueueItem {
+        std::unique_ptr<mail> mail_data;
+        PersistSubmissionTicket ticket;
+    };
+    boost::lockfree::queue<QueueItem*, boost::lockfree::capacity<16384>> task_queue_{};
     std::atomic<size_t> queued_task_count_{0};
+    std::atomic<bool> wakeup_flag_{false};  // worker 自旋等待的低开销唤醒
     std::atomic<size_t> inflight_mail_count_{0};
     std::atomic<size_t> batch_pop_size_{16};
 

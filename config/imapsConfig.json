@@ -1,7 +1,7 @@
 {
-  "comment": "IMAP4rev1 Server Configuration (RFC 3501)",
-
   "address": "0.0.0.0",
+  "system_name": "mail-system-imap",
+  "system_domain": "scut.email",
 
   "listeners": [
     { "type": "ssl", "port": 993, "auth_policy": "on" },
@@ -10,27 +10,15 @@
 
   "certFile": "crt/server.crt",
   "keyFile": "crt/server.key",
-  "dhFile": "",
-
-  "maxMessageSize": 4194304,
-  "maxConnections": 1000,
-
-  "io_thread_count": 4,
-  "worker_thread_count": 4,
-  "ssl_in_worker": false,
 
   "use_database": true,
   "db_config_file": "db_config.json",
 
+  "maxConnections": 1000,
   "connection_timeout": 1800,
   "read_timeout": 600,
   "write_timeout": 600,
-
-  "require_auth": true,
-  "max_auth_attempts": 3000,
-
-  "system_name": "mail-system-imap",
-  "system_domain": "scut.email",
+  "max_auth_attempts": 3,
 
   "log_level": "info",
   "log_to_console": true,
@@ -39,9 +27,5 @@
 
   "storage_provider": "local",
   "mail_storage_path": "../mail/",
-  "attachment_storage_path": "../attachments/",
-
-  "metrics_enabled": false,
-  "metrics_port": 9091,
-  "metrics_bind_address": "127.0.0.1"
+  "attachment_storage_path": "../attachments/"
 }

@@ -312,7 +312,8 @@ public:
         out.append("\"listeners\":[");
         bool first = true;
         for (auto& [port, lc] : m_listener_configs) {
-            if (!first) out.append(","); first = false;
+            if (!first) out.append(",");
+            first = false;
             out.append("{\"port\":").append(std::to_string(port));
             out.append(",\"type\":\"").append(listener_type_to_string(lc.type)).append("\"");
             out.append(",\"auth\":\"").append(inbound_auth_policy_to_string(lc.auth_policy)).append("\"");

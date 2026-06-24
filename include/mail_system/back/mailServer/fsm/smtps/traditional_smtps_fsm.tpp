@@ -870,7 +870,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         // ===== SPF 提前验证 (MAIL FROM 阶段) =====
         auto config = std::atomic_load(&session->get_server()->m_config);
         std::string spf_reject_reason;
-        if (config->inbound_spf_mode != "off" &&
+        if (!config->perf_mode && config->inbound_spf_mode != "off" &&
             !ctx->sender_address.empty() && ctx->sender_address != "<>") {
             auto outbound = session->get_server()->m_outboundClient;
             if (outbound) {
@@ -1147,9 +1147,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
     // ===== 入站验证 (DKIM/DMARC，SPF 已在 MAIL FROM 阶段完成) =====
     auto config = std::atomic_load(&session->get_server()->m_config);
-    bool needs_more_verification = (!ctx->spf_checked && config->inbound_spf_mode != "off") ||
-                                    config->inbound_dkim_mode != "off" ||
-                                    config->inbound_dmarc_mode != "off";
+    bool needs_more_verification = !config->perf_mode && (
+        (!ctx->spf_checked && config->inbound_spf_mode != "off") ||
+         config->inbound_dkim_mode != "off" ||
+         config->inbound_dmarc_mode != "off");
 
     if (needs_more_verification && !ctx->verification_run) {
         std::string client_ip = session->get_client_ip();

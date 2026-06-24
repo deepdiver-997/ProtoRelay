@@ -149,7 +149,7 @@ bool SmtpsServer::should_reject_connection(std::string& reason, const std::strin
     // 如果返回 127.0.0.x 说明该 IP 在已知垃圾源列表中。
     // 格式: <reversed_octets>.zen.spamhaus.org
     // 例如: 连接到 1.2.3.4 → 查询 4.3.2.1.zen.spamhaus.org
-    if (cfg->dnsbl_enabled && !client_ip.empty()) {
+    if (!cfg->perf_mode && cfg->dnsbl_enabled && !client_ip.empty()) {
         std::string reversed;
         try {
             auto addr = boost::asio::ip::make_address(client_ip);

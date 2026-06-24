@@ -70,8 +70,22 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 
 - `after_enqueue` 更适合追求吞吐和低尾延迟的场景，但 `250 OK` 不再等价于“已经可靠持久化”
 - `after_persist` 更保守，适合优先保证持久化语义的场景，但吞吐会受到持久化完成时延影响
-- 本地压测备注：在这台 MacBook Pro 上，`after_enqueue` 小邮件测试用 `uv run ./test/cl.py` 可达到约 1.9k-3.0k msg/s；其中 1000 封约 2976.9 msg/s，10000 封、`--concurrency 100` 约 2147.5 msg/s。
-- 这些数据是单机当前测试负载下的吞吐结果，不等同于生产 SLA。
+- **本地压测（连接复用模式，默认）**：`uv run test/cl.py --messages 10000 --concurrency 100`
+  - port 25 无认证 + perf_mode：约 3500 msg/s，p50≈21ms，p99≈80ms
+  - port 587 STARTTLS + AUTH：约 480 msg/s，p50≈200ms（TLS 握手 + AUTH 开销显著）
+- **`--per-conn` 模式**（每封邮件独立 TCP 连接，更真实）：
+  - port 25 无认证 + perf_mode：约 480 msg/s，p99≈380ms
+  - 每次 TCP 握手约消耗 2-5ms，10000 封 = 10000 次握手，与连接复用模式差距约 7 倍
+- 以上数据为 M3 Pro (12 核) macOS 单机测试结果，不等同于生产 SLA
+- 压测前建议开启 `perf_mode: true` 跳过 SPF/DKIM/DMARC/DNSBL，日志设为 `warn` 级别
+
+### 性能调优要点
+
+1. **IO 线程池分发**：TCP socket 必须绑定到 `IOThreadPool::get_io_context()`（轮询分发到 4 个 io_context），而非 `ServerBase::get_io_context()`（单 listener context）。曾因代码变更退化到单线程处理所有 TCP 连接，吞吐下降 7 倍。
+2. **连接复用 vs 每封独立连接**：压测脚本默认复用连接（100 连接发 10000 封），更符合 benchmark 惯例。`--per-conn` 切换为每封新连接。
+3. **认证缓存**：SmtpsFsm 内置 `LruCache`（TTL 5min，容量 10000），同一用户重复认证不查 DB。
+4. **持久化队列无锁化**：`boost::lockfree::queue` 替代 `deque + mutex + cv`，worker 指数退让避免空转。
+5. **日志级别**：INFO 级别下 spdlog 同步写 stdout 成为瓶颈（每封 5+ 条日志抢 mutex），压测时用 `warn`。
 
 ## 当前出站热投递语义
 

@@ -237,74 +237,43 @@ public:
         return "UNKNOWN_EVENT";
     }
 
-    // 数据库操作
+    // 认证缓存：email → {hash, status}，TTL 5min，避免每次 AUTH 查 DB
+    struct AuthCacheEntry { std::string password_hash; int status = 1; };
+    mutable LruCache<std::string, AuthCacheEntry> m_authCache{10000, std::chrono::minutes(5)};
 
     bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address,
                    const std::string& password, int& out_shard) {
-        LOG_AUTH_INFO("AUTH attempt: mail_address=[{}] password_len={}", mail_address, password.length());
+        if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); return false; }
 
-        if (!session) {
-            LOG_AUTH_ERROR("Session is null in auth_user");
-            return false;
-        }
-
-        // 通过 shard router 确定用户所在 shard
+        // shard router
         int shard = 0;
-        if (m_shardRouter) {
-            int r = m_shardRouter->route(mail_address);
-            if (r >= 0) shard = r;
-        }
+        if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
         out_shard = shard;
 
+        // 查缓存
+        AuthCacheEntry ce; bool stale;
+        if (m_authCache.get(mail_address, ce, stale)) {
+            if (ce.status != 1) return false;
+            if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
+                return bcrypt_verify(password, ce.password_hash);
+            return ce.password_hash == password;
+        }
+
+        // 缓存未命中，查 DB → 写入缓存
         auto conn = acquire_connection(shard);
-        if (!conn.is_valid()) {
-            LOG_AUTH_ERROR("Failed to get database connection in auth_user");
-            return false;
-        }
+        if (!conn.is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); return false; }
 
-        // 查询用户密码哈希和状态
-        std::string sql = "SELECT password, status FROM users "
-                         "WHERE mail_address = ?";
-        LOG_AUTH_DEBUG("SQL: {}  param=[{}]", sql, mail_address);
+        std::string sql = "SELECT password, status FROM users WHERE mail_address = ?";
         auto result = conn->query(sql, {mail_address});
-        if (!result) {
-            LOG_AUTH_WARN("Query returned null result for: {}", mail_address);
-            return false;
-        }
-        LOG_AUTH_DEBUG("Query success: row_count={} col_count={}", result->get_row_count(), result->get_column_count());
-        if (result->get_row_count() == 0) {
-            LOG_AUTH_WARN("User not found: {}", mail_address);
-            return false;
-        }
-
+        if (!result || result->get_row_count() == 0) { LOG_AUTH_WARN("User not found: {}", mail_address); return false; }
         int status = std::stoi(result->get_value(0, "status"));
-        LOG_AUTH_DEBUG("User status: {}", status);
-        if (status != 1) {
-            LOG_AUTH_WARN("User account disabled: {}", mail_address);
-            return false;
-        }
-
+        if (status != 1) { LOG_AUTH_WARN("User account disabled: {}", mail_address); return false; }
         std::string stored = result->get_value(0, "password");
-        LOG_AUTH_DEBUG("stored hash prefix: {}...", stored.substr(0, 10));
-        bool ok = false;
-
-        // bcrypt 哈希：以 "$2" 开头
-        if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
-            ok = bcrypt_verify(password, stored);
-            LOG_AUTH_DEBUG("bcrypt_verify result: {}", ok ? "MATCH" : "NO_MATCH");
-        } else {
-            // 兼容旧明文密码（应尽快迁移到 bcrypt）
-            ok = (stored == password);
-            if (ok) {
-                LOG_AUTH_WARN("User {} still using plaintext password - "
-                             "should re-register with bcrypt", mail_address);
-            }
-        }
-
-        if (ok) {
-            conn->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
-                          {mail_address});
-        }
+        m_authCache.put(mail_address, {stored, status});
+        bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
+                        ? bcrypt_verify(password, stored)
+                        : (stored == password);
+        if (ok) conn->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?", {mail_address});
         return ok;
     }
 
