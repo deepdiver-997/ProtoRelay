@@ -53,7 +53,6 @@ ImapsSession<ConnectionType>::ImapsSession(
     , fsm_(std::move(fsm))
     , state_(ImapState::INIT)
     , next_event_(ImapEvent::CONNECT)
-    , command_read_buffer_()
     , context_()
 {
 }
@@ -99,7 +98,7 @@ void ImapsSession<ConnectionType>::start_after_starttls(std::unique_ptr<ImapsSes
 // ====================================================================
 template <typename ConnectionType>
 void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
-    command_read_buffer_.append(data);
+    this->command_read_buffer_.append(data);
 }
 
 // ====================================================================

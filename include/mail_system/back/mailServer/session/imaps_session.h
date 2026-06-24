@@ -62,7 +62,6 @@ private:
     // 状态
     ImapState state_;
     ImapEvent next_event_;
-    std::string command_read_buffer_;
     std::string current_tag_;
     std::string current_command_;
     std::string last_command_args_;

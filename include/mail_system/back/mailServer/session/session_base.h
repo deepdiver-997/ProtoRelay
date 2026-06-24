@@ -212,6 +212,8 @@ protected:
     // 读取缓冲区
     std::vector<char> read_buffer_;
     std::vector<char> use_buffer_;
+    // 命令解析缓冲区（SMTP/IMAP 行协议共用）
+    std::string command_read_buffer_;
 
     // 客户端地址缓存
     mutable std::string client_address_;
@@ -254,6 +256,14 @@ public:
         ReadCallback callback = nullptr
     ) {
         if (self->closed_ || !self->connection_) {
+            return;
+        }
+
+        // pipelining: 如果命令缓冲区里还有完整行，直接解析而不发起网络读
+        if (self->has_buffered_input()) {
+            std::string buf = self->take_buffered_input();
+            self->handle_read(buf);
+            self->process_read(std::move(self));
             return;
         }
 
@@ -339,6 +349,9 @@ public:
                     if (cb) {
                         // 直接在IO线程中执行回调
                         cb(std::move(self), error);
+                    } else if (self->has_buffered_input()) {
+                        self->handle_read("");
+                        self->process_read(std::move(self));
                     } else {
                         // 回调为空，自动继续读取
                         do_async_read(std::move(self), nullptr);
@@ -351,6 +364,16 @@ public:
     // 纯虚函数，由派生类实现
     virtual void handle_read(const std::string& data) = 0;
     virtual void process_read(std::unique_ptr<SessionBase<ConnectionType>> self) = 0;
+
+    // pipelining: 派生类可覆写，默认基于 command_read_buffer_ 实现
+    virtual bool has_buffered_input() const {
+        return command_read_buffer_.find('\n') != std::string::npos;
+    }
+    virtual std::string take_buffered_input() {
+        std::string s = std::move(command_read_buffer_);
+        command_read_buffer_.clear();
+        return s;
+    }
 
     // 计算当前回复延迟（子类根据负载实现，0ms = 无延迟）
     virtual std::chrono::milliseconds compute_reply_delay() const = 0;

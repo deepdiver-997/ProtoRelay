@@ -12,7 +12,6 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , state_(SmtpsState::INIT)
     , next_event_(SmtpsEvent::CONNECT)
     , ignore_current_command_(false)
-    , command_read_buffer_()
     , context_()
     , buffer_size_(INITIAL_BUFFER_SIZE)
     , buffer_(new char[INITIAL_BUFFER_SIZE])
@@ -777,17 +776,17 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
     std::string trimmed;
 
     if (state_ != SmtpsState::IN_MESSAGE) {
-        command_read_buffer_ += data;
+        this->command_read_buffer_ += data;
 
-        const auto newline_pos = command_read_buffer_.find('\n');
+        const auto newline_pos = this->command_read_buffer_.find('\n');
         if (newline_pos == std::string::npos) {
             next_event_ = SmtpsEvent::TIMEOUT;
             last_command_args_.clear();
             return;
         }
 
-        std::string line = command_read_buffer_.substr(0, newline_pos + 1);
-        command_read_buffer_.erase(0, newline_pos + 1);
+        std::string line = this->command_read_buffer_.substr(0, newline_pos + 1);
+        this->command_read_buffer_.erase(0, newline_pos + 1);
         trimmed = algorithm::trim(line);
 
         // Ignore standalone CRLF and continue with buffered/next data.

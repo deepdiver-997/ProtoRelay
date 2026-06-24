@@ -86,6 +86,7 @@ Operational note:
 3. **Auth cache**: `LruCache` in SmtpsFsm (TTL 5min, cap 10000) avoids DB queries for repeat auth.
 4. **Lock-free queue**: `boost::lockfree::queue` replaced `deque + mutex + cv` in PersistentQueue, with exponential backoff for the worker.
 5. **Log level**: INFO-level spdlog synchronous stdout writes become the bottleneck under concurrency; use `warn` for benchmarks.
+6. **SMTP pipelining**: `do_async_read` checks the command buffer first — complete lines are processed immediately (one FSM round-trip each), only falling back to network read when exhausted. Incomplete commands wait for the next TCP chunk.
 
 ## Current Outbound Hot-Dispatch Semantics
 
