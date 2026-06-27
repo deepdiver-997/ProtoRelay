@@ -2,6 +2,7 @@
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/db/sql_queries.h"
+#include "mail_system/back/mailServer/metrics_server.h"
 #include "mail_system/back/outbound/mx_routing_utils.h"
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/outbound/smtp_outbound_client.h"
@@ -134,6 +135,7 @@ SubmitOwnedMailResult PersistentQueue::submit_owned_mail(std::unique_ptr<mail> m
         queued_task_count_.fetch_add(1, std::memory_order_relaxed);
         inflight_mail_count_.fetch_add(1, std::memory_order_relaxed);
     }
+    push_queue_metrics();
     wakeup_flag_.store(true, std::memory_order_release);
     result.accepted = true;
     LOG_PERSISTENT_QUEUE_INFO("Mail submitted to PersistentQueue, mail_id={}, queued={}, inflight={}",
@@ -275,9 +277,11 @@ bool PersistentQueue::process_task() {
     auto ticket = std::move(item->ticket);
     delete item;
     queued_task_count_.fetch_sub(1, std::memory_order_relaxed);
+    push_queue_metrics();
 
     if (!mail_data) {
             inflight_mail_count_.fetch_sub(1, std::memory_order_relaxed);
+            push_queue_metrics();
             LOG_PERSISTENT_QUEUE_WARN("Skipped empty mail task");
             return true;
         }
@@ -285,6 +289,7 @@ bool PersistentQueue::process_task() {
         if (mail_data->persist_status != PersistStatus::PENDING) {
             LOG_PERSISTENT_QUEUE_WARN("Mail ID {} has already been processed with status {}, skipping", mail_data->id, static_cast<int>(mail_data->persist_status));
             inflight_mail_count_.fetch_sub(1, std::memory_order_relaxed);
+            push_queue_metrics();
             return true;
         }
 
@@ -292,6 +297,7 @@ bool PersistentQueue::process_task() {
         std::string error;
         const auto finish = [this]() {
             inflight_mail_count_.fetch_sub(1, std::memory_order_relaxed);
+            push_queue_metrics();
         };
 
         if (!mail_data) {
@@ -1029,6 +1035,13 @@ bool PersistentQueue::is_memory_under_pressure(std::string& reason) const {
 //         return false;
 //     }
 // }
+
+void PersistentQueue::push_queue_metrics() {
+    if (auto m = metrics_.lock()) {
+        m->set_gauge("protorelay_queue_inflight", {}, inflight_mail_count_.load());
+        m->set_gauge("protorelay_queue_depth", {}, queued_task_count_.load());
+    }
+}
 
 } // namespace persist_storage
 } // namespace mail_system

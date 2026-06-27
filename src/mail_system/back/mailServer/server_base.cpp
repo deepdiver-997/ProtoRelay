@@ -453,25 +453,95 @@ void ServerBase::load_certificates(const std::string& cert_file, const std::stri
 
 void ServerBase::start_metrics_server() {
     auto cfg = std::atomic_load(&m_config);
-    if (!cfg->metrics_enabled || metrics_server_) return;
+    if (!cfg->metrics_enabled || m_metricsServer) return;
     try {
-        metrics_server_ = std::make_unique<MetricsServer>(
+        m_metricsServer = std::make_shared<MetricsServer>(
             *m_ioContext, cfg->metrics_port, cfg->metrics_bind_address,
-            [this]() { return build_metrics_response(); },
             [this]() -> std::string {
                 if (m_configFilePath.empty()) return "config file path not set";
                 return reload_config(m_configFilePath) ? "OK" : "reload failed";
             },
-            [this]() { return build_status_response(); });
-        metrics_server_->start();
+            [this]() { refresh_metrics(); });
+        m_metricsServer->start();
+        refresh_metrics();
+        LOG_SERVER_INFO("Metrics server started on {}:{}",
+                        cfg->metrics_bind_address, cfg->metrics_port);
     } catch (const std::exception& e) {
         LOG_SERVER_ERROR("Failed to start metrics server: {}", e.what());
-        metrics_server_.reset();
+        m_metricsServer.reset();
     }
 }
 
 void ServerBase::stop_metrics_server() {
-    if (metrics_server_) { metrics_server_->stop(); metrics_server_.reset(); }
+    if (m_metricsServer) { m_metricsServer->stop(); m_metricsServer.reset(); }
+}
+
+void ServerBase::push_metric_gauge(const std::string& name,
+                                     const MetricsServer::LabelMap& labels, double v) {
+    if (auto m = m_metricsServer) m->set_gauge(name, labels, v);
+}
+
+void ServerBase::push_metric_counter(const std::string& name,
+                                       const MetricsServer::LabelMap& labels, uint64_t v) {
+    if (auto m = m_metricsServer) m->inc_counter(name, labels, v);
+}
+
+void ServerBase::increment_connection_count() {
+    active_connections_.fetch_add(1, std::memory_order_relaxed);
+    push_metric_gauge("protorelay_active_connections", {}, active_connections_.load());
+}
+
+void ServerBase::decrement_connection_count() {
+    active_connections_.fetch_sub(1, std::memory_order_relaxed);
+    push_metric_gauge("protorelay_active_connections", {}, active_connections_.load());
+}
+
+void ServerBase::increment_connections_total() {
+    auto v = connections_total_.fetch_add(1, std::memory_order_relaxed) + 1;
+    push_metric_counter("protorelay_connections_total", {}, v);
+}
+
+void ServerBase::increment_connections_rejected() {
+    auto v = connections_rejected_total_.fetch_add(1, std::memory_order_relaxed) + 1;
+    push_metric_counter("protorelay_connections_rejected_total", {}, v);
+}
+
+void ServerBase::increment_mails_accepted() {
+    auto v = mails_accepted_total_.fetch_add(1, std::memory_order_relaxed) + 1;
+    push_metric_counter("protorelay_mails_accepted_total", {}, v);
+}
+
+void ServerBase::refresh_metrics() {
+    if (!m_metricsServer) return;
+
+    // 监听器
+    for (auto& [port, lc] : m_listener_configs) {
+        m_metricsServer->set_gauge("protorelay_listener_info",
+            {{"port", std::to_string(port)}, {"type", listener_type_to_string(lc.type)}}, 1);
+    }
+
+    // Shard Router
+    if (m_shardRouter) {
+        size_t n = m_shardRouter->shard_count();
+        for (size_t i = 0; i < n; ++i) {
+            MetricsServer::LabelMap labels{{"shard", std::to_string(i)}};
+            auto db = m_shardRouter->get_db_pool(i);
+            if (db) {
+                m_metricsServer->set_gauge("protorelay_db_pool_size", labels, db->get_pool_size());
+                m_metricsServer->set_gauge("protorelay_db_available", labels, db->get_available_connections());
+                m_metricsServer->set_gauge("protorelay_db_active", labels, db->get_active_connections());
+                m_metricsServer->set_gauge("protorelay_db_pool_max", labels, db->get_max_pool_size());
+            }
+            auto st = m_shardRouter->get_storage(i);
+            m_metricsServer->set_gauge("protorelay_storage_ready", labels, st ? 1 : 0);
+        }
+    }
+
+    // 队列（低频轮询，render 时更新）
+    if (m_persistentQueue) {
+        m_metricsServer->set_gauge("protorelay_queue_inflight", {}, m_persistentQueue->inflight_count());
+        m_metricsServer->set_gauge("protorelay_queue_depth", {}, m_persistentQueue->queue_size());
+    }
 }
 
 bool ServerBase::reload_config(const std::string& json_file) {

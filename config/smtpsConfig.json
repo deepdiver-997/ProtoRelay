@@ -28,6 +28,10 @@
 
   "perf_mode": true,
 
+  "metrics_enabled": true,
+  "metrics_port": 9090,
+  "metrics_bind_address": "127.0.0.1",
+
   "log_level": "info",
   "log_to_console": false,
   "log_to_file": false,

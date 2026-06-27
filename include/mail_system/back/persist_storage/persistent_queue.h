@@ -20,9 +20,8 @@
 #include <vector>
 
 namespace mail_system {
-namespace outbound {
-class SmtpOutboundClient;
-}
+namespace outbound { class SmtpOutboundClient; }
+class MetricsServer;
 }
 
 namespace mail_system {
@@ -89,7 +88,10 @@ public:
     void shutdown();
     bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
 
+    void inject_metrics(std::weak_ptr<MetricsServer> m) { metrics_ = std::move(m); }
+
 private:
+    void push_queue_metrics();
     // ---- 工作线程 ----
     void worker_loop();
     bool process_task();
@@ -151,6 +153,7 @@ private:
 
     std::atomic<bool> shutdown_;
     std::thread worker_thread_;
+    std::weak_ptr<MetricsServer> metrics_;
 };
 
 } // namespace persist_storage

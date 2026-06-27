@@ -2,74 +2,159 @@
 #define MAIL_SYSTEM_METRICS_SERVER_H
 
 #include <boost/asio.hpp>
+#include <atomic>
 #include <functional>
+#include <map>
 #include <memory>
+#include <shared_mutex>
 #include <string>
+#include <vector>
 
 namespace mail_system {
 
-// 最小化 HTTP 服务器，仅响应 GET /metrics、/health 和 POST /reload
-// 只用 Boost.Asio，不引入 beast 等额外依赖
-// 复用外部 io_context，不创建额外线程
+// 线程安全的指标存储 + HTTP 端点
+// 组件通过 push 接口提交指标，/metrics 和 /status 端点直接渲染存储数据
+//
+// 使用方式:
+//   ServerBase 持有 shared_ptr<MetricsServer>
+//   各组件持有 weak_ptr<MetricsServer>，析构时自动失效
+//   组件在事件发生时 push: if (auto m = metrics.lock()) m->inc("x", ...);
 class MetricsServer {
 public:
-    using MetricsProvider = std::function<std::string()>;
-    using StatusProvider  = std::function<std::string()>;  // JSON 状态
-    using ReloadHandler   = std::function<std::string()>;
+    using LabelMap = std::map<std::string, std::string>;
+
+    using ReloadHandler    = std::function<std::string()>;
+    using RefreshProvider   = std::function<void()>;  // render 前刷新慢变化指标
 
     MetricsServer(boost::asio::io_context& io_ctx,
                   uint16_t port, const std::string& bind_address,
-                  MetricsProvider provider,
                   ReloadHandler reload_handler = nullptr,
-                  StatusProvider status_provider = nullptr)
-        : io_ctx_(io_ctx)
-        , acceptor_(io_ctx_)
-        , port_(port)
-        , bind_address_(bind_address)
-        , provider_(std::move(provider))
-        , reload_handler_(std::move(reload_handler))
-        , status_provider_(std::move(status_provider))
-        , running_(false) {}
+                  RefreshProvider refresh = nullptr)
+        : io_ctx_(io_ctx), acceptor_(io_ctx_), port_(port)
+        , bind_address_(bind_address), reload_handler_(std::move(reload_handler))
+        , refresh_provider_(std::move(refresh)), running_(false) {}
 
     ~MetricsServer() { stop(); }
 
     MetricsServer(const MetricsServer&) = delete;
     MetricsServer& operator=(const MetricsServer&) = delete;
 
-    void start() {
-        if (running_.exchange(true)) {
-            return;
-        }
+    // ── 指标注入接口 (线程安全) ──────────────────────────────────
 
+    // 值瞬时覆盖上一次
+    void set_gauge(const std::string& name, const LabelMap& labels, double val) {
+        std::unique_lock lock(mutex_);
+        gauges_[make_key(name, labels)] = {build_help(name), val};
+    }
+
+    // 单调递增
+    void inc_counter(const std::string& name, const LabelMap& labels, uint64_t delta = 1) {
+        std::unique_lock lock(mutex_);
+        auto& c = counters_[make_key(name, labels)];
+        if (c.help.empty()) c.help = build_help(name);
+        c.value += delta;
+    }
+
+    // ── HTTP 服务 ───────────────────────────────────────────────
+
+    void start() {
+        if (running_.exchange(true)) return;
         boost::asio::ip::tcp::endpoint ep(
             boost::asio::ip::make_address(bind_address_), port_);
         acceptor_.open(ep.protocol());
         acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
         acceptor_.bind(ep);
         acceptor_.listen();
-
         do_accept();
     }
 
     void stop() {
-        if (!running_.exchange(false)) {
-            return;
-        }
-
+        if (!running_.exchange(false)) return;
         boost::system::error_code ec;
         acceptor_.close(ec);
     }
 
 private:
+    // ── 渲染 ────────────────────────────────────────────────────
+
+    struct GaugeEntry { std::string help; double value = 0; };
+    struct CounterEntry { std::string help; uint64_t value = 0; };
+
+    // key = "name{label=val,...}" — 保证唯一性
+    static std::string make_key(const std::string& name, const LabelMap& labels) {
+        if (labels.empty()) return name;
+        std::string k = name + "{";
+        bool first = true;
+        for (auto& [lk, lv] : labels) {
+            if (!first) k += ",";
+            k += lk + "=\"" + lv + "\"";
+            first = false;
+        }
+        k += "}";
+        return k;
+    }
+
+    static std::string build_help(const std::string& name) {
+        return "Metric " + name;
+    }
+
+    // 解析 key 为 name + labels
+    static std::pair<std::string, std::string> split_key(const std::string& key) {
+        auto pos = key.find('{');
+        if (pos == std::string::npos) return {key, ""};
+        return {key.substr(0, pos), key.substr(pos)};
+    }
+
+    std::string build_metrics() {
+        if (refresh_provider_) refresh_provider_();
+        std::shared_lock lock(mutex_);
+        std::string out;
+        out.reserve(4096);
+        for (auto& [key, g] : gauges_) {
+            auto [name, labels] = split_key(key);
+            out += "# HELP " + name + " " + g.help + "\n";
+            out += "# TYPE " + name + " gauge\n";
+            out += name;
+            if (!labels.empty()) out += labels;
+            out += " " + std::to_string(static_cast<int64_t>(g.value)) + "\n";
+        }
+        for (auto& [key, c] : counters_) {
+            auto [name, labels] = split_key(key);
+            out += "# HELP " + name + " " + c.help + "\n";
+            out += "# TYPE " + name + " counter\n";
+            out += name;
+            if (!labels.empty()) out += labels;
+            out += " " + std::to_string(c.value) + "\n";
+        }
+        return out;
+    }
+
+    std::string build_status() {
+        std::shared_lock lock(mutex_);
+        std::string out = "{\n";
+        bool first = true;
+        for (auto& [key, g] : gauges_) {
+            if (!first) out += ",\n";
+            auto [name, labels] = split_key(key);
+            out += "  \"" + key + "\": " + std::to_string(g.value);
+            first = false;
+        }
+        for (auto& [key, c] : counters_) {
+            if (!first) out += ",\n";
+            out += "  \"" + key + "\": " + std::to_string(c.value);
+            first = false;
+        }
+        out += "\n}\n";
+        return out;
+    }
+
+    // ── HTTP ────────────────────────────────────────────────────
+
     void do_accept() {
         auto socket = std::make_shared<boost::asio::ip::tcp::socket>(io_ctx_);
         acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
-            if (!ec) {
-                handle_request(socket);
-            }
-            if (running_.load()) {
-                do_accept();
-            }
+            if (!ec) handle_request(socket);
+            if (running_.load()) do_accept();
         });
     }
 
@@ -77,75 +162,52 @@ private:
         auto buf = std::make_shared<boost::asio::streambuf>();
         boost::asio::async_read_until(*socket, *buf, "\r\n\r\n",
             [this, socket, buf](const boost::system::error_code& ec, std::size_t) {
-                if (ec) {
-                    return;
-                }
-
+                if (ec) return;
                 std::string request;
                 std::istream is(buf.get());
-                std::getline(is, request); // 只读第一行 "GET /metrics HTTP/1.1"
+                std::getline(is, request);
 
-                std::string method;
-                std::string path;
-                size_t start = request.find(' ');
-                size_t end = request.find(' ', start + 1);
-                if (start != std::string::npos && end != std::string::npos) {
-                    method = request.substr(0, start);
-                    path = request.substr(start + 1, end - start - 1);
+                std::string method, path;
+                size_t s = request.find(' '), e = request.find(' ', s + 1);
+                if (s != std::string::npos && e != std::string::npos) {
+                    method = request.substr(0, s);
+                    path   = request.substr(s + 1, e - s - 1);
                 }
 
-                std::string status;
-                std::string content_type;
-                std::string body;
-
-                if (method == "POST" && path == "/reload" && reload_handler_) {
-                    std::string result = reload_handler_();
-                    if (result.empty() || result == "OK") {
-                        status = "200 OK";
-                        body = "OK";
-                    } else {
-                        status = "500 Internal Server Error";
-                        body = result;
-                    }
-                    content_type = "text/plain";
-                } else if (path == "/metrics" || path == "/") {
+                std::string status, content_type, body;
+                if (path == "/metrics" || path == "/") {
                     status = "200 OK";
                     content_type = "text/plain; version=0.0.4";
-                    body = provider_ ? provider_() : "";
-                } else if (path == "/status" && status_provider_) {
+                    body = build_metrics();
+                } else if (path == "/status") {
                     status = "200 OK";
                     content_type = "application/json";
-                    body = status_provider_();
-                } else if (path == "/health" || path == "/health/live") {
-                    status = "200 OK";
+                    body = build_status();
+                } else if (method == "POST" && path == "/reload" && reload_handler_) {
+                    std::string result = reload_handler_();
+                    status = (result.empty() || result == "OK") ? "200 OK" : "500 Internal Server Error";
                     content_type = "text/plain";
-                    body = "OK";
+                    body = status == "200 OK" ? "OK" : result;
+                } else if (path == "/health" || path == "/health/live") {
+                    status = "200 OK"; content_type = "text/plain"; body = "OK";
                 } else if (path == "/health/ready") {
-                    // 准备就绪检查：provider 返回非空表示正常
-                    body = provider_ ? provider_() : "";
-                    if (!body.empty()) {
-                        status = "200 OK";
-                    } else {
-                        status = "503 Service Unavailable";
-                    }
+                    body = build_metrics();
+                    status = body.empty() ? "503 Service Unavailable" : "200 OK";
                     content_type = "text/plain";
                 } else {
-                    status = "404 Not Found";
-                    content_type = "text/plain";
-                    body = "Not Found";
+                    status = "404 Not Found"; content_type = "text/plain"; body = "Not Found";
                 }
 
-                auto response = std::make_shared<std::string>();
-                response->reserve(256 + body.size());
-                response->append("HTTP/1.1 ").append(status).append("\r\n");
-                response->append("Content-Type: ").append(content_type).append("\r\n");
-                response->append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
-                response->append("Connection: close\r\n");
-                response->append("\r\n");
-                response->append(body);
+                auto resp = std::make_shared<std::string>();
+                resp->reserve(256 + body.size());
+                resp->append("HTTP/1.1 ").append(status).append("\r\n");
+                resp->append("Content-Type: ").append(content_type).append("\r\n");
+                resp->append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
+                resp->append("Connection: close\r\n\r\n");
+                resp->append(body);
 
-                boost::asio::async_write(*socket, boost::asio::buffer(*response),
-                    [socket, response](const boost::system::error_code&, std::size_t) {
+                boost::asio::async_write(*socket, boost::asio::buffer(*resp),
+                    [socket, resp](const boost::system::error_code&, std::size_t) {
                         boost::system::error_code ignored;
                         socket->shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
                     });
@@ -156,12 +218,14 @@ private:
     boost::asio::ip::tcp::acceptor acceptor_;
     uint16_t port_;
     std::string bind_address_;
-    MetricsProvider provider_;
     ReloadHandler reload_handler_;
-    StatusProvider status_provider_;
+    RefreshProvider refresh_provider_;
     std::atomic<bool> running_;
+
+    mutable std::shared_mutex mutex_;
+    std::map<std::string, GaugeEntry>   gauges_;
+    std::map<std::string, CounterEntry> counters_;
 };
 
 } // namespace mail_system
-
-#endif // MAIL_SYSTEM_METRICS_SERVER_H
+#endif

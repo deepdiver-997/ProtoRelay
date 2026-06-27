@@ -159,17 +159,24 @@ public:
     }
 
     std::atomic<size_t> active_connections_{0};
-    void increment_connection_count() { active_connections_.fetch_add(1, std::memory_order_relaxed); }
-    void decrement_connection_count() { active_connections_.fetch_sub(1, std::memory_order_relaxed); }
+    void increment_connection_count();
+    void decrement_connection_count();
 
     std::atomic<size_t> connections_total_{0};
     std::atomic<size_t> connections_rejected_total_{0};
     std::atomic<size_t> mails_accepted_total_{0};
-    void increment_connections_total() { connections_total_.fetch_add(1, std::memory_order_relaxed); }
-    void increment_connections_rejected() { connections_rejected_total_.fetch_add(1, std::memory_order_relaxed); }
-    void increment_mails_accepted() { mails_accepted_total_.fetch_add(1, std::memory_order_relaxed); }
+    void increment_connections_total();
+    void increment_connections_rejected();
+    void increment_mails_accepted();
 
-    std::string build_metrics_response() const {
+    // Metrics push helpers + inject
+    std::weak_ptr<MetricsServer> get_metrics() const { return m_metricsServer; }
+    void refresh_metrics();
+    void push_metric_gauge(const std::string& name, const MetricsServer::LabelMap& labels, double v);
+    void push_metric_counter(const std::string& name, const MetricsServer::LabelMap& labels, uint64_t v);
+
+    // (build_metrics_response / build_status_response replaced by MetricsServer storage + refresh_metrics)
+    [[deprecated]] std::string build_metrics_response() const {
         std::string out;
         out.reserve(2048);
         auto add_gauge = [&](const char* name, const char* labels, const char* help, size_t val) {
@@ -353,7 +360,7 @@ protected:
 
     void start_metrics_server();
     void stop_metrics_server();
-    std::unique_ptr<MetricsServer> metrics_server_;
+    std::shared_ptr<MetricsServer> m_metricsServer;
 
     std::atomic<bool> has_listener_thread;
     std::thread m_listenerThread;
