@@ -356,7 +356,7 @@ set(SMTP_SRCS
 
 # ===== 输出目录配置 =====
 # 可执行文件放到项目根的 test 目录，中间产物放到当前构建目录
-set(TEST_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/test")
+set(TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
 
 file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}")
 
@@ -589,6 +589,31 @@ if(NOT BUILD_OBJECT_ONLY)
     else()
         target_compile_definitions(mailServer PRIVATE ENABLE_INBOUND_DEDUP_CHECK=0)
     endif()
+endif()
+
+# ===== FSM Mock Benchmark (纯业务逻辑吞吐) =====
+if(NOT BUILD_OBJECT_ONLY)
+    set(BENCH_SRCS
+        ${COMMON_SRCS}
+        src/mail_system/back/mailServer/smtps/smtps_server.cpp
+        test/fsm_bench.cpp
+    )
+    add_executable(fsm_bench ${BENCH_SRCS})
+    set_target_properties(fsm_bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(fsm_bench PRIVATE "${CMAKE_BINARY_DIR}/generated")
+    if(spdlog_FOUND)
+        target_include_directories(fsm_bench PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+    endif()
+    target_include_directories(fsm_bench PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
+    target_include_directories(fsm_bench PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    if(MYSQL_INCLUDE_DIRS)
+        target_include_directories(fsm_bench PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+    endif()
+    target_compile_features(fsm_bench PRIVATE cxx_std_17)
+    target_link_libraries(fsm_bench PRIVATE ${LINK_LIBRARIES})
 endif()
 
 # 目标编译选项
