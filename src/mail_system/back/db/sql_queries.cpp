@@ -36,6 +36,19 @@ std::string build_insert_mail(std::uint64_t mail_id,
            std::to_string(static_cast<long long>(send_time)) + "))";
 }
 
+// 简化版：只插 id/subject/body_path/status（FSM DATA_END 路径使用）
+std::string build_insert_mail_with_status(std::uint64_t mail_id,
+                                           const std::string& subject,
+                                           const std::string& body_path,
+                                           int status,
+                                           IDBConnection* conn) {
+    return "INSERT INTO mails (id, subject, body_path, status) VALUES (" +
+           std::to_string(mail_id) + ", '" +
+           (conn ? conn->escape_string(subject) : subject) + "', '" +
+           (conn ? conn->escape_string(body_path) : body_path) + "', " +
+           std::to_string(status) + ")";
+}
+
 std::string build_insert_recipients(const mail& mail_data,
                                      const std::string& local_domain,
                                      IDBConnection* conn) {
@@ -307,7 +320,7 @@ std::string build_dedup_by_message_id(const std::string& sender,
 // ============================================================
 
 std::string build_auth_user_query() {
-    return "SELECT password, status FROM users WHERE mail_address = ?";
+    return "SELECT id, password, status FROM users WHERE mail_address = ?";
 }
 
 std::string build_update_last_login() {
@@ -356,7 +369,8 @@ std::string build_imap_mailbox_unseen_count() {
 }
 
 std::string build_imap_mailbox_uidnext() {
-    return "SELECT MAX(mail_id) AS uidnext FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?";
+    return "SELECT COALESCE(MAX(mm.mail_id), 0) + 1 as uidnext "
+           "FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?";
 }
 
 std::string build_imap_update_mail_flag_deleted() {
@@ -368,7 +382,7 @@ std::string build_imap_update_mail_flag_starred() {
 }
 
 std::string build_imap_append_mail_metadata() {
-    return "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, FROM_UNIXTIME(?))";
+    return "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, ?)";
 }
 
 std::string build_imap_append_mail_recipient() {
@@ -377,7 +391,7 @@ std::string build_imap_append_mail_recipient() {
 
 std::string build_imap_append_mailbox() {
     return "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
-           "is_deleted, is_important) VALUES (?, ?, ?, ?, ?, ?, ?)";
+           "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())";
 }
 
 std::string build_imap_select_status_total() {
@@ -400,6 +414,18 @@ std::string build_imap_expunge_select_ids() {
     return "SELECT mail_id FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1";
 }
 
+std::string build_imap_create_mailbox() {
+    return "INSERT INTO mailboxes (user_id, name, is_system, box_type) VALUES (?, ?, 0, 0)";
+}
+
+std::string build_imap_rename_mailbox() {
+    return "UPDATE mailboxes SET name = ? WHERE id = ?";
+}
+
+std::string build_imap_delete_mailbox_messages() {
+    return "DELETE FROM mail_mailbox WHERE mailbox_id = ?";
+}
+
 std::string build_imap_check_mailbox_is_system() {
     return "SELECT is_system FROM mailboxes WHERE id = ?";
 }
@@ -414,7 +440,7 @@ std::string build_imap_copy_check_exists() {
 
 std::string build_imap_copy_insert_mailbox() {
     return "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
-           "is_deleted, is_important) VALUES (?, ?, ?, ?, ?, ?, ?)";
+           "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())";
 }
 
 // ============================================================
@@ -463,6 +489,36 @@ std::string build_select_last_insert_id() {
 
 std::string build_select_row_count() {
     return "SELECT ROW_COUNT() AS affected";
+}
+
+// 简化版 recipients 插入（FSM DATA_END 路径使用，无 id/status 列）
+std::string build_insert_recipients_simple(const mail& mail_data, IDBConnection* conn) {
+    if (mail_data.to.empty()) return {};
+    std::string sql = "INSERT INTO mail_recipients (mail_id, sender, recipient, source_message_id) VALUES";
+    for (size_t i = 0; i < mail_data.to.size(); ++i) {
+        sql += " (" + std::to_string(mail_data.id) + ", '" +
+               (conn ? conn->escape_string(mail_data.from) : mail_data.from) + "', '" +
+               (conn ? conn->escape_string(mail_data.to[i]) : mail_data.to[i]) + "', '" +
+               (conn ? conn->escape_string(mail_data.source_message_id) : mail_data.source_message_id) + "')";
+        if (i < mail_data.to.size() - 1) sql += ", ";
+    }
+    return sql + ";";
+}
+
+std::string build_delete_mail_by_body_path() {
+    return "DELETE FROM mails WHERE body_path = ?";
+}
+
+std::string build_insert_attachment_single(std::uint64_t mail_id,
+                                            const attachment& att,
+                                            IDBConnection* conn) {
+    return "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type, upload_time) VALUES (" +
+           std::to_string(mail_id) + ", '" +
+           (conn ? conn->escape_string(att.filename) : att.filename) + "', '" +
+           (conn ? conn->escape_string(att.filepath) : att.filepath) + "', " +
+           std::to_string(att.file_size) + ", '" +
+           (conn ? conn->escape_string(att.mime_type) : att.mime_type) + "', " +
+           std::to_string(att.upload_time) + ")";
 }
 
 } // namespace sql

@@ -16,12 +16,19 @@ namespace sql {
 // 邮件持久化 (mails / mail_recipients / mail_mailbox)
 // ============================================================
 
-// 插入邮件元数据
+// 插入邮件元数据 (完整版: 含 send_time)
 std::string build_insert_mail(std::uint64_t mail_id,
                                const std::string& subject,
                                const std::string& body_path,
                                std::time_t send_time,
                                IDBConnection* conn);
+
+// 插入邮件元数据 (简化版: 含 status，用于 FSM DATA_END 路径)
+std::string build_insert_mail_with_status(std::uint64_t mail_id,
+                                           const std::string& subject,
+                                           const std::string& body_path,
+                                           int status,
+                                           IDBConnection* conn);
 
 // 插入收件人关系（批量 VALUES）
 std::string build_insert_recipients(const mail& mail_data,
@@ -46,6 +53,11 @@ std::string build_insert_mailbox_for_recipient(std::uint64_t mail_id,
 std::string build_insert_attachments(std::uint64_t mail_id,
                                       const std::vector<attachment>& attachments,
                                       IDBConnection* conn);
+
+// 插入单个附件元数据（包含 upload_time）
+std::string build_insert_attachment_single(std::uint64_t mail_id,
+                                            const attachment& att,
+                                            IDBConnection* conn);
 
 // ============================================================
 // 出站队列 (mail_outbox)
@@ -160,6 +172,9 @@ std::string build_imap_select_status_total();
 std::string build_imap_select_status_recent();
 std::string build_imap_expunge_delete_mailbox();
 std::string build_imap_expunge_select_ids();
+std::string build_imap_create_mailbox();
+std::string build_imap_rename_mailbox();
+std::string build_imap_delete_mailbox_messages();
 std::string build_imap_check_mailbox_is_system();
 std::string build_imap_delete_mailbox();
 std::string build_imap_copy_check_exists();
@@ -178,9 +193,13 @@ std::string build_shard_lookup(const std::string& table_name,
 // 清理
 // ============================================================
 
+// 简化版 recipients 插入（FSM 路径，无 id/status 列）
+std::string build_insert_recipients_simple(const mail& mail_data, IDBConnection* conn);
+
 std::string build_delete_attachments_by_mail(std::uint64_t mail_id);
 std::string build_delete_recipients_by_mail(std::uint64_t mail_id);
 std::string build_delete_mail_by_id(std::uint64_t mail_id);
+std::string build_delete_mail_by_body_path();
 std::string build_delete_mail_recipients_by_id_list(const std::string& id_list);
 std::string build_delete_mails_by_id_list(const std::string& id_list);
 

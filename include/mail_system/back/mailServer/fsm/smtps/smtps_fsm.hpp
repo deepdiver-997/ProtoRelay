@@ -5,6 +5,7 @@
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
 #include "mail_system/back/db/mysql_service.h"
+#include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
@@ -263,7 +264,7 @@ public:
         auto conn = acquire_connection(shard);
         if (!conn.is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); return false; }
 
-        std::string sql = "SELECT password, status FROM users WHERE mail_address = ?";
+        std::string sql = db::sql::build_auth_user_query();
         auto result = conn->query(sql, {mail_address});
         if (!result || result->get_row_count() == 0) { LOG_AUTH_WARN("User not found: {}", mail_address); return false; }
         int status = std::stoi(result->get_value(0, "status"));
@@ -273,7 +274,7 @@ public:
         bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
                         ? bcrypt_verify(password, stored)
                         : (stored == password);
-        if (ok) conn->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?", {mail_address});
+        if (ok) conn->execute(db::sql::build_update_last_login(), {mail_address});
         return ok;
     }
 
@@ -334,13 +335,11 @@ public:
 
             bool success = true;
 
-            // 第一步：插入邮件元数据到 mails 表（新 schema：id, subject, body_path, status）
+            // 第一步：插入邮件元数据到 mails 表
             std::string body_path = file_path_prefix;
-            std::string mail_sql = "INSERT INTO mails (id, subject, body_path, status) VALUES (" +
-                std::to_string(mail_data.id) + ", '" +
-                mysql_connection->escape_string(mail_data.subject) + "', '" +
-                mysql_connection->escape_string(body_path) + "', " +
-                std::to_string(mail_data.status) + ")";
+            std::string mail_sql = db::sql::build_insert_mail_with_status(
+                mail_data.id, mail_data.subject, body_path,
+                mail_data.status, mysql_connection);
             LOG_DATABASE_DEBUG("Executing SQL: {}", mail_sql);
             if (!mysql_connection->execute(mail_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", mysql_connection->get_last_error());
@@ -348,41 +347,24 @@ public:
             }
 
             // 第二步：插入邮件收发件人关系到 mail_recipients 表
-            // 一份邮件可能有多个收件人，所以为每个收件人插入一条关系记录
-            std::string recipient_sql = "INSERT INTO mail_recipients (mail_id, sender, recipient, source_message_id) VALUES ";
-            for (size_t i = 0; i < mail_data.to.size(); ++i) {
-                recipient_sql += "(" + std::to_string(mail_data.id) + ", '";
-                recipient_sql += mysql_connection->escape_string(mail_data.from) + "', '";
-                recipient_sql += mysql_connection->escape_string(mail_data.to[i]) + "', '";
-                recipient_sql += mysql_connection->escape_string(mail_data.source_message_id) + "')";
-                
-                if (i < mail_data.to.size() - 1) {
-                    recipient_sql += ", ";
-                }
-            }
-            recipient_sql += ";";
+            std::string recipient_sql = db::sql::build_insert_recipients_simple(
+                mail_data, mysql_connection);
             LOG_DATABASE_DEBUG("Executing SQL: {}", recipient_sql);
-            if (!mysql_connection->execute(recipient_sql)) {
+            if (!recipient_sql.empty() && !mysql_connection->execute(recipient_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", mysql_connection->get_last_error());
                 // 如果插入收件人失败，删除已插入的邮件元数据
-                std::string delete_sql = "DELETE FROM mails WHERE id = " + std::to_string(mail_data.id);
-                mysql_connection->execute(delete_sql);
+                mysql_connection->execute(db::sql::build_delete_mail_by_id(mail_data.id));
                 return false;
             }
 
             // 第三步：插入附件元数据
-            for (const auto& att : mail_data.attachments) {
-                std::string att_sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type) VALUES (" +
-                    std::to_string(mail_data.id) + ", '" +
-                    mysql_connection->escape_string(att.filename) + "', '" +
-                    mysql_connection->escape_string(att.filepath) + "', " +
-                    std::to_string(att.file_size) + ", '" +
-                    mysql_connection->escape_string(att.mime_type) + "')";
+            if (!mail_data.attachments.empty()) {
+                std::string att_sql = db::sql::build_insert_attachments(
+                    mail_data.id, mail_data.attachments, mysql_connection);
                 LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
                 if (!mysql_connection->execute(att_sql)) {
                     LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
                     success = false;
-                    break;
                 }
             }
 
@@ -414,13 +396,8 @@ public:
                 return false;
             }
 
-            std::string att_sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type, upload_time) VALUES (" +
-                std::to_string(mail_id) + ", '" +
-                mysql_connection->escape_string(att.filename) + "', '" +
-                mysql_connection->escape_string(att.filepath) + "', " +
-                std::to_string(att.file_size) + ", '" +
-                mysql_connection->escape_string(att.mime_type) + "', " +
-                std::to_string(att.upload_time) + ")";
+            std::string att_sql = db::sql::build_insert_attachment_single(
+                mail_id, att, mysql_connection);
             LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
             if (!mysql_connection->execute(att_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());

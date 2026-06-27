@@ -1518,7 +1518,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
     }
 
     if (conn->execute(
-            "INSERT INTO mailboxes (user_id, name, is_system, box_type) VALUES (?, ?, 0, 0)",
+            db::sql::build_imap_create_mailbox(),
             {std::to_string(ctx->user_id), mailbox_name})) {
         send_tagged(std::move(session), tag, "OK", "CREATE completed");
     } else {
@@ -1562,7 +1562,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
 
     // Check if it's a system mailbox
     auto result = conn->query(
-        "SELECT is_system FROM mailboxes WHERE id = ?",
+        db::sql::build_imap_check_mailbox_is_system(),
         {std::to_string(mailbox_id)});
     if (result && result->get_row_count() > 0) {
         if (result->get_value(0, "is_system") == "1") {
@@ -1571,9 +1571,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         }
     }
 
-    if (conn->execute("DELETE FROM mail_mailbox WHERE mailbox_id = ?",
+    if (conn->execute(db::sql::build_imap_delete_mailbox_messages(),
                             {std::to_string(mailbox_id)}) &&
-        conn->execute("DELETE FROM mailboxes WHERE id = ?",
+        conn->execute(db::sql::build_imap_delete_mailbox(),
                             {std::to_string(mailbox_id)})) {
         send_tagged(std::move(session), tag, "OK", "DELETE completed");
     } else {
@@ -1633,7 +1633,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
         return;
     }
 
-    if (conn->execute("UPDATE mailboxes SET name = ? WHERE id = ?",
+    if (conn->execute(db::sql::build_imap_rename_mailbox(),
                             {new_name, std::to_string(mailbox_id)})) {
         send_tagged(std::move(session), tag, "OK", "RENAME completed");
     } else {
@@ -1947,14 +1947,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     for (uint64_t mid : mail_ids) {
         // 检查是否已在目标邮箱
         auto existing = db_conn->query(
-            "SELECT id FROM mail_mailbox WHERE mail_id = ? AND mailbox_id = ? AND user_id = ?",
+            db::sql::build_imap_copy_check_exists(),
             {std::to_string(mid), std::to_string(target_id), std::to_string(ctx->user_id)});
         if (existing && existing->get_row_count() > 0) continue; // 已存在
 
         int64_t mmid = algorithm::get_snowflake_generator().next_id();
         if (db_conn->execute(
-                "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
-                "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())",
+                db::sql::build_imap_copy_insert_mailbox(),
                 {std::to_string(mmid), std::to_string(mid), std::to_string(target_id),
                  std::to_string(ctx->user_id)})) {
             copied++;

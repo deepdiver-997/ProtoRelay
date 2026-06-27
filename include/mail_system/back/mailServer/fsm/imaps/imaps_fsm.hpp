@@ -5,6 +5,7 @@
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
 #include "mail_system/back/db/mysql_service.h"
+#include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
@@ -264,7 +265,7 @@ public:
             return false;
         }
 
-        std::string sql = "SELECT id, password, status FROM users WHERE mail_address = ?";
+        std::string sql = db::sql::build_auth_user_query();
         auto result = conn->query(sql, {mail_address});
         if (!result || result->get_row_count() == 0) {
             LOG_AUTH_WARN("User not found: {}", mail_address);
@@ -291,8 +292,7 @@ public:
 
         if (ok) {
             out_user_id = std::stoull(result->get_value(0, "id"));
-            conn->execute("UPDATE users SET last_login_time = NOW() WHERE mail_address = ?",
-                               {mail_address});
+            conn->execute(db::sql::build_update_last_login(), {mail_address});
         }
         return ok;
     }
@@ -307,7 +307,7 @@ public:
         }
 
         auto result = conn->query(
-            "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? ORDER BY id",
+            db::sql::build_imap_list_mailboxes(),
             {std::to_string(user_id)});
         if (!result) {
             return false;
@@ -338,7 +338,7 @@ public:
 
         // Try direct name match first (handles Chinese names like "收件箱")
         auto result = conn->query(
-            "SELECT id, name, box_type FROM mailboxes WHERE user_id = ? AND name = ?",
+            db::sql::build_imap_get_mailbox_by_name(),
             {std::to_string(user_id), name_utf8});
         if (result && result->get_row_count() > 0) {
             return std::stoull(result->get_value(0, "id"));
@@ -349,7 +349,7 @@ public:
         std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
         if (upper == "INBOX") {
             result = conn->query(
-                "SELECT id FROM mailboxes WHERE user_id = ? AND box_type = 1",
+                db::sql::build_imap_get_inbox_id(),
                 {std::to_string(user_id)});
             if (result && result->get_row_count() > 0) {
                 return std::stoull(result->get_value(0, "id"));
@@ -380,17 +380,7 @@ public:
             return false;
         }
 
-        std::string sql =
-            "SELECT m.id, mr.sender, mr.recipient, m.subject, m.body_path, "
-            "mm.is_starred, mm.is_deleted, mm.is_important, "
-            "mr.status, UNIX_TIMESTAMP(m.send_time) AS send_time "
-            "FROM mail_mailbox mm "
-            "JOIN mails m ON mm.mail_id = m.id "
-            "JOIN mail_recipients mr ON mr.mail_id = m.id AND mr.recipient = ("
-            "  SELECT mail_address FROM users WHERE id = ?"
-            ") "
-            "WHERE mm.mailbox_id = ? AND mm.user_id = ? "
-            "ORDER BY m.send_time DESC";
+        std::string sql = db::sql::build_imap_get_mailbox_mails();
 
         auto result = conn->query(sql, {
             std::to_string(user_id),
@@ -509,7 +499,7 @@ public:
             return false;
         }
         return conn->execute(
-            "UPDATE mail_mailbox SET is_deleted = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
+            db::sql::build_imap_update_mail_flag_deleted(),
             {deleted ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
     }
 
@@ -520,7 +510,7 @@ public:
             return false;
         }
         return conn->execute(
-            "UPDATE mail_mailbox SET is_starred = ? WHERE mail_id = ? AND user_id = ? AND mailbox_id = ?",
+            db::sql::build_imap_update_mail_flag_starred(),
             {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
     }
 
@@ -735,7 +725,7 @@ public:
             return 0;
         }
         auto result = conn->query(
-            "SELECT COUNT(*) as cnt FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?",
+            db::sql::build_imap_select_status_total(),
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
             return static_cast<size_t>(std::stoull(result->get_value(0, "cnt")));
@@ -751,10 +741,7 @@ public:
         }
         // 通过 mail_recipients.status=1 (unread) 统计
         auto result = conn->query(
-            "SELECT COUNT(*) as cnt FROM mail_mailbox mm "
-            "JOIN mail_recipients mr ON mm.mail_id = mr.mail_id "
-            "JOIN users u ON u.id = ? AND mr.recipient = u.mail_address "
-            "WHERE mm.mailbox_id = ? AND mm.user_id = ? AND mr.status = 1",
+            db::sql::build_imap_mailbox_unseen_count(),
             {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
             return static_cast<size_t>(std::stoull(result->get_value(0, "cnt")));
@@ -769,8 +756,7 @@ public:
             return 1;
         }
         auto result = conn->query(
-            "SELECT COALESCE(MAX(mm.mail_id), 0) + 1 as uidnext "
-            "FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?",
+            db::sql::build_imap_mailbox_uidnext(),
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
             return std::stoull(result->get_value(0, "uidnext"));
@@ -786,7 +772,7 @@ public:
         }
         // 删除 mail_mailbox 中 is_deleted=1 且在此邮箱的记录
         conn->execute(
-            "DELETE FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1",
+            db::sql::build_imap_expunge_delete_mailbox(),
             {std::to_string(mailbox_id), std::to_string(user_id)});
     }
 
@@ -798,7 +784,7 @@ public:
             return ids;
         }
         auto result = conn->query(
-            "SELECT mail_id FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ? AND is_deleted = 1",
+            db::sql::build_imap_expunge_select_ids(),
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result) {
             for (size_t i = 0; i < result->get_row_count(); ++i) {
