@@ -94,12 +94,12 @@ public:
         try {
             if (connection_ && connection_->is_open()) {
                 connection_->close();
-                std::cout << "Session closed for " << get_client_ip() << std::endl;
+                LOG_SESSION_INFO("Session closed for {}", get_client_ip());
             } else {
-                std::cout << "Session already closed or connection not open." << std::endl;
+                LOG_SESSION_DEBUG("Session already closed or connection not open.");
             }
         } catch (const std::exception& e) {
-            std::cerr << "Error closing session: " << e.what() << std::endl;
+            LOG_SESSION_ERROR("Error closing session: {}", e.what());
         }
     }
 
@@ -109,7 +109,7 @@ public:
             try {
                 client_address_ = connection_->get_remote_ip();
             } catch (const std::exception& e) {
-                std::cerr << "Error getting client IP: " << e.what() << std::endl;
+                LOG_SESSION_ERROR("Error getting client IP: {}", e.what());
             }
         }
         return client_address_;
@@ -288,7 +288,7 @@ public:
 
                 // 0 字节：忽略并继续等待
                 if (bytes_transferred == 0) {
-                    std::cout << "No data read, continue waiting..." << std::endl;
+                    LOG_SESSION_DEBUG("No data read, continue waiting...");
                     do_async_read(std::move(self), std::move(cb));
                     return;
                 }
@@ -343,7 +343,7 @@ public:
                 }
 
                 if (error) {
-                    std::cerr << "Error writing data: " << error.message() << std::endl;
+                    LOG_SESSION_ERROR("Error writing data: {}", error.message());
                     self->handle_error(error);
                 } else {
                     if (cb) {

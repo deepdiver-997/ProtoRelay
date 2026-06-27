@@ -2,9 +2,9 @@
 #define MAIL_SYSTEM_DB_POOL_H
 
 #include "mail_system/back/db/db_service.h"
+#include "mail_system/back/common/logger.h"
 #include <nlohmann/json.hpp> // JSON库
 #include <fstream>
-#include <iostream>
 #include <string>
 #include <memory>
 #include <vector>
@@ -129,30 +129,17 @@ struct DBPoolConfig {
           idle_timeout(60),
           distributed_node_retry_interval(5) {}
     void show() const {
-        std::cout << "DBPoolConfig: "
-                  << "\n\tachieve = " << achieve
-                  << "\n\thost = " << host
-                  << "\n\tuser = " << user
-                  << "\n\tpassword = " << password
-                  << "\n\tdatabase = " << database
-                  << "\n\tport = " << port
-                  << "\n\tinitial_pool_size = " << initial_pool_size
-                  << "\n\tmax_pool_size = " << max_pool_size
-                  << "\n\tconnection_timeout = " << connection_timeout
-                  << "\n\tidle_timeout = " << idle_timeout
-                  << "\n\tdistributed_node_retry_interval = " << distributed_node_retry_interval
-                  << "\n\tnodes = " << nodes.size()
-                  << std::endl;
-
+        LOG_DATABASE_INFO("DBPoolConfig: achieve={} host={} user={} db={} port={}"
+                          " initial_pool={} max_pool={} conn_timeout={} idle_timeout={}"
+                          " distributed_retry={} node_count={}",
+                          achieve, host, user, database, port,
+                          initial_pool_size, max_pool_size, connection_timeout,
+                          idle_timeout, distributed_node_retry_interval, nodes.size());
         for (size_t i = 0; i < nodes.size(); ++i) {
             const auto& node = nodes[i];
-            std::cout << "\t[" << i << "] name=" << node.name
-                      << ", host=" << node.host
-                      << ", port=" << node.port
-                      << ", database=" << node.database
-                      << ", weight=" << node.weight
-                      << ", enabled=" << (node.enabled ? "true" : "false")
-                      << std::endl;
+            LOG_DATABASE_INFO("  node[{}] name={} host={} port={} db={} weight={} enabled={}",
+                              i, node.name, node.host, node.port,
+                              node.database, node.weight, node.enabled);
         }
     }
 
@@ -168,14 +155,14 @@ struct DBPoolConfig {
     bool loadFromJson(const std::string& filename) {
         std::ifstream config_file(filename.c_str());
         if (!config_file.is_open()) {
-            std::cerr << "Failed to open config file: " << filename << std::endl;
+            LOG_DATABASE_ERROR("Failed to open config file: {}", filename);
             return false;
         }
         nlohmann::json json;
         config_file >> json;
         config_file.close();
         if (json.is_discarded()) {
-            std::cerr << "Failed to parse config file: " << filename << std::endl;
+            LOG_DATABASE_ERROR("Failed to parse config file: {}", filename);
             return false;
         }
         achieve = json.value("achieve", achieve);

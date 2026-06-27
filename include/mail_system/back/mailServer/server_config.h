@@ -2,7 +2,6 @@
 #define MAIL_SYSTEM_SERVER_CONFIG_H
 
 #include <thread>
-#include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <string>
@@ -10,6 +9,7 @@
 #include <vector>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
+#include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
 
 namespace mail_system {
@@ -78,11 +78,10 @@ struct ListenerConfig {
     std::string dmarc_mode = "off";
 
     void show() const {
-        std::cout << "  [" << listener_type_to_string(type)
-                  << ":" << port << "] auth=" << inbound_auth_policy_to_string(auth_policy)
-                  << " spf=" << spf_mode
-                  << " dkim=" << dkim_mode
-                  << " dmarc=" << dmarc_mode << std::endl;
+        LOG_SERVER_INFO("  [{}:{}] auth={} spf={} dkim={} dmarc={}",
+                        listener_type_to_string(type), port,
+                        inbound_auth_policy_to_string(auth_policy),
+                        spf_mode, dkim_mode, dmarc_mode);
     }
 };
 
@@ -309,58 +308,49 @@ struct ServerConfig {
     ServerConfig(const ServerConfig&) = default;
 
     void show() const {
-        std::cout << "\naddress = " << address
-                  << "\nio_thread_count = " << io_thread_count
-                  << "\nworker_thread_count = " << worker_thread_count
-                  << "\nmaxConnections = " << maxConnections
-                  << "\nuse_database = " << (use_database ? "true" : "false")
-                  << "\nsystem_domain = " << system_domain;
-
-        std::cout << "\n\nlisteners:";
+        LOG_SERVER_INFO("address={} io_threads={} worker_threads={} maxConn={} use_db={} domain={}",
+                        address, io_thread_count, worker_thread_count, maxConnections,
+                        use_database, system_domain);
         for (auto& l : listeners) l.show();
-
-        std::cout << "\nrouter: type=" << router_type
-                  << " shards=" << router_config.shard_count
-                  << "\nSSL certs: cert=" << (certFile.empty() ? "(none)" : certFile)
-                  << " key=" << (keyFile.empty() ? "(none)" : keyFile)
-                  << "\ninbound_auth_policy = " << inbound_auth_policy_to_string(inbound_auth_policy)
-                  << "\ninbound_spf_mode = " << inbound_spf_mode
-                  << "\ninbound_dkim_mode = " << inbound_dkim_mode
-                  << "\ninbound_dmarc_mode = " << inbound_dmarc_mode
-                  << "\nintrusion_detection_enabled = " << (intrusion_detection_enabled ? "true" : "false")
-                  << "\nmetrics_enabled = " << (metrics_enabled ? "true" : "false")
-                  << "\noutbound_helo_domain = " << outbound_helo_domain
-                  << "\noutbound_dkim_enabled = " << (outbound_dkim_enabled ? "true" : "false")
-                  << std::endl;
+        LOG_SERVER_INFO("router: type={} shards={} cert={} key={}",
+                        router_type, router_config.shard_count,
+                        certFile.empty() ? "(none)" : certFile,
+                        keyFile.empty() ? "(none)" : keyFile);
+        LOG_SERVER_INFO("inbound: auth={} spf={} dkim={} dmarc={} intrusion={} metrics={}",
+                        inbound_auth_policy_to_string(inbound_auth_policy),
+                        inbound_spf_mode, inbound_dkim_mode, inbound_dmarc_mode,
+                        intrusion_detection_enabled, metrics_enabled);
+        LOG_SERVER_INFO("outbound: helo_domain={} dkim={}",
+                        outbound_helo_domain, outbound_dkim_enabled);
     }
 
     bool validate() const {
         if (listeners.empty()) {
-            std::cerr << "Error: at least one listener required" << std::endl;
+            LOG_SERVER_ERROR("Error: at least one listener required");
             return false;
         }
         bool has_ssl = false;
         for (auto& l : listeners) {
-            if (l.port == 0) { std::cerr << "Error: listener port 0" << std::endl; return false; }
+            if (l.port == 0) { LOG_SERVER_ERROR("Error: listener port 0"); return false; }
             if (l.type == ListenerType::SSL) has_ssl = true;
         }
 #ifdef USE_SSL
         if (has_ssl && (certFile.empty() || keyFile.empty())) {
-            std::cerr << "Error: SSL listener requires certFile/keyFile" << std::endl;
+            LOG_SERVER_ERROR("Error: SSL listener requires certFile/keyFile");
             return false;
         }
 #endif
         if (io_thread_count == 0 || worker_thread_count == 0) {
-            std::cerr << "Error: thread pool size 0" << std::endl; return false;
+            LOG_SERVER_ERROR("Error: thread pool size 0"); return false;
         }
         if (connection_timeout == 0 || read_timeout == 0 || write_timeout == 0) {
-            std::cerr << "Error: timeout 0" << std::endl; return false;
+            LOG_SERVER_ERROR("Error: timeout 0"); return false;
         }
         if (inbound_persist_wait_timeout_ms == 0) {
-            std::cerr << "Error: inbound_persist_wait_timeout_ms 0" << std::endl; return false;
+            LOG_SERVER_ERROR("Error: inbound_persist_wait_timeout_ms 0"); return false;
         }
         if (storage_provider == "distributed" && distributed_storage_roots.empty()) {
-            std::cerr << "Error: distributed needs roots" << std::endl; return false;
+            LOG_SERVER_ERROR("Error: distributed needs roots"); return false;
         }
         return true;
     }
@@ -374,7 +364,7 @@ struct ServerConfig {
     bool loadFromFile(const std::string& filename) {
         std::ifstream config_file(filename);
         if (!config_file.is_open()) {
-            std::cerr << "Failed to open config: " << filename << std::endl;
+            LOG_SERVER_ERROR("Failed to open config: {}", filename);
             return false;
         }
         nlohmann::json j;
@@ -499,7 +489,22 @@ struct ServerConfig {
         hdfs_timeout_ms = j.value("hdfs_timeout_ms", hdfs_timeout_ms);
         hdfs_replication= j.value("hdfs_replication", hdfs_replication);
 
+        // 性能测试模式：加载完成后，自动覆写瓶颈参数，实现"一键无限制"
+        if (perf_mode) {
+            apply_perf_mode();
+        }
+
         return true;
+    }
+
+    // 性能测试模式：自动放宽所有限制，避免配置瓶颈影响网络层极限测试
+    void apply_perf_mode() {
+        maxConnections               = 100000;
+        persist_max_inflight_mails   = 1000000;
+        persist_min_available_memory_mb = 0;
+        persist_min_db_available_connections = 0;
+        dnsbl_enabled                = false;
+        intrusion_detection_enabled  = false;
     }
 
     bool saveToFile(const std::string&) const { return true; }

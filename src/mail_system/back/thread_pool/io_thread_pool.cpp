@@ -1,4 +1,5 @@
 #include "mail_system/back/thread_pool/io_thread_pool.h"
+#include "mail_system/back/common/logger.h"
 
 namespace mail_system {
 
@@ -16,7 +17,7 @@ void IOThreadPool::start() {
     if (m_running) return;
 
     m_running = true;
-    std::cout << "Starting IOThreadPool..." << std::endl;
+    LOG_THREAD_POOL_INFO("Starting IOThreadPool...");
 
     m_work_guards.reserve(m_thread_count);
     for (size_t i = 0; i < m_thread_count; ++i)
@@ -29,9 +30,9 @@ void IOThreadPool::start() {
             try {
                 m_io_contexts[i]->run();
             } catch (const std::exception& e) {
-                std::cerr << "Exception in IO thread: " << e.what() << std::endl;
+                LOG_THREAD_POOL_ERROR("Exception in IO thread: {}", e.what());
             } catch (...) {
-                std::cerr << "Unknown exception in IO thread" << std::endl;
+                LOG_THREAD_POOL_ERROR("Unknown exception in IO thread");
             }
         });
     }
@@ -43,7 +44,7 @@ void IOThreadPool::stop(bool wait_for_tasks) {
         if (!m_running) return;
         m_running = false;  // 阻止 get_io_context() 继续分发任务
     }
-    std::cout << "Stopping IOThreadPool..." << std::endl;
+    LOG_THREAD_POOL_INFO("Stopping IOThreadPool...");
 
     // 释放 work guard → 各工作线程的 run() 在待处理任务完成后返回
     for (auto& wg : m_work_guards) wg.reset();

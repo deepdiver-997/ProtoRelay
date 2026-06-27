@@ -1,5 +1,5 @@
 #include "mail_system/back/thread_pool/boost_thread_pool.h"
-#include <iostream>
+#include "mail_system/back/common/logger.h"
 
 namespace mail_system {
 
@@ -15,7 +15,7 @@ void BoostThreadPool::start() {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running) {
         m_running = true;
-        std::cout << "Starting BoostThreadPool..." << std::endl;
+        LOG_THREAD_POOL_INFO("Starting BoostThreadPool...");
         m_pool = std::make_unique<boost::asio::thread_pool>(m_thread_count);
     }
 }
@@ -34,7 +34,7 @@ void BoostThreadPool::stop(bool wait_for_tasks) {
             pool->join();
         }
         pool->stop();
-        std::cout << "Stopped BoostThreadPool" << std::endl;
+        LOG_THREAD_POOL_INFO("Stopped BoostThreadPool");
         pool->join();
     }
 }
