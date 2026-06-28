@@ -162,24 +162,26 @@ make -j$(nproc)
 
 ## 测试运行
 
-### Debug 模式测试
+### 冒烟测试（Python cl.py，支持 TLS/AUTH）
 ```bash
-# 启动服务器（调试输出详细）
-./test/smtpsServer
+# 启动服务器
+./build/smtpsServer -c config/smtpsConfig.json
 
-# 另一个终端运行测试
+# 另一个终端：Python 冒烟测试
 cd test
-uv run cl.py --messages 10 --concurrency 2 --verbose
+uv run cl.py --mode mta-relay --messages 10 --concurrency 2 --verbose
 ```
 
-### Release 模式测试
+### 性能压测（C++ smtp_client，推荐）
 ```bash
-# 启动服务器（仅关键日志）
-./test/smtpsServer
+# 启动服务器
+./build/smtpsServer -c config/smtpsConfig.json
 
-# 运行性能测试
-cd test
-uv run cl.py --messages 100 --concurrency 10
+# 全矩阵压测（详见 test/bench-report.md）
+./build/smtp_client --pipe --reuse --t 32 --msgs 50000   # 最大吞吐
+./build/smtp_client --seq --reuse --t 16 --msgs 5000     # MTA 中继模拟
+./build/smtp_client --pipe --t 4 --msgs 5000             # pipeline per-conn
+./build/smtp_client --seq --t 8 --msgs 5000              # sequential per-conn
 ```
 
 ## 检查构建配置

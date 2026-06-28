@@ -188,8 +188,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "=== Interpretation ===\n"
               << "Mock rate = pure FSM (no TCP/TLS/asio overhead).\n"
-              << "Real per-conn plain: ~4927 msg/s → overhead = mock/4927 ×\n"
-              << "Real pipeline TLS:    ~349 msg/s → TLS cost visible\n";
+              << "Real pipe+reuse plain: ~12502 msg/s → overhead = mock/12502 ×\n"
+              << "Real TLS+AUTH:          ~349 msg/s → TLS cost visible\n"
+              << "Full matrix in test/bench-report.md\n";
 
     persist_q->shutdown();
     worker_pool->stop();

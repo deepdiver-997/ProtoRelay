@@ -70,14 +70,16 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 
 - `after_enqueue` 更适合追求吞吐和低尾延迟的场景，但 `250 OK` 不再等价于“已经可靠持久化”
 - `after_persist` 更保守，适合优先保证持久化语义的场景，但吞吐会受到持久化完成时延影响
-- **本地压测（连接复用模式，默认）**：`uv run test/cl.py --messages 10000 --concurrency 100`
-  - port 25 无认证 + perf_mode：约 3500 msg/s，p50≈21ms，p99≈80ms
-  - port 587 STARTTLS + AUTH：约 480 msg/s，p50≈200ms（TLS 握手 + AUTH 开销显著）
-- **`--per-conn` 模式**（每封邮件独立 TCP 连接，更真实）：
-  - port 25 无认证 + perf_mode：约 480 msg/s，p99≈380ms
-  - 每次 TCP 握手约消耗 2-5ms，10000 封 = 10000 次握手，与连接复用模式差距约 7 倍
+- **全矩阵压测（C++ `smtp_client`）**：详见 `test/bench-report.md`
+  - pipe+reuse（最大吞吐）：**12502 msg/s** @ 32 线程，50000 封，零失败
+  - seq+reuse（传统 MTA 中继）：**11147 msg/s** @ 16 线程
+  - pipe+per-conn：**5657 msg/s** @ 4 线程
+  - seq+per-conn：**6359 msg/s** @ 8 线程
+  - port 587 TLS+AUTH：约 349 msg/s（TLS 握手主导，详见 bench-report）
+  - localhost per-conn 受临时端口池限制（~16384 个），详见 bench-report
 - 以上数据为 M3 Pro (12 核) macOS 单机测试结果，不等同于生产 SLA
-- 压测前建议开启 `perf_mode: true` 跳过 SPF/DKIM/DMARC/DNSBL，日志设为 `warn` 级别
+- 压测前建议开启 `perf_mode: true`，日志设为 `warn` 级别
+- C++ `smtp_client` 是主要压测工具；Python `cl.py` 保留用于 TLS/AUTH 冒烟测试
 
 ### 性能调优要点
 

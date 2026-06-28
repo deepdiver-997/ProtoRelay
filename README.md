@@ -70,14 +70,16 @@ Operational note:
 
 - `after_enqueue` improves throughput and tail latency, but `250 OK` no longer guarantees durable persistence.
 - `after_persist` is safer for durability, but throughput is bounded by persistence completion latency.
-- **Local benchmark (connection reuse, default)**: `uv run test/cl.py --messages 10000 --concurrency 100`
-  - port 25 no-auth + perf_mode: ~3500 msg/s, p50≈21ms, p99≈80ms
-  - port 587 STARTTLS + AUTH: ~480 msg/s, p50≈200ms (TLS handshake overhead dominates)
-- **`--per-conn` mode** (new TCP connection per message):
-  - port 25 no-auth + perf_mode: ~480 msg/s, p99≈380ms
-  - Each TCP handshake costs 2-5ms; 7× gap vs connection reuse
+- **Full benchmark matrix (C++ `smtp_client`)**: see `test/bench-report.md` for latest results
+  - pipe+reuse (max throughput): **12502 msg/s** @ 32 threads, 50000 msgs, 0 failures
+  - seq+reuse (traditional MTA): **11147 msg/s** @ 16 threads
+  - pipe+per-conn: **5657 msg/s** @ 4 threads
+  - seq+per-conn: **6359 msg/s** @ 8 threads
+  - port 587 TLS+AUTH: ~349 msg/s (TLS handshake dominates, see bench-report)
+  - localhost per-conn limited by ephemeral port pool (~16384); see bench-report for details
 - M3 Pro (12-core) macOS single-machine figures, not a production SLA
 - Use `perf_mode: true` and `log_level: warn` for benchmark runs
+- C++ `smtp_client` is the primary bench tool; Python `cl.py` retained for TLS/AUTH smoke tests
 
 ### Performance Tuning Notes
 

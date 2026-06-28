@@ -289,13 +289,12 @@ Failure policy:
 - Invalid critical config causes immediate startup failure.
 - Feature mismatch (for example, `hdfs_web` with build-time OFF) fails early and explicitly.
 
-Local benchmark note:
+Local benchmark note (2026-06-28, see `test/bench-report.md` for full details):
 
-- On this MacBook Pro, `after_enqueue` small-mail tests with `uv run ./test/cl.py` reached roughly 1.9k-3.0k msg/s depending on batch size and concurrency.
-- Sample runs:
-  - 100 messages: 1906.4 msg/s
-  - 1000 messages: 2976.9 msg/s
-  - 10000 messages with `--concurrency 100`: 2147.5 msg/s
+- C++ `smtp_client` pipe+reuse reaches **12502 msg/s** (50000 msgs, 32 threads, 0 failures) on M3 Pro macOS
+- Sequential reuse (traditional MTA relay): **11147 msg/s** @ 16 threads
+- Per-conn modes are bottlenecked by localhost ephemeral port pool (~16384 ports, TIME_WAIT=30s on macOS)
+- Python `cl.py` numbers (~1.9k-3.0k msg/s) are outdated — Python smtplib/GIL overhead masked true server capacity
 - These numbers describe single-machine throughput under the current test workload, not an end-to-end production SLA or a universal concurrency guarantee.
 
 ## 7. Build-Time Feature Model

@@ -20,7 +20,7 @@ rm -rf /tmp/fsm_bench_mail /tmp/fsm_bench_att 2>/dev/null
 # 3. 数据库（需要 mysql 可用）
 if [ "${1:-}" = "--all" ] && command -v mysql &>/dev/null; then
     echo -n "Database... "
-    for db in mail_system mail_system_dev mail_system_test; do
+    for db in mail_system mail_system_dev mail_system_test mail; do
         mysql -u root -e "
           DELETE FROM mail_recipients; DELETE FROM mails;
           DELETE FROM attachments; DELETE FROM mail_mailbox;

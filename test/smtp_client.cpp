@@ -1,7 +1,9 @@
 // High-performance SMTP client for benchmarking — raw sockets, no asio.
-// Usage: smtp_client [--mode mta|sub|smtps] [--pipe] [--reuse] [--threads N] [--msgs M]
-//   ./smtp_client                        # mta, pipe, per-conn, 4 threads, 50000 msgs
+// Usage: smtp_client [--seq] [--pipe] [--reuse] [--t N] [--msgs M]
+//   ./smtp_client                        # pipeline, per-conn, 4 threads, 50000 msgs
+//   ./smtp_client --seq --reuse --t 4    # sequential, reuse, 4 threads
 //   ./smtp_client --pipe --reuse --t 8   # max throughput: pipeline + reuse, 8 threads
+//   ./smtp_client --seq                  # sequential, per-conn
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +26,9 @@
 static int tcp_connect(const char* host, int port, int timeout_sec) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+    // SO_REUSEADDR: reuse local port in TIME_WAIT to avoid ephemeral port
+    // exhaustion under high-rate connect/disconnect workloads.
+    int one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
@@ -43,7 +48,7 @@ static int tcp_connect(const char* host, int port, int timeout_sec) {
     if (err) { close(fd); return -1; }
     fcntl(fd, F_SETFL, flags);
     // TCP_NODELAY for localhost performance
-    int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     return fd;
 }
 
@@ -92,7 +97,82 @@ static std::string build_pipeline_msg(int idx, bool need_ehlo, bool do_quit) {
     return m;
 }
 
+static std::string build_mail_body(int idx) {
+    auto& s = g_senders[idx % 10];
+    auto& r = g_recipients[idx % 10];
+    return "From: " + s + "\r\nTo: " + r + "\r\nSubject: b\r\n\r\nhi\r\n.\r\n";
+}
+
 // ── workers ───────────────────────────────────────────────────────────────
+// Sequential (no pipelining): one command + one response per round-trip
+static void worker_seq_perconn(int idx, const BenchConfig& cfg,
+                                std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
+    int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
+    for (int i = 0; i < n; ++i) {
+        int fd = tcp_connect(cfg.host, cfg.port, cfg.timeout);
+        if (fd < 0) { fail.fetch_add(1); continue; }
+        FILE* f = fdopen(fd, "r");
+        if (!f) { close(fd); fail.fetch_add(1); continue; }
+        try {
+            read_line(f);                                 // banner
+            write_all(fd, "EHLO t\r\n", 8);
+            skip_multiline(f);                            // EHLO
+            auto& s = g_senders[idx % 10];
+            auto& r = g_recipients[idx % 10];
+            auto cmd = "MAIL FROM:<" + s + ">\r\n";
+            write_all(fd, cmd.data(), cmd.size());
+            read_line(f);                                 // 250
+            cmd = "RCPT TO:<" + r + ">\r\n";
+            write_all(fd, cmd.data(), cmd.size());
+            read_line(f);                                 // 250
+            write_all(fd, "DATA\r\n", 6);
+            read_line(f);                                 // 354
+            auto body = build_mail_body(i);
+            write_all(fd, body.data(), body.size());
+            read_line(f);                                 // 250
+            write_all(fd, "QUIT\r\n", 6);
+            read_line(f);                                 // 221
+            ok.fetch_add(1);
+        } catch (...) { fail.fetch_add(1); }
+        fclose(f); close(fd);
+    }
+}
+
+static void worker_seq_reuse(int idx, const BenchConfig& cfg,
+                              std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
+    int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
+    if (n == 0) return;
+    int fd = tcp_connect(cfg.host, cfg.port, cfg.timeout);
+    if (fd < 0) { fail.fetch_add(static_cast<size_t>(n)); return; }
+    FILE* f = fdopen(fd, "r");
+    if (!f) { close(fd); fail.fetch_add(static_cast<size_t>(n)); return; }
+    try {
+        read_line(f);                                     // banner
+        write_all(fd, "EHLO t\r\n", 8);
+        skip_multiline(f);                                // EHLO
+        for (int i = 0; i < n; ++i) {
+            auto& s = g_senders[idx % 10];
+            auto& r = g_recipients[idx % 10];
+            auto cmd = "MAIL FROM:<" + s + ">\r\n";
+            write_all(fd, cmd.data(), cmd.size());
+            read_line(f);                                 // 250
+            cmd = "RCPT TO:<" + r + ">\r\n";
+            write_all(fd, cmd.data(), cmd.size());
+            read_line(f);                                 // 250
+            write_all(fd, "DATA\r\n", 6);
+            read_line(f);                                 // 354
+            auto body = build_mail_body(i);
+            write_all(fd, body.data(), body.size());
+            read_line(f);                                 // 250
+            ok.fetch_add(1);
+        }
+        write_all(fd, "QUIT\r\n", 6);
+        read_line(f);                                     // 221
+    } catch (...) { fail.fetch_add(static_cast<size_t>(n)); }
+    fclose(f); close(fd);
+}
+
+// Pipeline workers: batch all commands in one TCP write
 static void worker_pipe_perconn(int idx, const BenchConfig& cfg,
                                 std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
     int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
@@ -139,7 +219,8 @@ int main(int argc, char* argv[]) {
     BenchConfig cfg;
     for (int i = 0; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--pipe") cfg.pipeline = true;
+        if (a == "--seq") cfg.pipeline = false;
+        else if (a == "--pipe") cfg.pipeline = true;
         else if (a == "--reuse") cfg.reuse = true;
         else if (a == "--t" && i + 1 < argc) cfg.threads = std::stoi(argv[++i]);
         else if (a == "--msgs" && i + 1 < argc) cfg.messages = std::stoi(argv[++i]);
@@ -152,7 +233,12 @@ int main(int argc, char* argv[]) {
         g_recipients[i] = "dest"  + std::to_string(i) + "@scut.email";
     }
 
-    auto worker = cfg.reuse ? worker_pipe_reuse : worker_pipe_perconn;
+    // select worker: pipeline × reuse → 4 combos
+    decltype(&worker_seq_perconn) worker;
+    if (cfg.pipeline && cfg.reuse)       worker = worker_pipe_reuse;
+    else if (cfg.pipeline && !cfg.reuse) worker = worker_pipe_perconn;
+    else if (!cfg.pipeline && cfg.reuse) worker = worker_seq_reuse;
+    else                                 worker = worker_seq_perconn;
     std::atomic<size_t> ok{0}, fail{0};
     std::vector<std::thread> threads;
 

@@ -35,10 +35,10 @@
   "log_level": "info",
   "log_to_console": false,
   "log_to_file": false,
-  "log_file": "../logs/server.log",
+  "log_file": "/tmp/logs/server.log",
 
-  "mail_storage_path": "../mail/",
-  "attachment_storage_path": "../attachments/",
+  "mail_storage_path": "/tmp/fsm_bench_mail/",
+  "attachment_storage_path": "/tmp/fsm_bench_att/",
   "persist_min_available_memory_mb": 0,
   "inbound_ack_mode": "after_enqueue",
 
