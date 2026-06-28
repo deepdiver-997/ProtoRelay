@@ -22,9 +22,9 @@ if [ "${1:-}" = "--all" ] && command -v mysql &>/dev/null; then
     echo -n "Database... "
     for db in mail_system mail_system_dev mail_system_test mail; do
         mysql -u root -e "
-          DELETE FROM mail_recipients; DELETE FROM mails;
-          DELETE FROM attachments; DELETE FROM mail_mailbox;
-          DELETE FROM mail_outbox;
+          TRUNCATE TABLE mail_recipients; TRUNCATE TABLE mails;
+          TRUNCATE TABLE attachments; TRUNCATE TABLE mail_mailbox;
+          TRUNCATE TABLE mail_outbox;
         " "$db" 2>/dev/null || true
     done
     echo "done"
