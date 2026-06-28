@@ -11,6 +11,8 @@
 #include "mail_system/back/storage/hdfs_web_storage_provider.h"
 #endif
 #include "mail_system/back/storage/local_file_storage_provider.h"
+#include "mail_system/back/storage/null_storage_provider.h"
+#include "mail_system/back/db/null_db_pool.h"
 #include <iostream>
 #include <fstream>
 
@@ -52,10 +54,12 @@ ServerBase::ServerBase(const ServerConfig& config,
                 }
             }
         }
-        if (main_db_pool)
+        if (!main_db_pool) {
+            main_db_pool = std::make_shared<NullDBPool>();
+            LOG_SERVER_INFO("Null database pool created (use_database=false or no DB configured)");
+        } else {
             LOG_SERVER_INFO("Database pool initialized successfully");
-        else
-            LOG_SERVER_WARN("Database pool is not initialized");
+        }
 
         // ---- 2. 创建存储 ----
         std::shared_ptr<storage::IStorageProvider> main_storage;
@@ -70,6 +74,8 @@ ServerBase::ServerBase(const ServerConfig& config,
 #else
             throw std::runtime_error("hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON");
 #endif
+        } else if (config.storage_provider == "null") {
+            main_storage = std::make_shared<storage::NullStorageProvider>();
         } else {
             if (!std::filesystem::exists(config.mail_storage_path))
                 std::filesystem::create_directories(config.mail_storage_path);

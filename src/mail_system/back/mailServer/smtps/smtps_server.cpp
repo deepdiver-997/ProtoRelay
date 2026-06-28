@@ -19,7 +19,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
 
     // SMTP 专用：创建持久化队列和出站投递客户端
     // 这些是 SMTP 私有的，IMAP 不需要
-    if (m_shardRouter) {
+    if (m_shardRouter && cfg->use_database) {
         if (!m_persistentQueue) {
             m_persistentQueue = std::make_shared<persist_storage::PersistentQueue>(
                 m_shardRouter,

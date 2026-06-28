@@ -376,9 +376,11 @@ persist_storage::SubmitOwnedMailResult SmtpsSession<ConnectionType>::submit_mail
         pending_submission_ = result.ticket;
         LOG_SESSION_INFO("Submitted mail {} to persistent queue", pending_submission_.mail_id);
     } else {
-        result.error = "persistent queue is null";
-        LOG_SESSION_ERROR("Persistent queue is null, cannot submit mail");
-        return result;
+        // 压测 / 无 DB 模式：直接标记接受
+        result.accepted = true;
+        result.ticket.mail_id = this->get_mail()->id;
+        pending_submission_ = result.ticket;
+        LOG_SESSION_INFO("Mail {} accepted without persistence (null queue)", this->get_mail()->id);
     }
 
     return result;

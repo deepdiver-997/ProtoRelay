@@ -12,7 +12,7 @@
   "certFile": "crt/server.crt",
   "keyFile": "crt/server.key",
 
-  "use_database": true,
+  "use_database": false,
   "db_config_file": "db_config.json",
 
   "maxMessageSize": 10485760,
@@ -37,6 +37,7 @@
   "log_to_file": false,
   "log_file": "/tmp/logs/server.log",
 
+  "storage_provider": "null",
   "mail_storage_path": "/tmp/fsm_bench_mail/",
   "attachment_storage_path": "/tmp/fsm_bench_att/",
   "persist_min_available_memory_mb": 0,

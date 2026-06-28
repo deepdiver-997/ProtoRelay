@@ -448,14 +448,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         }
     }
 
-    std::regex mail_from_regex(R"(FROM:\s*<([^>]*)>)", std::regex_constants::icase);
-    std::smatch matches;
-    if (std::regex_search(args, matches, mail_from_regex) && matches.size() > 1) {
+    auto addr_start = args.find('<');
+    auto addr_end   = args.find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
+    if (addr_start != std::string::npos && addr_end != std::string::npos) {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         if (ctx->is_authenticated && !ctx->client_username.empty()) {
             ctx->sender_address = ctx->client_username;
         } else {
-            ctx->sender_address = matches[1];
+            ctx->sender_address = args.substr(addr_start + 1, addr_end - addr_start - 1);
         }
         ctx->recipient_addresses.clear();
         ctx->spf_checked = false;
@@ -518,10 +518,11 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args)
 {
-    std::regex rcpt_to_regex(R"(TO:\s*<([^>]*)>)", std::regex_constants::icase);
-    std::smatch matches;
-    if (std::regex_search(args, matches, rcpt_to_regex) && matches.size() > 1) {
-        static_cast<SmtpsContext*>(session->get_context())->recipient_addresses.push_back(matches[1]);
+    auto addr_start = args.find('<');
+    auto addr_end   = args.find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
+    if (addr_start != std::string::npos && addr_end != std::string::npos) {
+        static_cast<SmtpsContext*>(session->get_context())->recipient_addresses.push_back(
+            args.substr(addr_start + 1, addr_end - addr_start - 1));
         session->do_async_write("250 Ok\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
