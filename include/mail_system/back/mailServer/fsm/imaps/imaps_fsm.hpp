@@ -138,7 +138,7 @@ class SessionBase;
 
 // 状态处理函数类型定义（同 SMTP 风格）
 template <typename ConnectionType>
-using ImapStateHandler = std::function<void(std::unique_ptr<SessionBase<ConnectionType>>, const std::string&)>;
+using ImapStateHandler = std::function<void(std::shared_ptr<SessionBase<ConnectionType>>, const std::string&)>;
 
 // ====================================================================
 // IMAP 状态机基类 —— 封装 DB 操作和公用方法
@@ -177,7 +177,7 @@ public:
     }
 
     // 处理事件 —— 纯虚接口
-    virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session,
+    virtual void process_event(std::shared_ptr<SessionBase<ConnectionType>> session,
                                 ImapEvent event,
                                 const std::string& tag,
                                 const std::string& args) = 0;

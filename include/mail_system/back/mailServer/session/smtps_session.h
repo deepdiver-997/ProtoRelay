@@ -42,11 +42,11 @@ public:
 
     void set_listener_config(const ListenerConfig& lc) { context_.listener_config = lc; }
 
-    static void start(std::unique_ptr<SmtpsSession> self);
-    static void start_after_starttls(std::unique_ptr<SmtpsSession> self);
+    static void start(std::shared_ptr<SmtpsSession> self);
+    static void start_after_starttls(std::shared_ptr<SmtpsSession> self);
 
     void handle_read(const std::string& data) override;
-    void process_read(std::unique_ptr<SessionBase<ConnectionType>> self) override;
+    void process_read() override;
     std::chrono::milliseconds compute_reply_delay() const override;
     void* get_fsm() const override;
     void* get_context() override;

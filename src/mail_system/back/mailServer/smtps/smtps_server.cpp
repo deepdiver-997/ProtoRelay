@@ -87,13 +87,13 @@ void SmtpsServer::handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::
                                  const boost::system::error_code& error, ListenerConfig lc) {
     using SslSession = SmtpsSession<mail_system::SslConnection>;
     auto ssl_connection = std::make_unique<SslConnection>(std::move(ssl_socket));
-    auto session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
+    auto session = std::make_shared<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
     if (!error) {
         try {
             session->set_listener_config(lc);
             LOG_NETWORK_INFO("New SMTPS connection from {}", session->get_client_ip());
             increment_connection_count();
-            SslSession::start(std::move(session));
+            SslSession::start(session);
         } catch (const std::exception& e) {
             LOG_NETWORK_ERROR("Error starting SMTPS session: {}", e.what());
         }
@@ -106,13 +106,13 @@ void SmtpsServer::handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket
                                     const boost::system::error_code& error, ListenerConfig lc) {
     using TcpSession = SmtpsSession<mail_system::TcpConnection>;
     auto tcp_connection = std::make_unique<TcpConnection>(std::move(socket));
-    auto session = std::make_unique<TcpSession>(this, std::move(tcp_connection), m_tcp_fsm);
+    auto session = std::make_shared<TcpSession>(this, std::move(tcp_connection), m_tcp_fsm);
     if (!error) {
         try {
             session->set_listener_config(lc);
             LOG_NETWORK_INFO("New SMTP connection from {}", session->get_client_ip());
             increment_connection_count();
-            TcpSession::start(std::move(session));
+            TcpSession::start(session);
         } catch (const std::exception& e) {
             LOG_NETWORK_ERROR("Error starting SMTP session: {}", e.what());
         }
@@ -123,20 +123,17 @@ void SmtpsServer::handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket
 
 void SmtpsServer::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) {
     using SslSession = SmtpsSession<mail_system::SslConnection>;
-    if (!socket) {
-        return;
-    }
+    if (!socket) return;
 
     try {
         auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
-            std::move(*socket),
-            get_ssl_context());
+            std::move(*socket), get_ssl_context());
         auto ssl_connection = std::make_unique<SslConnection>(std::move(ssl_stream));
-        auto session = std::make_unique<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
+        auto session = std::make_shared<SslSession>(this, std::move(ssl_connection), m_ssl_fsm);
 
         LOG_NETWORK_INFO("STARTTLS upgraded, continue SMTP on TLS from {}", session->get_client_ip());
         increment_connection_count();
-        SslSession::start_after_starttls(std::move(session));
+        SslSession::start_after_starttls(session);
     } catch (const std::exception& e) {
         LOG_NETWORK_ERROR("Error handing off STARTTLS socket: {}", e.what());
     }

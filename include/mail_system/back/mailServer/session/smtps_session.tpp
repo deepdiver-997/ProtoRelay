@@ -20,37 +20,29 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , persistent_queue_(server->m_persistentQueue) {}
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::start(std::unique_ptr<SmtpsSession> self) {
+void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
     SessionBase<ConnectionType>::do_handshake(
-        std::move(self),
+        self,
         boost::asio::ssl::stream_base::server,
-        [](std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-            if (ec) {
-                LOG_SESSION_ERROR("Handshake failed: {}", ec.message());
-                return;
-            }
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            if (ec) { LOG_SESSION_ERROR("Handshake failed: {}", ec.message()); return; }
             auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(s->get_fsm());
-            fsm->process_event(std::move(s), SmtpsEvent::CONNECT, "");
+            fsm->process_event(s, SmtpsEvent::CONNECT, "");
         }
     );
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::start_after_starttls(std::unique_ptr<SmtpsSession> self) {
+void SmtpsSession<ConnectionType>::start_after_starttls(std::shared_ptr<SmtpsSession> self) {
     SessionBase<ConnectionType>::do_handshake(
-        std::move(self),
+        self,
         boost::asio::ssl::stream_base::server,
-        [](std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-            if (ec) {
-                LOG_SESSION_ERROR("STARTTLS handshake failed: {}", ec.message());
-                return;
-            }
-
-            // RFC 3207: after STARTTLS handshake, both sides must discard prior SMTP state.
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            if (ec) { LOG_SESSION_ERROR("STARTTLS handshake failed: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
             s->set_next_event(static_cast<int>(SmtpsEvent::TIMEOUT));
             LOG_SMTP_DETAIL_INFO("STARTTLS handshake complete, waiting for EHLO on TLS session");
-            SessionBase<ConnectionType>::do_async_read(std::move(s), nullptr);
+            s->do_async_read();
         }
     );
 }
@@ -66,15 +58,14 @@ std::chrono::milliseconds SmtpsSession<ConnectionType>::compute_reply_delay() co
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<ConnectionType>> self) {
+void SmtpsSession<ConnectionType>::process_read() {
     if (ignore_current_command_) {
         ignore_current_command_ = false;
-        SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+        this->do_async_read();
         return;
     }
-
     auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(this->get_fsm());
-    fsm->auto_process_event(std::move(self));
+    fsm->auto_process_event(this->shared_from_this());
 }
 
 template <typename ConnectionType>

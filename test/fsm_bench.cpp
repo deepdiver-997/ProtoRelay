@@ -75,7 +75,7 @@ static bool deliver_one(TraditionalSmtpsFsm<MockConnection>& fsm,
     // process_read → do_async_read → 从 MockConnection 读 → pipeline 循环
     auto base = std::unique_ptr<SessionBase<MockConnection>>(session.release());
     static_cast<SmtpsSession<MockConnection>*>(base.get())
-        ->process_read(std::move(base));
+        ->process_read();
     return true;
 }
 

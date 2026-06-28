@@ -3,11 +3,11 @@
 
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/mailServer/connection/i_connection.h"
-// #include "mail_system/back/mailServer/connection/tcp_connection.h"
 #include "mail_system/back/mailServer/server_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/entities/usr.h"
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -16,18 +16,14 @@
 
 namespace mail_system {
 
-// 前向声明
 class ServerBase;
 class TcpConnection;
 class SslConnection;
 template <typename ConnectionType>
 class SessionBase;
-// 类型别名
 using TcpSessionBase = SessionBase<TcpConnection>;
 using SslSessionBase = SessionBase<SslConnection>;
 
-// 辅助函数：将只可移动的函数对象（如捕获了 unique_ptr 的 lambda）包装为可复制的
-// 这样就可以传递给 std::function
 template <typename F>
 auto make_copyable(F&& f) {
     auto s = std::make_shared<std::decay_t<F>>(std::forward<F>(f));
@@ -36,250 +32,110 @@ auto make_copyable(F&& f) {
     };
 }
 
-// Session 基类模板
 template <typename ConnectionType>
-class SessionBase {
+class SessionBase : public std::enable_shared_from_this<SessionBase<ConnectionType>> {
 public:
-    // 构造函数
     SessionBase(std::unique_ptr<ConnectionType> connection, ServerBase* server)
-        : last_bytes_transferred_(0)
-        , stay_times_(0)
-        , timeout_times_(0)
+        : last_bytes_transferred_(0), stay_times_(0), timeout_times_(0)
         , connection_(std::move(connection))
-        , read_buffer_(8192)
-        , use_buffer_(8192)
-        , mail_(nullptr)
-        , closed_(false)
-        , session_authenticated_(false)
+        , read_buffer_(8192), use_buffer_(8192)
+        , mail_(nullptr), closed_(false), session_authenticated_(false)
         , m_server(server) {}
 
-    // 移动构造函数
-    SessionBase(SessionBase&& other) noexcept
-        : last_bytes_transferred_(other.last_bytes_transferred_)
-        , stay_times_(other.stay_times_)
-        , timeout_times_(other.timeout_times_)
-        , connection_(std::move(other.connection_))
-        , read_buffer_(std::move(other.read_buffer_))
-        , use_buffer_(std::move(other.use_buffer_))
-        , client_address_(std::move(other.client_address_))
-        , mail_(std::move(other.mail_))
-        , usr_(std::move(other.usr_))
-        , closed_(other.closed_)
-        , session_authenticated_(other.session_authenticated_)
-        , m_server(other.m_server) {
-        other.closed_ = true;
-        other.m_server = nullptr;
-    }
+    virtual ~SessionBase() { if (!closed_) close(); }
 
-    // 虚析构函数
-    virtual ~SessionBase() {
-        if (!closed_) {
-            close();
-        }
-    }
-
-    // 关闭会话
     virtual void close() {
-        if (closed_) {
-            return;
-        }
-
+        if (closed_) return;
         closed_ = true;
-
         if (m_server) {
             m_server->record_session_end(get_client_ip(), session_authenticated_);
             m_server->decrement_connection_count();
         }
-
         try {
             if (connection_ && connection_->is_open()) {
                 connection_->close();
                 LOG_SESSION_INFO("Session closed for {}", get_client_ip());
-            } else {
-                LOG_SESSION_DEBUG("Session already closed or connection not open.");
             }
         } catch (const std::exception& e) {
             LOG_SESSION_ERROR("Error closing session: {}", e.what());
         }
     }
 
-    // 获取客户端地址
     std::string get_client_ip() const {
         if (client_address_.empty()) {
-            try {
-                client_address_ = connection_->get_remote_ip();
-            } catch (const std::exception& e) {
-                LOG_SESSION_ERROR("Error getting client IP: {}", e.what());
-            }
+            try { client_address_ = connection_->get_remote_ip(); }
+            catch (const std::exception& e) { LOG_SESSION_ERROR("Error getting client IP: {}", e.what()); }
         }
         return client_address_;
     }
 
-    // 获取连接对象
-    ConnectionType& get_connection() {
-        if (!connection_) {
-            throw std::runtime_error("Connection is not initialized");
-        }
-        return *connection_;
-    }
+    ConnectionType& get_connection() { return *connection_; }
+    const ConnectionType& get_connection() const { return *connection_; }
+    std::unique_ptr<ConnectionType> release_connection() { return std::move(connection_); }
 
-    // 获取连接对象（常量版本）
-    const ConnectionType& get_connection() const {
-        if (!connection_) {
-            throw std::runtime_error("Connection is not initialized");
-        }
-        return *connection_;
-    }
-
-    std::unique_ptr<ConnectionType> release_connection() {
-        return std::move(connection_);
-    }
-
-    // 获取邮件对象
     mail* get_mail() { return mail_.get(); }
-
-    // 获取邮件对象指针（转移所有权）
     std::unique_ptr<mail> get_mail_ptr() { return std::move(mail_); }
-
-    // 获取用户对象
     usr* get_usr() { return usr_.get(); }
-
-    // 获取服务器指针
     ServerBase* get_server() const { return m_server; }
-
-    // 设置服务器引用
     void set_server(ServerBase* server) { m_server = server; }
 
-    // 执行握手（静态方法，传入 self）
+    virtual void handle_error(const boost::system::error_code& error) {
+        LOG_SESSION_ERROR("SessionBase Error: {}", error.message());
+        close();
+    }
+
+    bool is_closed() const { return closed_; }
+
+    // SSL/TLS 握手（静态方法，在 session 创建阶段使用）
     template <typename HandshakeHandler>
     static void do_handshake(
-        std::unique_ptr<SessionBase<ConnectionType>> self,
+        std::shared_ptr<SessionBase<ConnectionType>> self,
         boost::asio::ssl::stream_base::handshake_type type,
-        HandshakeHandler&& handler
-    ) {
-        if (self->closed_ || !self->connection_) {
-            return;
-        }
-
+        HandshakeHandler&& handler)
+    {
+        if (self->closed_ || !self->connection_) return;
         auto* conn = self->connection_.get();
-
-        conn->async_handshake(
-            type,
-            make_copyable([self = std::move(self), handler = std::forward<HandshakeHandler>(handler)](const boost::system::error_code& error) mutable {
-                if (self->closed_) {
-                    return;
-                }
-
+        conn->async_handshake(type,
+            make_copyable([self, handler = std::forward<HandshakeHandler>(handler)](
+                const boost::system::error_code& error) mutable {
+                if (self->closed_) return;
                 if (error) {
                     LOG_SESSION_ERROR("Handshake failed: {}", error.message());
                     self->handle_error(error);
                 } else {
                     LOG_SESSION_INFO("Handshake successful.");
                 }
-
-                handler(std::move(self), error);
-            })
-        );
+                handler(self, error);
+            }));
     }
 
-    // 处理错误（虚函数，派生类可以重写）
-    virtual void handle_error(const boost::system::error_code& error) {
-        LOG_SESSION_ERROR("SessionBase Error: {}", error.message());
-        close();
+    // ── 异步 I/O（成员函数） ──────────────────────────────────────────────
+    using WriteCallback = std::function<void(std::shared_ptr<SessionBase<ConnectionType>>, const boost::system::error_code&)>;
+
+    // 从命令缓冲区取出一条完整行（不含 \n 的残留数据留在缓冲区）
+    std::string pop_buffered_line() {
+        size_t nl = command_read_buffer_.find('\n');
+        if (nl == std::string::npos) return "";
+        std::string line = command_read_buffer_.substr(0, nl + 1);
+        command_read_buffer_.erase(0, nl + 1);
+        return line;
     }
 
-    // 会话是否已关闭
-    bool is_closed() const { return closed_; }
+    // 异步读：若命令缓冲区已有完整行则取出处理，否则发起网络读。
+    // TCP 数据到达时先追加到缓冲区，然后逐行消费流水线命令。
+    void do_async_read() {
+        if (closed_ || !connection_) return;
 
-    // 获取最后读取的数据（用于状态机回调）
-    std::string get_last_read_data(size_t bytes_transferred) {
-        auto s = std::string(read_buffer_.data(), bytes_transferred);
-        std::fill(read_buffer_.begin(), read_buffer_.end(), 0);
-        return s;
-    }
+        // 缓冲区已有完整行 → 返回，由外层 while 循环统一消费
+        if (has_buffered_input()) return;
 
-    // 最近一次异步读取传输的字节数
-    size_t last_bytes_transferred_;
+        auto* conn = connection_.get();
+        auto buf = boost::asio::buffer(read_buffer_);
 
-    // 会话统计信息
-    int stay_times_;
-    int timeout_times_;
-
-protected:
-    // 连接对象
-    std::unique_ptr<ConnectionType> connection_;
-
-    // 读取缓冲区
-    std::vector<char> read_buffer_;
-    std::vector<char> use_buffer_;
-    // 命令解析缓冲区（SMTP/IMAP 行协议共用）
-    std::string command_read_buffer_;
-    std::string pending_write_buf_;
-
-    // 客户端地址缓存
-    mutable std::string client_address_;
-
-public:
-    // 邮件和用户对象
-    std::unique_ptr<mail> mail_;
-    std::unique_ptr<usr> usr_;
-
-protected:
-    // 会话是否已关闭
-    bool closed_;
-
-    // 本会话是否通过了认证
-    bool session_authenticated_;
-
-    // 指向服务器的指针，用于访问 IO 线程池
-    ServerBase* m_server;
-
-public:
-    void set_authenticated(bool v) { session_authenticated_ = v; }
-    bool is_authenticated() const { return session_authenticated_; }
-
-public:
-    // 回调类型定义
-    using ReadCallback = std::function<void(
-        std::unique_ptr<SessionBase<ConnectionType>>,
-        const boost::system::error_code&,
-        std::size_t
-    )>&&;
-
-    using WriteCallback = std::function<void(
-        std::unique_ptr<SessionBase<ConnectionType>>,
-        const boost::system::error_code&
-    )>&&;
-
-    // 静态异步读取（回调为空时自动调用 process_read）
-    static void do_async_read(
-        std::unique_ptr<SessionBase<ConnectionType>> self,
-        ReadCallback callback = nullptr
-    ) {
-        if (self->closed_ || !self->connection_) {
-            return;
-        }
-
-        // pipelining: 如果命令缓冲区里还有完整行，直接解析而不发起网络读
-        if (self->has_buffered_input()) {
-            std::string buf = self->take_buffered_input();
-            self->handle_read(buf);
-            self->process_read(std::move(self));
-            return;
-        }
-
-        auto* conn = self->connection_.get();
-        auto read_buffer = boost::asio::buffer(self->read_buffer_);
-
-        conn->async_read(
-            read_buffer,
-            make_copyable([self = std::move(self), cb = std::move(callback)](
-                const boost::system::error_code& error,
-                std::size_t bytes_transferred
-            ) mutable {
-                if (self->closed_) {
-                    return;
-                }
+        conn->async_read(buf,
+            make_copyable([self = this->shared_from_this()](
+                const boost::system::error_code& error, std::size_t bytes) mutable {
+                if (self->closed_) return;
 
                 if (error) {
                     LOG_SESSION_ERROR("Error reading data: {}", error.message());
@@ -287,66 +143,58 @@ public:
                     return;
                 }
 
-                // 0 字节：忽略并继续等待
-                if (bytes_transferred == 0) {
-                    LOG_SESSION_DEBUG("No data read, continue waiting...");
-                    do_async_read(std::move(self), std::move(cb));
+                if (bytes == 0) {
+                    self->do_async_read();
                     return;
                 }
 
-                // 记录本次读取的字节数
-                self->last_bytes_transferred_ = bytes_transferred;
+                self->last_bytes_transferred_ = bytes;
+                // 原始 TCP 数据追加到命令缓冲区（可能包含多行 + 不完整尾行）
+                self->command_read_buffer_.append(
+                    self->read_buffer_.data(), bytes);
 
-                // 处理接收到的数据
-                std::string data(self->read_buffer_.data(), bytes_transferred);
-                self->handle_read(data);
-
-                // 回调不为空则执行回调
-                if (cb) {
-                    // 直接在IO线程中执行回调，避免不必要的线程切换
-                    cb(std::move(self), error, bytes_transferred);
+                // 流水线消费：每次取全部缓冲数据（含 body 块），
+                // parse_smtp_command 提取一行(非IN_MESSAGE)或处理body(IN_MESSAGE)
+                while (self->has_buffered_input()) {
+                    self->handle_read(self->take_buffered_input());
+                    self->process_read();
                 }
-                else {
-                    // 默认处理：调用process_read
-                    self->process_read(std::move(self));
-                }
-            })
-        );
+            }));
     }
 
-    // 静态异步写入 — batch + 去 make_copyable
-    static void do_async_write(
-        std::unique_ptr<SessionBase<ConnectionType>> self,
-        const std::string& data,
-        WriteCallback callback = nullptr)
-    {
-        if (self->closed_ || !self->connection_) return;
-        if (self->has_buffered_input() && !callback) {
-            self->pending_write_buf_ += data;
-            do_async_read(std::move(self), nullptr);
+    // 异步写：有流水线数据时批量累积 + 同步回调链处理后续命令，
+    // 无流水线数据时真正写出（含之前累积的所有响应）。
+    void do_async_write(const std::string& data, WriteCallback callback = nullptr) {
+        if (closed_ || !connection_) return;
+
+        // 还有流水线命令 → 累积响应，同步调用回调（回调中 do_async_read
+        // 会取下一行 + process_read，链式消费直到缓冲区空）
+        if (has_buffered_input()) {
+            pending_write_buf_ += data;
+            if (callback) {
+                callback(this->shared_from_this(), boost::system::error_code());
+            }
             return;
         }
-        auto* conn = self->connection_.get();
+
+        auto* conn = connection_.get();
         auto payload = std::make_shared<std::string>(
-            std::move(self->pending_write_buf_) + data);
-        auto sc = std::make_shared<decltype(self)>(std::move(self));
+            std::move(pending_write_buf_) + data);
         conn->async_write_with_delay(boost::asio::buffer(*payload),
-            (*sc)->compute_reply_delay(),
-            [sc, payload, cb = std::move(callback)]
-            (const boost::system::error_code& ec, std::size_t) mutable {
-                auto self = std::move(*sc);
+            compute_reply_delay(),
+            [self = this->shared_from_this(), payload, cb = std::move(callback)](
+                const boost::system::error_code& ec, std::size_t) mutable {
                 if (self->closed_) return;
                 if (ec) { self->handle_error(ec); return; }
-                if (cb) cb(std::move(self), ec);
-                else   do_async_read(std::move(self), nullptr);
+                if (cb) cb(self, ec);
+                else    self->do_async_read();
             });
     }
 
-    // 纯虚函数，由派生类实现
+    // ── 纯虚接口 ─────────────────────────────────────────────────────────
     virtual void handle_read(const std::string& data) = 0;
-    virtual void process_read(std::unique_ptr<SessionBase<ConnectionType>> self) = 0;
+    virtual void process_read() = 0;
 
-    // pipelining: 派生类可覆写，默认基于 command_read_buffer_ 实现
     virtual bool has_buffered_input() const {
         return command_read_buffer_.find('\n') != std::string::npos;
     }
@@ -355,11 +203,8 @@ public:
         command_read_buffer_.clear();
         return s;
     }
-
-    // 计算当前回复延迟（子类根据负载实现，0ms = 无延迟）
     virtual std::chrono::milliseconds compute_reply_delay() const = 0;
 
-    // 状态机相关接口（纯虚函数，由派生类实现）
     virtual void set_current_state(int state) = 0;
     virtual void set_next_event(int event) = 0;
     virtual void* get_fsm() const = 0;
@@ -367,6 +212,32 @@ public:
     virtual int get_current_state() const = 0;
     virtual std::string get_last_command_args() const = 0;
     virtual void* get_context() = 0;
+
+    // 成员数据
+    size_t last_bytes_transferred_;
+    int stay_times_;
+    int timeout_times_;
+
+protected:
+    std::unique_ptr<ConnectionType> connection_;
+    std::vector<char> read_buffer_;
+    std::vector<char> use_buffer_;
+    std::string command_read_buffer_;
+    std::string pending_write_buf_;
+    mutable std::string client_address_;
+
+public:
+    std::unique_ptr<mail> mail_;
+    std::unique_ptr<usr> usr_;
+
+protected:
+    bool closed_;
+    bool session_authenticated_;
+    ServerBase* m_server;
+
+public:
+    void set_authenticated(bool v) { session_authenticated_ = v; }
+    bool is_authenticated() const { return session_authenticated_; }
 };
 
 } // namespace mail_system

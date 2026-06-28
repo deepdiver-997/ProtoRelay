@@ -30,11 +30,11 @@ public:
         this->session_authenticated_ = context_.is_authenticated;
     }
 
-    static void start(std::unique_ptr<ImapsSession> self);
-    static void start_after_starttls(std::unique_ptr<ImapsSession> self);
+    static void start(std::shared_ptr<ImapsSession> self);
+    static void start_after_starttls(std::shared_ptr<ImapsSession> self);
 
     void handle_read(const std::string& data) override;
-    void process_read(std::unique_ptr<SessionBase<ConnectionType>> self) override;
+    void process_read() override;
     std::chrono::milliseconds compute_reply_delay() const override;
     void* get_fsm() const override;
     void* get_context() override;

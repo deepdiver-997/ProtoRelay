@@ -61,34 +61,34 @@ ImapsSession<ConnectionType>::ImapsSession(
 // 启动入口
 // ====================================================================
 template <typename ConnectionType>
-void ImapsSession<ConnectionType>::start(std::unique_ptr<ImapsSession> self) {
+void ImapsSession<ConnectionType>::start(std::shared_ptr<ImapsSession> self) {
     SessionBase<ConnectionType>::do_handshake(
-        std::move(self),
+        self,
         boost::asio::ssl::stream_base::server,
-        [](std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_SESSION_ERROR("IMAP handshake failed: {}", ec.message());
                 return;
             }
             auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(s->get_fsm());
-            fsm->process_event(std::move(s), ImapEvent::CONNECT, "", "");
+            fsm->process_event(s, ImapEvent::CONNECT, "", "");
         }
     );
 }
 
 template <typename ConnectionType>
-void ImapsSession<ConnectionType>::start_after_starttls(std::unique_ptr<ImapsSession> self) {
+void ImapsSession<ConnectionType>::start_after_starttls(std::shared_ptr<ImapsSession> self) {
     SessionBase<ConnectionType>::do_handshake(
-        std::move(self),
+        self,
         boost::asio::ssl::stream_base::server,
-        [](std::unique_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_SESSION_ERROR("IMAP STARTTLS handshake failed: {}", ec.message());
                 return;
             }
             s->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
             LOG_IMAP_INFO("STARTTLS handshake complete, waiting for commands on TLS session");
-            SessionBase<ConnectionType>::do_async_read(std::move(s), nullptr);
+            s->do_async_read();
         }
     );
 }
@@ -115,8 +115,9 @@ std::chrono::milliseconds ImapsSession<ConnectionType>::compute_reply_delay() co
 // 且持有 session 的 unique_ptr 生命周期
 // ====================================================================
 template <typename ConnectionType>
-void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<ConnectionType>> self) {
-    auto* session = static_cast<ImapsSession*>(self.get());
+void ImapsSession<ConnectionType>::process_read() {
+    auto self = this->shared_from_this();
+    auto* session = this;
     auto& buf = session->command_read_buffer_;
 
     // IDLE 状态特殊处理：等待 DONE
@@ -134,12 +135,12 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
                 session->context_.idle_mode = false;
                 auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
                 // For DONE, write OK response and go back to reading
-                fsm->send_tagged(std::move(self), session->context_.current_tag, "OK", "IDLE terminated");
+                fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
                 return;
             }
         }
         // No DONE yet, keep reading
-        SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+        self->do_async_read();
         return;
     }
 
@@ -164,14 +165,14 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
             session->last_command_args_ = session->literal_data_buffer_;
 
             auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-            fsm->process_event(std::move(self), ImapEvent::APPEND,
+            fsm->process_event(self, ImapEvent::APPEND,
                                session->current_tag_, session->last_command_args_);
             return;
         } else {
             // 还不够，继续读
             session->literal_data_buffer_.append(buf);
             buf.clear();
-            SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+            self->do_async_read();
             return;
         }
     }
@@ -180,7 +181,7 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
     size_t line_end = buf.find("\r\n");
     if (line_end == std::string::npos) {
         // 没有完整行，继续读
-        SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+        self->do_async_read();
         return;
     }
 
@@ -189,7 +190,7 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
 
     if (line.empty()) {
         // 空行，继续读
-        SessionBase<ConnectionType>::do_async_read(std::move(self), nullptr);
+        self->do_async_read();
         return;
     }
 
@@ -249,7 +250,7 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
                 session->context_.current_tag = session->current_tag_;
 
                 auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-                fsm->process_event(std::move(self), ImapEvent::APPEND,
+                fsm->process_event(self, ImapEvent::APPEND,
                                    session->current_tag_, session->literal_data_buffer_);
                 return;
             } else {
@@ -260,7 +261,7 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
                 buf.clear();
 
                 auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-                fsm->send_continuation(std::move(self), "Ready for literal data");
+                fsm->send_continuation(self, "Ready for literal data");
                 return;
             }
         } catch (const std::exception& e) {
@@ -283,7 +284,7 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
         if (cmd == "DONE" && session->context_.idle_mode) {
             session->context_.idle_mode = false;
             auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-            fsm->send_tagged(std::move(self), session->context_.current_tag, "OK", "IDLE terminated");
+            fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
             return;
         }
 
@@ -329,7 +330,7 @@ void ImapsSession<ConnectionType>::process_read(std::unique_ptr<SessionBase<Conn
     // 调用 FSM 处理事件 —— FSM 内通过 do_async_write 发送响应
     // 并在回调中继续 do_async_read
     auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-    fsm->process_event(std::move(self), session->next_event_, tag, args);
+    fsm->process_event(self, session->next_event_, tag, args);
 }
 
 // ====================================================================

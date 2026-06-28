@@ -157,10 +157,9 @@ struct SmtpsContext {
 
 // 状态处理函数类型定义
 template <typename ConnectionType>
-using StateHandler = std::function<void(std::unique_ptr<SessionBase<ConnectionType>>, const std::string&)>;
-// 会话处理器类型定义（用于unique_ptr）
+using StateHandler = std::function<void(std::shared_ptr<SessionBase<ConnectionType>>, const std::string&)>;
 template <typename ConnectionType>
-using SessionHandler = std::function<void(std::unique_ptr<SessionBase<ConnectionType>>, const std::string&)>;
+using SessionHandler = std::function<void(std::shared_ptr<SessionBase<ConnectionType>>, const std::string&)>;
 
 // SMTPS状态机接口
 template <typename ConnectionType>
@@ -191,7 +190,7 @@ public:
     }
 
     // 处理事件
-    virtual void process_event(std::unique_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event, const std::string& args) = 0;
+    virtual void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event, const std::string& args) = 0;
 
     // 获取状态名称
     static std::string get_state_name(SmtpsState state) {
@@ -303,7 +302,7 @@ public:
         }
     }
 
-    void get_mail_data(std::unique_ptr<SessionBase<ConnectionType>> session, std::string& mail_data) {
+    void get_mail_data(std::shared_ptr<SessionBase<ConnectionType>> session, std::string& mail_data) {
         get_mail_data(session.get(), mail_data);
     }
 

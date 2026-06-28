@@ -50,14 +50,14 @@ public:
 
     // 事件处理入口
     void process_event(
-        std::unique_ptr<SessionBase<ConnectionType>> session,
+        std::shared_ptr<SessionBase<ConnectionType>> session,
         ImapEvent event,
         const std::string& tag,
         const std::string& args
     ) override;
 
     // 自动处理（从 session 获取当前 pending 事件）
-    void auto_process_event(std::unique_ptr<SessionBase<ConnectionType>> session);
+    void auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session);
 
 private:
     // 初始化
@@ -87,48 +87,48 @@ private:
 
 public:
     // 通用的 IMAP 响应写回（session 需要访问）
-    void send_untagged(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& data);
-    void send_tagged(std::unique_ptr<SessionBase<ConnectionType>> session,
+    void send_untagged(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& data);
+    void send_tagged(std::shared_ptr<SessionBase<ConnectionType>> session,
                      const std::string& tag,
                      const std::string& status,
                      const std::string& message);
-    void send_continuation(std::unique_ptr<SessionBase<ConnectionType>> session,
+    void send_continuation(std::shared_ptr<SessionBase<ConnectionType>> session,
                            const std::string& message);
 
 private:
     // ========== 状态处理器 ==========
-    void handle_init_connect(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_capability(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_login(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_authenticate(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_logout(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_select(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_examine(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_list(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_status(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_fetch(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_store(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_expunge(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_close(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_noop(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_check(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_create(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_delete(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_rename(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_subscribe(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_unsubscribe(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_lsub(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_append(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_search(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_uid(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_starttls(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_copy(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_move(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_copy_move(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args, bool is_move);
-    void handle_idle(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_done(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_error(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_timeout(std::unique_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_capability(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_login(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_authenticate(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_logout(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_select(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_examine(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_list(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_status(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_fetch(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_store(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_expunge(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_close(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_noop(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_check(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_create(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_delete(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_rename(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_subscribe(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_unsubscribe(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_lsub(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_append(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_search(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_uid(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_starttls(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_copy(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_move(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_copy_move(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args, bool is_move);
+    void handle_idle(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_done(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
 
     // 辅助函数
     static bool parse_seq_set(const std::string& seq_set, uint64_t& start, uint64_t& end, size_t total);
