@@ -616,6 +616,13 @@ if(NOT BUILD_OBJECT_ONLY)
     target_link_libraries(fsm_bench PRIVATE ${LINK_LIBRARIES})
 endif()
 
+# ===== SMTP benchmark client (raw sockets, no asio) =====
+if(NOT BUILD_OBJECT_ONLY)
+    add_executable(smtp_client test/smtp_client.cpp)
+    set_target_properties(smtp_client PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+    target_compile_features(smtp_client PRIVATE cxx_std_17)
+endif()
+
 # 目标编译选项
 target_compile_features(${SMTP_TARGET} PRIVATE cxx_std_17)
 

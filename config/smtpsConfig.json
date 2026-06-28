@@ -18,7 +18,7 @@
   "maxMessageSize": 10485760,
   "maxConnections": 100000,
 
-  "io_thread_count": 12,
+  "io_thread_count": 4,
   "worker_thread_count": 4,
 
   "connection_timeout": 300,
