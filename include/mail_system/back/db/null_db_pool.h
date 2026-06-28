@@ -20,6 +20,7 @@ public:
 // 空数据库连接 —— 所有操作返回成功/空结果
 class NullDBConnection : public IDBConnection {
 public:
+    Dialect dialect() const override { return Dialect::Null; }
     bool connect() override { return true; }
     void disconnect() override {}
     bool is_connected() const override { return true; }

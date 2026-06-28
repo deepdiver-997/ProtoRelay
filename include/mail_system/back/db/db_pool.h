@@ -65,10 +65,6 @@ public:
     // 通用 IDBConnection 接口（query/execute 等）
     IDBConnection* operator->() const { return connection_.get(); }
 
-    // MySQL 特有方法（escape_string 等）—— 调用者显式 cast
-    template<typename T>
-    T* as() const { return dynamic_cast<T*>(connection_.get()); }
-
 private:
     friend class DBPool;
 

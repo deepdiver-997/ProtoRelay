@@ -164,16 +164,16 @@ void PersistentQueue::delete_task(mail* mail_data) {
     }
 
     try {
-        auto mysql = conn.template as<MySQLConnection>();
+        auto* conn_ptr = conn.operator->();
         // 第一步：删除邮件收发件人关系记录
         std::string recipient_sql = db::sql::build_delete_recipients_by_mail(mail_data->id);
-        if (!mysql->execute(recipient_sql)) {
+        if (!conn_ptr->execute(recipient_sql)) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail recipients for mail ID {}", mail_data->id);
         }
 
         // 第二步：删除邮件元数据（会级联删除附件）
         std::string mail_sql = db::sql::build_delete_mail_by_id(mail_data->id);
-        if (!mysql->execute(mail_sql)) {
+        if (!conn_ptr->execute(mail_sql)) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail metadata for mail ID {}", mail_data->id);
         } else {
             LOG_PERSISTENT_QUEUE_INFO("Successfully deleted mail ID {}", mail_data->id);
@@ -209,16 +209,16 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
         }
 
         if (!id_list.empty()) {
-            auto mysql = conn.template as<MySQLConnection>();
+            auto* conn_ptr = conn.operator->();
             // 第一步：删除邮件收发件人关系记录
             std::string recipient_sql = db::sql::build_delete_mail_recipients_by_id_list(id_list);
-            if (!mysql->execute(recipient_sql)) {
+            if (!conn_ptr->execute(recipient_sql)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to batch delete mail recipients");
             }
 
             // 第二步：删除邮件元数据（会级联删除附件）
             std::string mail_sql = db::sql::build_delete_mails_by_id_list(id_list);
-            if (!mysql->execute(mail_sql)) {
+            if (!conn_ptr->execute(mail_sql)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to batch delete mail metadata");
             } else {
                 LOG_PERSISTENT_QUEUE_INFO("Successfully batch deleted {} mail records", mail_list.size());
@@ -384,7 +384,7 @@ bool PersistentQueue::process_task() {
     return true;
 }
 
-bool PersistentQueue::batch_insert_metadata(mail* mail_data, MySQLConnection* conn, std::string& error) {
+bool PersistentQueue::batch_insert_metadata(mail* mail_data, IDBConnection* conn, std::string& error) {
     if (!mail_data) {
         error = "Mail data is null";
         return false;
@@ -448,7 +448,7 @@ bool PersistentQueue::batch_insert_metadata(mail* mail_data, MySQLConnection* co
 }
 
 #if ENABLE_INBOUND_DEDUP_CHECK
-bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, MySQLConnection* conn) {
+bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, IDBConnection* conn) {
     if (!mail_data || !conn || !conn->is_connected() || mail_data->to.empty()) {
         return false;
     }
@@ -523,7 +523,7 @@ bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, MySQLConnectio
 }
 #endif
 
-bool PersistentQueue::is_duplicate_by_source_message_id(mail* mail_data, MySQLConnection* conn) {
+bool PersistentQueue::is_duplicate_by_source_message_id(mail* mail_data, IDBConnection* conn) {
     if (!mail_data || !conn || !conn->is_connected() || mail_data->source_message_id.empty() || mail_data->to.empty()) {
         return false;
     }
@@ -540,7 +540,7 @@ bool PersistentQueue::is_duplicate_by_source_message_id(mail* mail_data, MySQLCo
     return true;
 }
 
-bool PersistentQueue::batch_insert_attachments(mail* mail_data, MySQLConnection* conn, std::string& error) {
+bool PersistentQueue::batch_insert_attachments(mail* mail_data, IDBConnection* conn, std::string& error) {
     if (!mail_data || mail_data->attachments.empty()) {
         return true;
     }
@@ -579,7 +579,7 @@ void PersistentQueue::worker_loop() {
 }
 
 bool PersistentQueue::enqueue_outbox_tasks(mail* mail_data,
-                                           MySQLConnection* conn,
+                                           IDBConnection* conn,
                                            const std::string& reserve_owner,
                                            int reserve_lease_seconds,
                                            std::vector<outbound::OutboxRecord>* reserved_records,
@@ -666,9 +666,9 @@ bool PersistentQueue::persist_mail_transactional(mail* mail_data,
                                    mail_data->id);
         return false;
     }
-    auto conn = scoped.template as<MySQLConnection>();
+    auto* conn_ptr = scoped.operator->();
 
-    if (is_duplicate_by_source_message_id(mail_data, conn)) {
+    if (is_duplicate_by_source_message_id(mail_data, conn_ptr)) {
         mail_data->deduplicated_inbound = true;
         LOG_PERSISTENT_QUEUE_INFO("Message-ID dedup hit, skip all persistence for mail_id={}, message_id=[{}]",
                                   mail_data->id,
@@ -676,33 +676,33 @@ bool PersistentQueue::persist_mail_transactional(mail* mail_data,
         return true;
     }
 
-    if (!conn->begin_transaction()) {
+    if (!conn_ptr->begin_transaction()) {
         error = "Failed to begin transaction";
         return false;
     }
 
     const auto rollback = [&]() {
-        if (!conn->rollback()) {
+        if (!conn_ptr->rollback()) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to rollback transaction for mail_id={}", mail_data->id);
         }
     };
 
-    if (!batch_insert_metadata(mail_data, conn, error)) {
+    if (!batch_insert_metadata(mail_data, conn_ptr, error)) {
         rollback();
         return false;
     }
 
-    if (!batch_insert_attachments(mail_data, conn, error)) {
+    if (!batch_insert_attachments(mail_data, conn_ptr, error)) {
         rollback();
         return false;
     }
 
-    if (!enqueue_outbox_tasks(mail_data, conn, reserve_owner, reserve_lease_seconds, reserved_records, error)) {
+    if (!enqueue_outbox_tasks(mail_data, conn_ptr, reserve_owner, reserve_lease_seconds, reserved_records, error)) {
         rollback();
         return false;
     }
 
-    if (!conn->commit()) {
+    if (!conn_ptr->commit()) {
         error = "Failed to commit transaction";
         rollback();
         return false;
@@ -745,16 +745,16 @@ bool PersistentQueue::persist_to_recipient_shard(mail* mail_data,
                                    recipient_shard, mail_data->id);
         return false;
     }
-    auto conn = scoped.template as<MySQLConnection>();
+    auto* conn_ptr = scoped.operator->();
 
-    if (!conn->begin_transaction()) {
+    if (!conn_ptr->begin_transaction()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to begin transaction on recipient shard {}, mail_id={}",
                                    recipient_shard, mail_data->id);
         return false;
     }
 
     const auto rollback = [&]() {
-        if (!conn->rollback()) {
+        if (!conn_ptr->rollback()) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to rollback on recipient shard {}, mail_id={}",
                                       recipient_shard, mail_data->id);
         }
@@ -765,10 +765,10 @@ bool PersistentQueue::persist_to_recipient_shard(mail* mail_data,
                                                        mail_data->subject,
                                                        mail_data->body_path,
                                                        mail_data->send_time,
-                                                       conn);
-    if (!conn->execute(mail_sql)) {
+                                                       conn_ptr);
+    if (!conn_ptr->execute(mail_sql)) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to insert mails on recipient shard {}, mail_id={}: {}",
-                                   recipient_shard, mail_data->id, conn->get_last_error());
+                                   recipient_shard, mail_data->id, conn_ptr->get_last_error());
         rollback();
         return false;
     }
@@ -777,29 +777,29 @@ bool PersistentQueue::persist_to_recipient_shard(mail* mail_data,
     const int local_status = 1;  // 本域收件人
     std::string recipient_sql = db::sql::build_insert_recipient_single(
         mail_data->id, recipient_id, mail_data->from, recipient,
-        local_status, mail_data->source_message_id, conn);
+        local_status, mail_data->source_message_id, conn_ptr);
 
-    if (!conn->execute(recipient_sql)) {
+    if (!conn_ptr->execute(recipient_sql)) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to insert mail_recipients on recipient shard {}, mail_id={}: {}",
-                                   recipient_shard, mail_data->id, conn->get_last_error());
+                                   recipient_shard, mail_data->id, conn_ptr->get_last_error());
         rollback();
         return false;
     }
 
     // 3. 插入 mail_mailbox（关联到收件人收件箱）
     std::string mailbox_sql = db::sql::build_insert_mailbox_for_recipient(
-        mail_data->id, recipient, conn);
+        mail_data->id, recipient, conn_ptr);
 
-    if (!conn->execute(mailbox_sql)) {
+    if (!conn_ptr->execute(mailbox_sql)) {
         LOG_PERSISTENT_QUEUE_WARN("Failed to insert mail_mailbox on recipient shard {} for mail_id={} recipient={}: {}",
-                                  recipient_shard, mail_data->id, recipient, conn->get_last_error());
+                                  recipient_shard, mail_data->id, recipient, conn_ptr->get_last_error());
         rollback();
         return false;
     }
 
-    if (!conn->commit()) {
+    if (!conn_ptr->commit()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to commit on recipient shard {}, mail_id={}: {}",
-                                   recipient_shard, mail_data->id, conn->get_last_error());
+                                   recipient_shard, mail_data->id, conn_ptr->get_last_error());
         rollback();
         return false;
     }
@@ -858,25 +858,25 @@ void PersistentQueue::cleanup_failed_mail(mail* mail_data) {
     }
 
     try {
-        auto conn = scoped.template as<MySQLConnection>();
+        auto* conn_ptr = scoped.operator->();
 
         // 删除附件元数据
         if (!mail_data->attachments.empty()) {
             std::string att_sql = db::sql::build_delete_attachments_by_mail(mail_data->id);
-            if (!conn->execute(att_sql)) {
+            if (!conn_ptr->execute(att_sql)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to delete attachment metadata for failed mail ID {}", mail_data->id);
             }
         }
 
         // 删除邮件收发件人关系记录
         std::string recipient_sql = db::sql::build_delete_recipients_by_mail(mail_data->id);
-        if (!conn->execute(recipient_sql)) {
+        if (!conn_ptr->execute(recipient_sql)) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail recipients for failed mail ID {}", mail_data->id);
         }
 
         // 删除邮件元数据
         std::string mail_sql = db::sql::build_delete_mail_by_id(mail_data->id);
-        if (!conn->execute(mail_sql)) {
+        if (!conn_ptr->execute(mail_sql)) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail metadata for failed mail ID {}", mail_data->id);
         }
     } catch (const std::exception& e) {

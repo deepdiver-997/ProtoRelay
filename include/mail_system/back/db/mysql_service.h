@@ -54,6 +54,7 @@ public:
     // IDBConnection接口实现
     bool connect() override;
     void disconnect() override;
+    Dialect dialect() const override { return Dialect::MySQL; }
     bool is_connected() const override;
     std::shared_ptr<IDBResult> query(const std::string& sql) override;
     std::shared_ptr<IDBResult> query(const std::string& sql, const std::vector<std::string>& params) override;

@@ -330,7 +330,7 @@ public:
                 return false;
             }
 
-            auto mysql_connection = conn.template as<MySQLConnection>();
+            auto* conn_ptr = conn.operator->();
 
             bool success = true;
 
@@ -338,31 +338,31 @@ public:
             std::string body_path = file_path_prefix;
             std::string mail_sql = db::sql::build_insert_mail_with_status(
                 mail_data.id, mail_data.subject, body_path,
-                mail_data.status, mysql_connection);
+                mail_data.status, conn_ptr);
             LOG_DATABASE_DEBUG("Executing SQL: {}", mail_sql);
-            if (!mysql_connection->execute(mail_sql)) {
-                LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", mysql_connection->get_last_error());
+            if (!conn_ptr->execute(mail_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", conn_ptr->get_last_error());
                 return false;
             }
 
             // 第二步：插入邮件收发件人关系到 mail_recipients 表
             std::string recipient_sql = db::sql::build_insert_recipients_simple(
-                mail_data, mysql_connection);
+                mail_data, conn_ptr);
             LOG_DATABASE_DEBUG("Executing SQL: {}", recipient_sql);
-            if (!recipient_sql.empty() && !mysql_connection->execute(recipient_sql)) {
-                LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", mysql_connection->get_last_error());
+            if (!recipient_sql.empty() && !conn_ptr->execute(recipient_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", conn_ptr->get_last_error());
                 // 如果插入收件人失败，删除已插入的邮件元数据
-                mysql_connection->execute(db::sql::build_delete_mail_by_id(mail_data.id));
+                conn_ptr->execute(db::sql::build_delete_mail_by_id(mail_data.id));
                 return false;
             }
 
             // 第三步：插入附件元数据
             if (!mail_data.attachments.empty()) {
                 std::string att_sql = db::sql::build_insert_attachments(
-                    mail_data.id, mail_data.attachments, mysql_connection);
+                    mail_data.id, mail_data.attachments, conn_ptr);
                 LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
-                if (!mysql_connection->execute(att_sql)) {
-                    LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
+                if (!conn_ptr->execute(att_sql)) {
+                    LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
                     success = false;
                 }
             }
@@ -389,17 +389,17 @@ public:
                 return false;
             }
 
-            auto mysql_connection = conn.template as<MySQLConnection>();
-            if (!mysql_connection) {
+            auto* conn_ptr = conn.operator->();
+            if (!conn_ptr) {
                 LOG_DATABASE_ERROR("Failed to cast to MySQLConnection");
                 return false;
             }
 
             std::string att_sql = db::sql::build_insert_attachment_single(
-                mail_id, att, mysql_connection);
+                mail_id, att, conn_ptr);
             LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
-            if (!mysql_connection->execute(att_sql)) {
-                LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", mysql_connection->get_last_error());
+            if (!conn_ptr->execute(att_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
                 return false;
             }
             return true;

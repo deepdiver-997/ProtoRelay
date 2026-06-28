@@ -30,8 +30,13 @@ public:
 // 数据库连接接口
 class IDBConnection {
 public:
+    enum class Dialect { MySQL, Null };  // 扩展时追加 e.g. PostgreSQL
+
     virtual ~IDBConnection() = default;
-    
+
+    // 方言标识，用于 SQL 构建层按数据库类型生成不同语句
+    virtual Dialect dialect() const = 0;
+
     // 连接到数据库
     virtual bool connect() = 0;
     // 断开连接
