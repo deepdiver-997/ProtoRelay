@@ -1300,7 +1300,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     const bool ack_after_enqueue =
         std::atomic_load(&session->get_server()->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
     if (ack_after_enqueue) {
-        session->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
+        session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
         smtp_session->reset_mail_state();
         session->get_server()->increment_mails_accepted();
         SessionBase<ConnectionType>::do_async_write(std::move(session), "250 OK\r\n", [] (
@@ -1354,7 +1354,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             auto status = smtp_session->get_pending_mail_persist_status();
             if (status == persist_storage::PersistStatus::SUCCESS) {
                 // 成功则回复 250 OK 并继续
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_QUIT));
+                s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                 smtp_session->reset_mail_state();
                 s->get_server()->increment_mails_accepted();
                 SessionBase<ConnectionType>::do_async_write(std::move(s), "250 OK\r\n", [] (

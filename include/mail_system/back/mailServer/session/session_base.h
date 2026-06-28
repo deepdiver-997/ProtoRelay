@@ -214,6 +214,7 @@ protected:
     std::vector<char> use_buffer_;
     // 命令解析缓冲区（SMTP/IMAP 行协议共用）
     std::string command_read_buffer_;
+    std::string pending_write_buf_;
 
     // 客户端地址缓存
     mutable std::string client_address_;
@@ -313,52 +314,32 @@ public:
         );
     }
 
-    // 静态异步写入（回调为空时自动继续读取）
+    // 静态异步写入 — batch + 去 make_copyable
     static void do_async_write(
         std::unique_ptr<SessionBase<ConnectionType>> self,
         const std::string& data,
-        WriteCallback callback = nullptr
-    ) {
-        if (self->closed_ || !self->connection_) {
+        WriteCallback callback = nullptr)
+    {
+        if (self->closed_ || !self->connection_) return;
+        if (self->has_buffered_input() && !callback) {
+            self->pending_write_buf_ += data;
+            do_async_read(std::move(self), nullptr);
             return;
         }
-
         auto* conn = self->connection_.get();
-
-        // Keep payload alive until async completion to avoid dangling buffer.
-        auto payload = std::make_shared<std::string>(data);
-        auto write_buffer = boost::asio::buffer(*payload);
-
-        auto delay = self->compute_reply_delay();
-
-        conn->async_write_with_delay(
-            write_buffer,
-            delay,
-            make_copyable([self = std::move(self), cb = std::move(callback), payload](
-                const boost::system::error_code& error,
-                std::size_t
-            ) mutable {
-                if (self->closed_) {
-                    return;
-                }
-
-                if (error) {
-                    LOG_SESSION_ERROR("Error writing data: {}", error.message());
-                    self->handle_error(error);
-                } else {
-                    if (cb) {
-                        // 直接在IO线程中执行回调
-                        cb(std::move(self), error);
-                    } else if (self->has_buffered_input()) {
-                        self->handle_read("");
-                        self->process_read(std::move(self));
-                    } else {
-                        // 回调为空，自动继续读取
-                        do_async_read(std::move(self), nullptr);
-                    }
-                }
-            })
-        );
+        auto payload = std::make_shared<std::string>(
+            std::move(self->pending_write_buf_) + data);
+        auto sc = std::make_shared<decltype(self)>(std::move(self));
+        conn->async_write_with_delay(boost::asio::buffer(*payload),
+            (*sc)->compute_reply_delay(),
+            [sc, payload, cb = std::move(callback)]
+            (const boost::system::error_code& ec, std::size_t) mutable {
+                auto self = std::move(*sc);
+                if (self->closed_) return;
+                if (ec) { self->handle_error(ec); return; }
+                if (cb) cb(std::move(self), ec);
+                else   do_async_read(std::move(self), nullptr);
+            });
     }
 
     // 纯虚函数，由派生类实现
