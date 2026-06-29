@@ -143,16 +143,16 @@ Identity knobs:
 Runtime selectable via `storage_provider`:
 
 - `local`: standard local directories.
+- `null`: no-op, discards all writes. Used for ceiling benchmarks.
+- `s3`: S3/MinIO object storage via HTTP PUT/GET/DELETE + AWS Signature V4 (libcurl).
 - `distributed`: multiple configured roots with replica count.
-- `hdfs_web`: WebHDFS-backed provider.
+- `hdfs_web`: WebHDFS-backed provider (libcurl).
 
-WebHDFS is also build-time gated:
+Build-time gating:
 
-- CMake option: `ENABLE_HDFS_WEB_STORAGE`
-- ON: compile/link WebHDFS provider and libcurl.
-- OFF: selecting `hdfs_web` at runtime fails fast with a clear error.
-
-This prevents unnecessary dependency coupling for deployments that do not need HDFS.
+- CMake option: `ENABLE_HDFS_WEB_STORAGE` / `ENABLE_S3_STORAGE`
+- ON: compile/link the provider and libcurl.
+- OFF: selecting `hdfs_web` / `s3` at runtime fails fast.
 
 ## 4.4 Database Access
 
@@ -289,13 +289,12 @@ Failure policy:
 - Invalid critical config causes immediate startup failure.
 - Feature mismatch (for example, `hdfs_web` with build-time OFF) fails early and explicitly.
 
-Local benchmark note (2026-06-28, see `test/bench-report.md` for full details):
+Local benchmark note (see `test/bench-report.md` for full matrix):
 
-- C++ `smtp_client` pipe+reuse reaches **12502 msg/s** (50000 msgs, 32 threads, 0 failures) on M3 Pro macOS
-- Sequential reuse (traditional MTA relay): **11147 msg/s** @ 16 threads
-- Per-conn modes are bottlenecked by localhost ephemeral port pool (~16384 ports, TIME_WAIT=30s on macOS)
-- Python `cl.py` numbers (~1.9k-3.0k msg/s) are outdated — Python smtplib/GIL overhead masked true server capacity
-- These numbers describe single-machine throughput under the current test workload, not an end-to-end production SLA or a universal concurrency guarantee.
+- C++ `smtp_client` null storage + null DB: **72303 msg/s** — **纯 FSM 上限**（零磁盘/DB 开销）
+- Real disk (local) + MySQL: **12502 msg/s** — FSM + 磁盘写 + DB 事务
+- Python `cl.py` numbers (~1.9k-3.0k msg/s) are outdated — Python smtplib/GIL overhead
+- These describe single-machine throughput, not a production SLA.
 
 ## 7. Build-Time Feature Model
 
@@ -356,9 +355,9 @@ Expected extension directions:
 
 ## 11. Related Docs
 
-- `README.md`
-- `README_zh.md`
+- `README.md` / `README_zh.md`
+- `test/bench-report.md`
 - `docs/sharding-refactor.md`
 - `docs/smtp-outbound-client-design.md`
-- `docs/service-deployment.md`
-- `docs/domain-deployment-guide.md`
+- `docs/vs-postfix.md`
+- `BUILD_GUIDE.md`

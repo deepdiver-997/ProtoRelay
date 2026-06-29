@@ -104,7 +104,7 @@ Postfix 配置分散在多个软件的目录中，不同文件之间彼此耦合
 |---|---|---|
 | 默认存储 | Maildir | LocalFileProvider |
 | 分布式存储 | Dovecot object storage plugin | DistributedFileProvider (多节点 + 副本) |
-| 对象存储 | Dovecot S3 plugin | HdfsWebProvider (WebHDFS) |
+| 对象存储 | Dovecot S3 plugin | S3StorageProvider (MinIO/S3) / HdfsWebProvider (WebHDFS) |
 | 存储与用户分片联动 | Dovecot Director 独立配置 | ✅ 存储与 DB 同 shard，Router 统一管理 |
 
 ---

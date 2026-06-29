@@ -149,5 +149,4 @@ tail -f logs/mail_system.log | grep DB_QUERY
 
 详细文档请参考：
 - `docs/logging-guide.md` - 完整的日志系统说明
-- `docs/logging-completion.md` - 日志集成完成总结
 - `docs/prepared-statement-connection-pool-issue.md` - 数据库连接池问题分析

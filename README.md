@@ -16,8 +16,8 @@ This is a deliberate narrow scope: the project is building a robust relay core b
 
 ProtoRelay is structured around replaceable modules instead of monolithic logic:
 
-- Database pool abstraction (`mysql`, `mysql_distributed`)
-- Storage provider abstraction (`local`, `distributed`, `hdfs_web`)
+- Database pool abstraction (`mysql`, `null` for benchmarks)
+- Storage provider abstraction (`local`, `null`, `s3`/MinIO, `distributed`, `hdfs_web`)
 - Outbound delivery and DNS routing modules
 - Config-driven wiring in server bootstrap
 
@@ -35,9 +35,9 @@ ProtoRelay now follows a stable CLI contract similar to mature tools:
 Example:
 
 ```bash
-./test/smtpsServer --help
-./test/smtpsServer --version
-./test/smtpsServer --config config/smtpsConfig.json
+./build/smtpsServer --help
+./build/smtpsServer --version
+./build/smtpsServer -c config/smtpsConfig.json
 ```
 
 ## Inbound ACK and Persistence Tuning
@@ -70,16 +70,16 @@ Operational note:
 
 - `after_enqueue` improves throughput and tail latency, but `250 OK` no longer guarantees durable persistence.
 - `after_persist` is safer for durability, but throughput is bounded by persistence completion latency.
-- **Full benchmark matrix (C++ `smtp_client`)**: see `test/bench-report.md` for latest results
-  - pipe+reuse (max throughput): **12502 msg/s** @ 32 threads, 50000 msgs, 0 failures
+- **Full benchmark matrix (C++ `smtp_client`)**: see `test/bench-report.md`
+  - pipe+reuse (null storage + null DB): **72303 msg/s** @ 32 threads — **纯 FSM 上限**
+  - pipe+reuse (real disk + MySQL): **12502 msg/s** @ 32 threads
   - seq+reuse (traditional MTA): **11147 msg/s** @ 16 threads
-  - pipe+per-conn: **5657 msg/s** @ 4 threads
-  - seq+per-conn: **6359 msg/s** @ 8 threads
-  - port 587 TLS+AUTH: ~349 msg/s (TLS handshake dominates, see bench-report)
-  - localhost per-conn limited by ephemeral port pool (~16384); see bench-report for details
-- M3 Pro (12-core) macOS single-machine figures, not a production SLA
-- Use `perf_mode: true` and `log_level: warn` for benchmark runs
-- C++ `smtp_client` is the primary bench tool; Python `cl.py` retained for TLS/AUTH smoke tests
+  - port 587 TLS+AUTH: ~349 msg/s (TLS dominates)
+  - localhost per-conn limited by ephemeral port pool (~16384); see bench-report
+- M2 Pro (12-core) macOS single-machine figures, not a production SLA
+- **72303 msg/s 不含任何磁盘/数据库开销**（null storage + null DB），仅 FSM + TCP loopback
+- Use `"storage_provider": "null"` + `"use_database": false` for ceiling benchmarks
+- C++ `smtp_client` is the primary bench tool; Python `cl.py` for TLS/AUTH smoke tests
 
 ### Performance Tuning Notes
 

@@ -198,6 +198,79 @@ ok=50000/50000  elapsed=12.12s  rate=4127 msg/s
 
 ---
 
+## 2026-06-29 — null storage + null DB 天花板测试
+
+### 测试条件
+
+```
+storage_provider: "null"     — 零磁盘 I/O
+use_database: false           — NullDBPool, 零 DB 开销
+inbound_ack_mode: after_enqueue
+regex: 手动字符串解析 (find '<' / find '>')
+```
+
+### 结果
+
+| 配置 | pipe+reuse 峰值 | vs 基准 |
+|------|----------------|---------|
+| 磁盘写 + MySQL + regex | 12,502 msg/s | 1x |
+| + null storage | 49,295 msg/s | 3.9x |
+| + null DB + manual parse | **72,303 msg/s** | **5.8x** |
+
+**72303 msg/s 是 FSM + TCP loopback 的纯上限**——不含任何磁盘/数据库开销。
+
+### Sample 热点 (null storage + null DB)
+
+| 排名 | 函数 | 采样数 | 含义 |
+|------|------|--------|------|
+| 1 | `__psynch_cvwait` | 57877 | 线程空闲等待 |
+| 2 | `kevent` | 16483 | io_context kqueue 轮询 |
+| 3 | `__semwait_signal` | 8412 | sleep 等待 |
+| 4 | `__sendto` | 191 | 内核发送 |
+| 5 | `__recvfrom` | 185 | 内核接收 |
+
+应用层热点已全部消除——regex 命中 **0 次**，`shared_ptr` 引用计数操作各 <10 次。
+
+### 吞吐估算模型
+
+每封邮件总开销 = CPU 开销 + I/O 开销（异步流水线下两者可重叠，瓶颈取较慢者）：
+
+```
+T_per_msg = max(T_cpu, T_io)
+
+T_cpu  = 1 / 72303         = 13.8 μs   (FSM + TCP loopback)
+T_disk = local_ssd_fsync   = ~200 μs    (append_binary 单次刷盘)
+T_db   = mysql_insert_txn  = ~1000 μs   (BEGIN + INSERT×3 + COMMIT)
+
+估算吞吐:
+  仅有 CPU (null storage + null DB):  72,303 msg/s
+  + 本地 SSD 写 (async pipeline):     min(72k, 1/200μs)  ≈ 5,000 msg/s
+  + SSD + MySQL (async pipeline):     min(72k, 1/1000μs) ≈ 1,000 msg/s
+```
+
+**实测验证**：真实磁盘 + MySQL 测得 12,502 msg/s，比估算的 ~1,000 高一个数量级。原因是 4 个 worker 线程并行处理持久化（Amdahl 定律），且 `after_enqueue` 模式下 ACK 不等待持久化完成。实际落盘吞吐受 `persist_max_inflight_mails` 和 worker 线程数共同决定。
+
+**公式修正（含并行度）**：
+
+```
+T_eff = T_cpu + T_io / N_workers
+N_workers = 4 时:  T_eff = 13.8 + 1000/4 = 263.8 μs
+估算吞吐:  1 / 263.8μs ≈ 3,790 msg/s
+```
+
+实测 12,502 仍高于此估算，说明 inflight 流水线深度（默认 1000000）允许大量邮件在 worker 线程池排队，实际瓶颈更接近 `min(CPU, IO/N)` 而非简单的 Amdahl。
+
+---
+
+## 2026-06-29 — IDBConnection::dialect() 重构
+
+- `as<T>()` dynamic_cast 删除 —— persistent_queue / outbox_repository / smtps_fsm 零调用
+- `IDBConnection::Dialect` 枚举 (`MySQL`, `Null`, 扩展 `PostgreSQL`)
+- persistent_queue 签名 `MySQLConnection*` → `IDBConnection*`
+- NullDBPool / NullDBConnection 实现完整虚接口
+
+---
+
 ## 关于 fileprovider 进程 CPU 占用
 
 你在测试期间看到的高 CPU "fileprovider" 进程是 macOS 系统的 **`fileproviderd`** (File Provider daemon), 不是本项目代码。
