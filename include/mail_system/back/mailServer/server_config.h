@@ -197,6 +197,15 @@ struct ServerConfig {
     uint32_t hdfs_timeout_ms;
     size_t hdfs_replication;
 
+    // S3 / MinIO
+    std::string s3_endpoint;
+    std::string s3_bucket;
+    std::string s3_access_key;
+    std::string s3_secret_key;
+    std::string s3_region;
+    uint32_t s3_timeout_ms;
+    bool s3_use_path_style;
+
     std::string system_name;
     std::string system_domain;
     std::vector<uint16_t> outbound_ports;
@@ -273,6 +282,13 @@ struct ServerConfig {
         , hdfs_user("hdfs")
         , hdfs_timeout_ms(5000)
         , hdfs_replication(1)
+        , s3_endpoint("http://127.0.0.1:9000")
+        , s3_bucket("protorelay")
+        , s3_access_key("minioadmin")
+        , s3_secret_key("minioadmin")
+        , s3_region("us-east-1")
+        , s3_timeout_ms(5000)
+        , s3_use_path_style(true)
         , system_name("mail-system")
         , system_domain("example.com")
         , outbound_ports({25, 587, 465})
@@ -488,6 +504,14 @@ struct ServerConfig {
         hdfs_user       = j.value("hdfs_user", hdfs_user);
         hdfs_timeout_ms = j.value("hdfs_timeout_ms", hdfs_timeout_ms);
         hdfs_replication= j.value("hdfs_replication", hdfs_replication);
+
+        s3_endpoint       = j.value("s3_endpoint", s3_endpoint);
+        s3_bucket         = j.value("s3_bucket", s3_bucket);
+        s3_access_key     = j.value("s3_access_key", s3_access_key);
+        s3_secret_key     = j.value("s3_secret_key", s3_secret_key);
+        s3_region         = j.value("s3_region", s3_region);
+        s3_timeout_ms     = j.value("s3_timeout_ms", s3_timeout_ms);
+        s3_use_path_style = j.value("s3_use_path_style", s3_use_path_style);
 
         // 性能测试模式：加载完成后，自动覆写瓶颈参数，实现"一键无限制"
         if (perf_mode) {

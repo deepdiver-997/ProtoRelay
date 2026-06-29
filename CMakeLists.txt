@@ -21,6 +21,7 @@ option(ENABLE_DEBUG_LOGS "Enable debug logs for all modules" OFF)
 option(BUILD_OBJECT_ONLY "Compile object files only and skip final executable link" OFF)
 option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check before DB insert" ON)
 option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage provider (requires libcurl)" ON)
+option(ENABLE_S3_STORAGE "Enable S3/MinIO storage provider (requires libcurl, OpenSSL)" ON)
 
 if(USE_SSL)
     set(PROTORELAY_FEATURE_SSL 1)
@@ -344,6 +345,11 @@ set(COMMON_SRCS
 if(ENABLE_HDFS_WEB_STORAGE)
     list(APPEND COMMON_SRCS
         src/mail_system/back/storage/hdfs_web_storage_provider.cpp
+    )
+endif()
+if(ENABLE_S3_STORAGE)
+    list(APPEND COMMON_SRCS
+        src/mail_system/back/storage/s3_storage_provider.cpp
     )
 endif()
 
