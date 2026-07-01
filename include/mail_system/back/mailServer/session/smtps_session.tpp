@@ -801,19 +801,40 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
         bool data_end_seen = (trimmed == ".") || (data.find("\r\n.\r\n") != std::string::npos);
         std::string write_chunk = data;
         if (data_end_seen) {
-            // 去掉终止符“\r\n.\r\n”部分避免写入
+            // 去掉终止符"\r\n.\r\n"部分避免写入
             size_t pos = write_chunk.find("\r\n.\r\n");
             if (pos != std::string::npos) {
+                // 终止符之后的剩余数据（如下一条命令）推回缓冲区
+                std::string remaining = write_chunk.substr(pos + 5);
                 write_chunk = write_chunk.substr(0, pos);
+                if (!remaining.empty())
+                    this->command_read_buffer_.append(remaining);
             } else if (trimmed == "." || trimmed == ".\r\n") {
                 write_chunk.clear();
             }
         }
 
         if (!write_chunk.empty()) {
-            // 对非流式正文去掉前导点（SMTP dot-stuffing）
-            if (!context_.streaming_enabled && !write_chunk.empty() && write_chunk[0] == '.') {
-                write_chunk.erase(0, 1);
+            // RFC 5321 dot-stuffing: strip one leading dot from each line
+            if (!context_.streaming_enabled) {
+                std::string unstuffed;
+                unstuffed.reserve(write_chunk.size());
+                size_t pos = 0;
+                while (pos < write_chunk.size()) {
+                    size_t nl = write_chunk.find("\r\n", pos);
+                    size_t line_end = (nl != std::string::npos) ? nl : write_chunk.size();
+                    size_t content = pos;
+                    if (content < line_end && write_chunk[content] == '.')
+                        content++;
+                    unstuffed.append(write_chunk, content, line_end - content);
+                    if (nl != std::string::npos) {
+                        unstuffed += "\r\n";
+                        pos = nl + 2;
+                    } else {
+                        break;
+                    }
+                }
+                write_chunk = std::move(unstuffed);
             }
             append_to_buffer(write_chunk.data(), write_chunk.size());
         }

@@ -62,6 +62,17 @@ SmtpExecResult execute_smtp_transaction(
     int code = 0;
     std::string response, error;
 
+    // Strip \r\n from addresses to prevent SMTP command injection
+    auto strip_crlf = [](const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s)
+            if (c != '\r' && c != '\n') out += c;
+        return out;
+    };
+    const std::string safe_sender = strip_crlf(envelope_sender);
+    const std::string safe_recipient = strip_crlf(record.recipient);
+
     SmtpStep step = expect_greeting ? SmtpStep::ReadGreeting : SmtpStep::SendEhlo;
     while (step != SmtpStep::Done) {
         if (should_continue && !should_continue()) {
@@ -105,7 +116,7 @@ SmtpExecResult execute_smtp_transaction(
             break;
 
         case SmtpStep::SendMailFrom:
-            if (!st::send_smtp_line(stream, "MAIL FROM:<" + envelope_sender + ">", should_continue, error))
+            if (!st::send_smtp_line(stream, "MAIL FROM:<" + safe_sender + ">", should_continue, error))
                 { result.error_message = "send MAIL FROM: " + error; return result; }
             if (!st::read_smtp_response(stream, buffer, code, response, should_continue, error))
                 { result.error_message = "read MAIL FROM: " + error; return result; }
@@ -118,7 +129,7 @@ SmtpExecResult execute_smtp_transaction(
             break;
 
         case SmtpStep::SendRcptTo:
-            if (!st::send_smtp_line(stream, "RCPT TO:<" + record.recipient + ">", should_continue, error))
+            if (!st::send_smtp_line(stream, "RCPT TO:<" + safe_recipient + ">", should_continue, error))
                 { result.error_message = "send RCPT TO: " + error; return result; }
             if (!st::read_smtp_response(stream, buffer, code, response, should_continue, error))
                 { result.error_message = "read RCPT TO: " + error; return result; }
