@@ -602,13 +602,14 @@ if(NOT BUILD_OBJECT_ONLY)
     set(BENCH_SRCS
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
-        test/fsm_bench.cpp
+        test/bench/fsm_bench.cpp
     )
     add_executable(fsm_bench ${BENCH_SRCS})
     set_target_properties(fsm_bench PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
     )
     target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     target_include_directories(fsm_bench PRIVATE "${CMAKE_BINARY_DIR}/generated")
     if(spdlog_FOUND)
         target_include_directories(fsm_bench PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
@@ -622,9 +623,34 @@ if(NOT BUILD_OBJECT_ONLY)
     target_link_libraries(fsm_bench PRIVATE ${LINK_LIBRARIES})
 endif()
 
+# ===== Outbound SMTP FSM Unit Test (mock 远端服务器) =====
+if(NOT BUILD_OBJECT_ONLY)
+    set(OUTBOUND_TEST_SRCS
+        ${COMMON_SRCS}
+        test/unit/outbound_smtp_bench.cpp
+    )
+    add_executable(outbound_smtp_test ${OUTBOUND_TEST_SRCS})
+    set_target_properties(outbound_smtp_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    target_include_directories(outbound_smtp_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(outbound_smtp_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
+    target_include_directories(outbound_smtp_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    if(spdlog_FOUND)
+        target_include_directories(outbound_smtp_test PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+    endif()
+    target_include_directories(outbound_smtp_test PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
+    target_include_directories(outbound_smtp_test PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    if(MYSQL_INCLUDE_DIRS)
+        target_include_directories(outbound_smtp_test PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+    endif()
+    target_compile_features(outbound_smtp_test PRIVATE cxx_std_17)
+    target_link_libraries(outbound_smtp_test PRIVATE ${LINK_LIBRARIES})
+endif()
+
 # ===== SMTP benchmark client (raw sockets, no asio) =====
 if(NOT BUILD_OBJECT_ONLY)
-    add_executable(smtp_client test/smtp_client.cpp)
+    add_executable(smtp_client test/bench/smtp_client.cpp)
     set_target_properties(smtp_client PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
     target_compile_features(smtp_client PRIVATE cxx_std_17)
 endif()
