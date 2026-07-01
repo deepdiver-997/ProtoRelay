@@ -236,19 +236,22 @@ TEST(full_delivery_pipeline) {
     std::cout << "  [PASS] full_delivery_pipeline" << std::endl;
 }
 
-TEST(rcpt_to_second_rejected) {
-    // FSM 单收件人模型：第一个 RCPT TO 之后状态变为 WAIT_DATA，后续 RCPT TO 无效
+TEST(multiple_rcpt) {
     auto h = fx.make_session(
         "EHLO test\r\n"
         "MAIL FROM:<sender@test.local>\r\n"
         "RCPT TO:<rcpt1@test.local>\r\n"
         "RCPT TO:<rcpt2@test.local>\r\n"
+        "RCPT TO:<rcpt3@test.local>\r\n"
         "QUIT\r\n");
     fx.start(h);
     auto& w = h.conn->written();
-    assert(HAS(w, "250 Ok"));        // MAIL FROM + 1st RCPT TO OK
-    assert(HAS(w, "500 Error"));     // 2nd RCPT TO rejected
-    std::cout << "  [PASS] rcpt_to_second_rejected" << std::endl;
+    // 每个 RCPT TO 都返回 250 Ok
+    size_t cnt = 0;
+    size_t pos = 0;
+    while ((pos = w.find("250 Ok", pos)) != std::string::npos) { ++cnt; ++pos; }
+    assert(cnt >= 4); // MAIL FROM + 3x RCPT TO
+    std::cout << "  [PASS] multiple_rcpt (250 Ok count=" << cnt << ")" << std::endl;
 }
 
 TEST(quit_221) {
@@ -388,6 +391,30 @@ TEST(auth_plain_two_step) {
     std::cout << "  [PASS] auth_plain_two_step" << std::endl;
 }
 
+// ========== STARTTLS ==========
+
+TEST(starttls) {
+    std::string captured;
+    auto conn_u = std::make_unique<MockConnection>();
+    conn_u->capture_to(&captured);
+    conn_u->set_read_data("EHLO test\r\nSTARTTLS\r\n");
+
+    auto session = std::make_shared<SmtpsSession<MockConnection>>(
+        fx.server.get(), std::move(conn_u),
+        std::shared_ptr<SmtpsFsm<MockConnection>>(fx.fsm));
+
+    ListenerConfig lc;
+    lc.auth_policy = InboundAuthPolicy::OFF;
+    session->set_listener_config(lc);
+    session->set_current_state(static_cast<int>(SmtpsState::INIT));
+    session->set_next_event(static_cast<int>(SmtpsEvent::CONNECT));
+    session->process_read();
+
+    // connection 已被 STARTTLS handler 释放，用 captured 断言
+    assert(HAS(captured, "220 Ready to start TLS"));
+    std::cout << "  [PASS] starttls" << std::endl;
+}
+
 int main() {
     std::cout << "Inbound SMTP FSM Test Suite\n===========================\n";
 
@@ -403,7 +430,7 @@ int main() {
         test_rcpt_to_ok(fx);
         test_data_354(fx);
         test_full_delivery_pipeline(fx);
-        test_rcpt_to_second_rejected(fx);
+        test_multiple_rcpt(fx);
         test_quit_221(fx);
         test_re_ehlo_in_wait_auth(fx);
 
@@ -419,6 +446,9 @@ int main() {
         test_auth_login_wrong_password(fx);
         test_auth_plain_single_step(fx);
         test_auth_plain_two_step(fx);
+
+        // ── STARTTLS ──
+        test_starttls(fx);
 
         std::cout << "\nAll tests passed.\n";
     } catch (const std::exception& e) {

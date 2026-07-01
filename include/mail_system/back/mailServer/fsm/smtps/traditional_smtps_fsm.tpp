@@ -81,7 +81,8 @@ void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
     transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
     transition_table_[std::make_pair(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
     transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
-    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO)] = SmtpsState::WAIT_DATA;
+    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO)] = SmtpsState::WAIT_RCPT_TO;
+    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
     transition_table_[std::make_pair(SmtpsState::WAIT_DATA, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
     transition_table_[std::make_pair(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
     transition_table_[std::make_pair(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END)] = SmtpsState::WAIT_QUIT;
@@ -123,6 +124,8 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
         std::bind(&TraditionalSmtpsFsm::handle_wait_mail_from_mail_from, this, std::placeholders::_1, std::placeholders::_2);
     state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::RCPT_TO] =
         std::bind(&TraditionalSmtpsFsm::handle_wait_rcpt_to_rcpt_to, this, std::placeholders::_1, std::placeholders::_2);
+    state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::DATA] =
+        std::bind(&TraditionalSmtpsFsm::handle_wait_data_data, this, std::placeholders::_1, std::placeholders::_2);
     state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::MAIL_FROM] =
         std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2);
     state_handlers_[SmtpsState::WAIT_DATA][SmtpsEvent::DATA] =
@@ -526,7 +529,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         session->do_async_write("250 Ok\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_DATA));
+                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                 s->do_async_read();
             });
     } else {

@@ -62,7 +62,7 @@ public:
     }
 
     std::string get_client_ip() const {
-        if (client_address_.empty()) {
+        if (client_address_.empty() && connection_) {
             try { client_address_ = connection_->get_remote_ip(); }
             catch (const std::exception& e) { LOG_SESSION_ERROR("Error getting client IP: {}", e.what()); }
         }

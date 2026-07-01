@@ -22,6 +22,9 @@ public:
     void clear_written() { write_buf_.clear(); }
     void set_closed(bool c) { closed_ = c; }
 
+    // 将 async_write 的数据同步捕获到外部 string（用于 STARTTLS 等连接被释放后的断言）
+    void capture_to(std::string* target) { capture_target_ = target; }
+
     // --- IConnection impl ---
     void async_read(boost::asio::mutable_buffer buf, ReadHandler h) override {
         size_t n = std::min(buf.size(), read_buf_.size() - read_pos_);
@@ -42,6 +45,7 @@ public:
 
     void async_write(boost::asio::const_buffer buf, WriteHandler h) override {
         write_buf_.append(static_cast<const char*>(buf.data()), buf.size());
+        if (capture_target_) *capture_target_ = write_buf_;
         h(boost::system::error_code(), buf.size());  // 同步回调
     }
 
@@ -60,6 +64,7 @@ private:
     size_t read_pos_ = 0;
     std::string write_buf_;
     bool closed_ = false;
+    std::string* capture_target_ = nullptr;
 };
 
 } // namespace mail_system
