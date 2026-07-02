@@ -6,6 +6,13 @@
 
 namespace mail_system {
 
+// stoull 安全包装 — 非数字输入返回 0
+inline uint64_t safe_stoull(const std::string& s) {
+    try { return safe_stoull(s); }
+    catch (const std::invalid_argument&) { return 0; }
+    catch (const std::out_of_range&)     { return 0; }
+}
+
 // ====================================================================
 // 工具方法
 // ====================================================================
@@ -719,6 +726,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
         LOG_IMAP_INFO("IMAP login successful: {} (user_id={})", username, user_id);
     } else {
         LOG_IMAP_WARN("IMAP login failed: {}", username);
+        if (session->record_auth_failure_and_check()) {
+            session->close();
+            return;
+        }
         send_tagged(session, tag, "NO", "LOGIN failed");
     }
 }
@@ -757,12 +768,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
     const std::string& args)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
+    std::string current_tag = ctx ? ctx->current_tag : "*";
     ctx->clear();
 
     session->set_current_state(static_cast<int>(ImapState::LOGOUT));
 
     std::string response = "* BYE IMAP4rev1 Server logging out\r\n";
-    response += ctx->current_tag + " OK LOGOUT completed\r\n";
+    response += current_tag + " OK LOGOUT completed\r\n";
 
     session->do_async_write(response,
         [](std::shared_ptr<SessionBase<ConnectionType>> s,
@@ -840,8 +852,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
             // 从 key 反解 user_id / mailbox_id
             size_t colon = key.find(':');
             if (colon == std::string::npos) return;
-            uint64_t uid = std::stoull(key.substr(0, colon));
-            uint64_t mid = std::stoull(key.substr(colon + 1));
+            uint64_t uid = safe_stoull(key.substr(0, colon));
+            uint64_t mid = safe_stoull(key.substr(colon + 1));
             fresh.exists = this->get_mailbox_count(mid, uid);
             fresh.unseen = this->get_mailbox_unseen_count(mid, uid);
             fresh.uidnext = this->get_mailbox_uidnext(mid, uid);
@@ -1131,14 +1143,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         std::string start_str = seq_set.substr(0, colon);
         std::string end_str = seq_set.substr(colon + 1);
         if (start_str == "*") seq_start = 1;
-        else seq_start = std::stoull(start_str);
+        else seq_start = safe_stoull(start_str);
         if (end_str == "*") seq_end = mails.size();
-        else seq_end = std::min((uint64_t)std::stoull(end_str), (uint64_t)mails.size());
+        else seq_end = std::min((uint64_t)safe_stoull(end_str), (uint64_t)mails.size());
     } else if (seq_set == "*") {
         seq_start = 1;
         seq_end = mails.size();
     } else {
-        seq_start = std::stoull(seq_set);
+        seq_start = safe_stoull(seq_set);
         seq_end = seq_start;
     }
 
@@ -1635,7 +1647,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_subscribe(
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
-    // Simplified: always OK
+    LOG_IMAP_INFO("SUBSCRIBE {} — subscription persistence not yet implemented", args);
     send_tagged(session, tag, "OK", "SUBSCRIBE completed");
 }
 
@@ -1647,6 +1659,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_unsubscribe(
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
+    LOG_IMAP_INFO("UNSUBSCRIBE {} — subscription persistence not yet implemented", args);
     send_tagged(session, tag, "OK", "UNSUBSCRIBE completed");
 }
 
@@ -1902,14 +1915,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
         for (const auto& m : mails) mail_ids.push_back(m.mail_id);
     } else if (seq_set.find(':') != std::string::npos) {
         size_t colon = seq_set.find(':');
-        uint64_t start = std::stoull(seq_set.substr(0, colon));
-        uint64_t end_val = std::stoull(seq_set.substr(colon + 1));
+        uint64_t start = safe_stoull(seq_set.substr(0, colon));
+        uint64_t end_val = safe_stoull(seq_set.substr(colon + 1));
         if (end_val > mails.size()) end_val = mails.size();
         for (uint64_t s = start; s <= end_val && s <= mails.size(); ++s) {
             mail_ids.push_back(mails[s - 1].mail_id);
         }
     } else {
-        uint64_t n = std::stoull(seq_set);
+        uint64_t n = safe_stoull(seq_set);
         if (n >= 1 && n <= mails.size())
             mail_ids.push_back(mails[n - 1].mail_id);
     }
@@ -2060,13 +2073,13 @@ bool TraditionalImapsFsm<ConnectionType>::parse_seq_set(
         size_t colon = seq_set.find(':');
         std::string s = seq_set.substr(0, colon);
         std::string e = seq_set.substr(colon + 1);
-        start = (s == "*") ? 1 : std::stoull(s);
-        end = (e == "*") ? total : std::min((uint64_t)std::stoull(e), (uint64_t)total);
+        start = (s == "*") ? 1 : safe_stoull(s);
+        end = (e == "*") ? total : std::min((uint64_t)safe_stoull(e), (uint64_t)total);
     } else if (seq_set == "*") {
         start = 1;
         end = total;
     } else {
-        start = std::stoull(seq_set);
+        start = safe_stoull(seq_set);
         end = start;
     }
     if (start < 1) start = 1;

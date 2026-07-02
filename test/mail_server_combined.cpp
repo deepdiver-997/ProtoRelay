@@ -4,11 +4,11 @@
  * Runs SMTP(S) + IMAP(S) simultaneously, sharing thread pools and database connection pool.
  *
  * Usage:
- *   mail_server_combined -s config/smtpsConfig.json -i config/imapsConfig.json
+ *   mail_server_combined -s config/smtpsConfig.json
  *
  * Flags:
  *   -s, --smtp-config   SMTP 配置文件路径（默认 config/smtpsConfig.json）
- *   -i, --imap-config   IMAP 配置文件路径（默认 config/imapsConfig.json）
+ *   -i, --imap-config   IMAP 配置文件路径（默认同 SMTP 配置）
  *   -h, --help          显示帮助
  *   -V, --version       显示版本
  */
@@ -38,7 +38,7 @@ using namespace mail_system;
 // ====================================================================
 namespace {
 constexpr const char* kDefaultSmtpConfigPath = "config/smtpsConfig.json";
-constexpr const char* kDefaultImapConfigPath = "config/imapsConfig.json";
+constexpr const char* kDefaultImapConfigPath = "config/smtpsConfig.json";
 
 struct CliOptions {
     std::string smtp_config_path = kDefaultSmtpConfigPath;
