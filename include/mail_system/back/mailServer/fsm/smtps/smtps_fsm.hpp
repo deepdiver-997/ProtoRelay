@@ -9,6 +9,7 @@
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include <cstddef>
 #include <functional>
@@ -237,9 +238,7 @@ public:
         return "UNKNOWN_EVENT";
     }
 
-    // 认证缓存：email → {hash, status}，TTL 5min，避免每次 AUTH 查 DB
-    struct AuthCacheEntry { std::string password_hash; int status = 1; };
-    mutable LruCache<std::string, AuthCacheEntry> m_authCache{10000, std::chrono::minutes(5)};
+    std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
 
     bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address,
                    const std::string& password, int& out_shard) {
@@ -251,8 +250,8 @@ public:
         out_shard = shard;
 
         // 查缓存
-        AuthCacheEntry ce; bool stale;
-        if (m_authCache.get(mail_address, ce, stale)) {
+        AuthCacheEntry ce;
+        if (m_authCache->lookup(mail_address, ce)) {
             if (ce.status != 1) return false;
             if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
                 return bcrypt_verify(password, ce.password_hash);
@@ -269,7 +268,7 @@ public:
         int status = std::stoi(result->get_value(0, "status"));
         if (status != 1) { LOG_AUTH_WARN("User account disabled: {}", mail_address); return false; }
         std::string stored = result->get_value(0, "password");
-        m_authCache.put(mail_address, {stored, status});
+        m_authCache->store(mail_address, {stored, status});
         bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
                         ? bcrypt_verify(password, stored)
                         : (stored == password);

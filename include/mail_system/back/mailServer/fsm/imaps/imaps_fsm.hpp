@@ -12,6 +12,7 @@
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
+#include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/algorithm/snow.h"
 #include <cstddef>
@@ -147,6 +148,7 @@ template <typename ConnectionType>
 class ImapsFsm {
 public:
     using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
+    std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
 protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
@@ -259,6 +261,15 @@ public:
         }
         out_shard = shard;
 
+        // 查缓存
+        AuthCacheEntry ce;
+        if (m_authCache->lookup(mail_address, ce)) {
+            if (ce.status != 1) return false;
+            if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
+                return bcrypt_verify(password, ce.password_hash);
+            return ce.password_hash == password;
+        }
+
         auto conn = acquire_connection(shard);
         if (!conn.is_valid()) {
             LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
@@ -279,8 +290,9 @@ public:
         }
 
         std::string stored = result->get_value(0, "password");
-        bool ok = false;
+        m_authCache->store(mail_address, {stored, status});
 
+        bool ok = false;
         if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
             ok = bcrypt_verify(password, stored);
         } else {

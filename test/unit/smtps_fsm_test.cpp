@@ -87,10 +87,10 @@ struct FsmTestFixture {
         // 预注入 auth 缓存 (user0~user4@test.local, 密码 test123)
         for (int i = 0; i < 5; ++i) {
             std::string email = "user" + std::to_string(i) + "@test.local";
-            SmtpsFsm<MockConnection>::AuthCacheEntry entry;
+            AuthCacheEntry entry;
             entry.password_hash = "test123";
             entry.status = 1;
-            fsm->m_authCache.put(email, entry);
+            fsm->m_authCache->inject(email, entry);
         }
     }
 

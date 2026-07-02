@@ -674,6 +674,32 @@ if(NOT BUILD_OBJECT_ONLY)
     target_link_libraries(smtps_fsm_test PRIVATE ${LINK_LIBRARIES})
 endif()
 
+# ===== IMAP FSM unit tests =====
+if(NOT BUILD_OBJECT_ONLY)
+    set(IMAP_FSM_TEST_SRCS
+        ${COMMON_SRCS}
+        src/mail_system/back/mailServer/imaps/imaps_server.cpp
+        test/unit/imaps_fsm_test.cpp
+    )
+    add_executable(imaps_fsm_test ${IMAP_FSM_TEST_SRCS})
+    set_target_properties(imaps_fsm_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
+    )
+    target_include_directories(imaps_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(imaps_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(imaps_fsm_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
+    if(spdlog_FOUND)
+        target_include_directories(imaps_fsm_test PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+    endif()
+    target_include_directories(imaps_fsm_test PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
+    target_include_directories(imaps_fsm_test PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    if(MYSQL_INCLUDE_DIRS)
+        target_include_directories(imaps_fsm_test PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+    endif()
+    target_compile_features(imaps_fsm_test PRIVATE cxx_std_17)
+    target_link_libraries(imaps_fsm_test PRIVATE ${LINK_LIBRARIES})
+endif()
+
 # ===== SMTP benchmark client (raw sockets, no asio) =====
 if(NOT BUILD_OBJECT_ONLY)
     add_executable(smtp_client test/bench/smtp_client.cpp)

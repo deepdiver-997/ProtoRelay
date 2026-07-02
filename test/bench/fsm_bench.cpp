@@ -129,13 +129,12 @@ int main(int argc, char* argv[]) {
         io_pool, worker_pool, persist_q, router);
 
     // 预注入 auth 缓存数据 (模拟已认证用户，避免 DB 查询)
-    // 格式: test1@test.local ~ test10@test.local, 密码均为 "test123"
     for (int i = 0; i < 10; ++i) {
         std::string email = "test" + std::to_string(i) + "@test.local";
-        SmtpsFsm<MockConnection>::AuthCacheEntry entry;
-        entry.password_hash = "test123";  // 明文密码（mock 模式）
+        AuthCacheEntry entry;
+        entry.password_hash = "test123";
         entry.status = 1;
-        fsm->m_authCache.put(email, entry);
+        fsm->m_authCache->inject(email, entry);
     }
 
     std::cout << "=== FSM Mock Benchmark ===\n"
