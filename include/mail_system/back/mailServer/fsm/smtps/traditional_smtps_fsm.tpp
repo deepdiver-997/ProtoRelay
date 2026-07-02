@@ -276,6 +276,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 return;
             }
         }
+        if (session->record_auth_failure_and_check()) { session->close(); return; }
         session->do_async_write("535 Authentication failed\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
@@ -323,6 +324,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                     });
                 return;
             }
+            if (session->record_auth_failure_and_check()) { session->close(); return; }
             session->do_async_write("535 Authentication failed\r\n",
                 [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                     if (ec) return;
@@ -385,6 +387,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                 s->do_async_read();
             });
     } else {
+        if (session->record_auth_failure_and_check()) { session->close(); return; }
         session->do_async_write("535 Authentication failed\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;

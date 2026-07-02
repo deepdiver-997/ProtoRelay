@@ -55,6 +55,16 @@ public:
         c.value += delta;
     }
 
+    // 记录一次观测值 (累计 sum + count，用于计算 rate/avg)
+    void observe(const std::string& name, const LabelMap& labels, double value) {
+        std::unique_lock lock(mutex_);
+        std::string key = make_key(name, labels);
+        auto& h = histograms_[key];
+        if (h.help.empty()) h.help = build_help(name);
+        h.sum   += value;
+        h.count += 1;
+    }
+
     // ── HTTP 服务 ───────────────────────────────────────────────
 
     void start() {
@@ -77,8 +87,9 @@ public:
 private:
     // ── 渲染 ────────────────────────────────────────────────────
 
-    struct GaugeEntry { std::string help; double value = 0; };
-    struct CounterEntry { std::string help; uint64_t value = 0; };
+    struct GaugeEntry    { std::string help; double value = 0; };
+    struct CounterEntry  { std::string help; uint64_t value = 0; };
+    struct HistogramEntry { std::string help; double sum = 0; uint64_t count = 0; };
 
     // key = "name{label=val,...}" — 保证唯一性
     static std::string make_key(const std::string& name, const LabelMap& labels) {
@@ -125,6 +136,19 @@ private:
             out += name;
             if (!labels.empty()) out += labels;
             out += " " + std::to_string(c.value) + "\n";
+        }
+        for (auto& [key, h] : histograms_) {
+            auto [name, labels] = split_key(key);
+            out += "# HELP " + name + "_sum " + h.help + "\n";
+            out += "# TYPE " + name + "_sum gauge\n";
+            out += name + "_sum";
+            if (!labels.empty()) out += labels;
+            out += " " + std::to_string(h.sum) + "\n";
+            out += "# HELP " + name + "_count " + h.help + "\n";
+            out += "# TYPE " + name + "_count gauge\n";
+            out += name + "_count";
+            if (!labels.empty()) out += labels;
+            out += " " + std::to_string(h.count) + "\n";
         }
         return out;
     }
@@ -223,8 +247,9 @@ private:
     std::atomic<bool> running_;
 
     mutable std::shared_mutex mutex_;
-    std::map<std::string, GaugeEntry>   gauges_;
-    std::map<std::string, CounterEntry> counters_;
+    std::map<std::string, GaugeEntry>    gauges_;
+    std::map<std::string, CounterEntry>  counters_;
+    std::map<std::string, HistogramEntry> histograms_;
 };
 
 } // namespace mail_system

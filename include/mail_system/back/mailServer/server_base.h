@@ -174,6 +174,7 @@ public:
     void refresh_metrics();
     void push_metric_gauge(const std::string& name, const MetricsServer::LabelMap& labels, double v);
     void push_metric_counter(const std::string& name, const MetricsServer::LabelMap& labels, uint64_t v);
+    void push_metric_observe(const std::string& name, const MetricsServer::LabelMap& labels, double v);
 
     // (build_metrics_response / build_status_response replaced by MetricsServer storage + refresh_metrics)
     [[deprecated]] std::string build_metrics_response() const {

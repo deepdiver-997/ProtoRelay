@@ -67,6 +67,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
                 static_cast<int>(cfg->outbound_max_attempts)
             );
             m_persistentQueue->set_outbound_client(m_outboundClient);
+            m_outboundClient->inject_metrics(get_metrics());
             m_outboundClient->start();
             LOG_SERVER_INFO("Outbound client created and started for SMTP server");
         }

@@ -359,6 +359,33 @@ TEST(auth_login_wrong_password) {
     std::cout << "  [PASS] auth_login_wrong_password" << std::endl;
 }
 
+TEST(auth_failures_exceed_close) {
+    // 3次密码错误 → 连接被关闭（不发535）
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH LOGIN\r\n"
+        "dXNlcjBAdGVzdC5sb2NhbA==\r\n"     // user0@test.local
+        "d3JvbmdwYXNz\r\n"                   // wrong pass - attempt 1
+        "AUTH LOGIN\r\n"
+        "dXNlcjBAdGVzdC5sb2NhbA==\r\n"
+        "d3JvbmdwYXNz\r\n"                   // attempt 2
+        "AUTH LOGIN\r\n"
+        "dXNlcjBAdGVzdC5sb2NhbA==\r\n"
+        "d3JvbmdwYXNz\r\n",                  // attempt 3 → close
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    auto& w = h.conn->written();
+
+    size_t cnt = 0;
+    size_t pos = 0;
+    while ((pos = w.find("535 Authentication failed", pos)) != std::string::npos)
+        { ++cnt; ++pos; }
+    assert(cnt == 2);
+    assert(!h.conn->is_open()); // 第3次直接关闭连接
+
+    std::cout << "  [PASS] auth_failures_exceed_close (535 count=" << cnt << ")" << std::endl;
+}
+
 TEST(auth_plain_single_step) {
     // AUTH PLAIN with inline token: \0user0@test.local\0test123
     std::string plain;
@@ -444,6 +471,7 @@ int main() {
         test_auth_login_username_prompt(fx);
         test_auth_login_full_flow(fx);
         test_auth_login_wrong_password(fx);
+        test_auth_failures_exceed_close(fx);
         test_auth_plain_single_step(fx);
         test_auth_plain_two_step(fx);
 

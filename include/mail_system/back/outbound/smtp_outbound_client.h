@@ -2,6 +2,8 @@
 #define MAIL_SYSTEM_SMTP_OUTBOUND_CLIENT_H
 
 #include "mail_system/back/outbound/dns_resolver.h"
+
+namespace mail_system { class MetricsServer; }
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
@@ -91,6 +93,8 @@ public:
     int local_reservation_lease_seconds() const;
     std::shared_ptr<IDnsResolver> get_dns_resolver() const { return dns_resolver_; }
 
+    void inject_metrics(std::weak_ptr<MetricsServer> m) { metrics_ = std::move(m); }
+
 private:
     void run_loop();
     void drain_notifications();
@@ -112,6 +116,7 @@ private:
     OutboundIdentityConfig identity_config_;
     OutboundPollingConfig polling_config_;
     OutboxRepository repository_;
+    std::weak_ptr<MetricsServer> metrics_;
     std::string local_domain_;
     std::vector<std::uint16_t> outbound_ports_;
     int max_delivery_attempts_{8};

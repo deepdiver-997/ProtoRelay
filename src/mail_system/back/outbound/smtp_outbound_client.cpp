@@ -1,5 +1,6 @@
 #include "mail_system/back/outbound/smtp_outbound_client.h"
 
+#include "mail_system/back/mailServer/metrics_server.h"
 #include "mail_system/back/outbound/cares_dns_resolver.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/outbound/mx_routing_utils.h"
@@ -528,6 +529,18 @@ void SmtpOutboundClient::drain_completion_queue() {
     while (!local_queue.empty()) {
         auto completion = std::move(local_queue.front());
         local_queue.pop();
+
+        // 指标: 投递结果计数
+        if (auto m = metrics_.lock()) {
+            MetricsServer::LabelMap lbls;
+            if (completion.success)
+                lbls["result"] = "success";
+            else if (completion.permanent_failure)
+                lbls["result"] = "perm_fail";
+            else
+                lbls["result"] = "temp_fail";
+            m->inc_counter("protorelay_outbound_delivery_total", lbls);
+        }
 
         bool ok = false;
         if (completion.success) {

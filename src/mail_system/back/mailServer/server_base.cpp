@@ -499,6 +499,11 @@ void ServerBase::push_metric_counter(const std::string& name,
     if (auto m = m_metricsServer) m->inc_counter(name, labels, v);
 }
 
+void ServerBase::push_metric_observe(const std::string& name,
+                                       const MetricsServer::LabelMap& labels, double v) {
+    if (auto m = m_metricsServer) m->observe(name, labels, v);
+}
+
 void ServerBase::increment_connection_count() {
     active_connections_.fetch_add(1, std::memory_order_relaxed);
     push_metric_gauge("protorelay_active_connections", {}, active_connections_.load());

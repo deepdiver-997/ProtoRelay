@@ -40,17 +40,32 @@ public:
         , connection_(std::move(connection))
         , read_buffer_(8192), use_buffer_(8192)
         , mail_(nullptr), closed_(false), session_authenticated_(false)
-        , m_server(server) {}
+        , m_server(server)
+        , session_start_(std::chrono::steady_clock::now()) {}
 
     virtual ~SessionBase() { if (!closed_) close(); }
 
     virtual void close() {
         if (closed_) return;
         closed_ = true;
+        auto elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - session_start_).count();
         if (m_server) {
+            MetricsServer::LabelMap lbls;
+            lbls["auth"] = session_authenticated_ ? "yes" : "no";
+            m_server->push_metric_observe("protorelay_session_duration_seconds", lbls, elapsed);
             m_server->record_session_end(get_client_ip(), session_authenticated_);
             m_server->decrement_connection_count();
         }
+
+        // 将 pipeline 模式下积压的响应刷到连接再关闭
+        if (!pending_write_buf_.empty() && connection_ && connection_->is_open()) {
+            auto payload = std::make_shared<std::string>(std::move(pending_write_buf_));
+            pending_write_buf_.clear();
+            connection_->async_write(boost::asio::buffer(*payload),
+                [payload](const boost::system::error_code&, std::size_t) {});
+        }
+
         try {
             if (connection_ && connection_->is_open()) {
                 connection_->close();
@@ -78,6 +93,22 @@ public:
     usr* get_usr() { return usr_.get(); }
     ServerBase* get_server() const { return m_server; }
     void set_server(ServerBase* server) { m_server = server; }
+
+    // 记录一次 AUTH 失败。返回 true 表示超过上限应关闭连接
+    bool record_auth_failure_and_check() {
+        auth_attempt_count_++;
+        size_t max_attempts = 3;
+        if (m_server) {
+            auto cfg = std::atomic_load(&m_server->m_config);
+            if (cfg) max_attempts = cfg->max_auth_attempts;
+        }
+        if (auth_attempt_count_ >= max_attempts) {
+            LOG_SESSION_WARN("AUTH failures exceeded ({}/{}), closing session from {}",
+                auth_attempt_count_, max_attempts, get_client_ip());
+            return true;
+        }
+        return false;
+    }
 
     virtual void handle_error(const boost::system::error_code& error) {
         LOG_SESSION_ERROR("SessionBase Error: {}", error.message());
@@ -233,7 +264,9 @@ public:
 protected:
     bool closed_;
     bool session_authenticated_;
+    int auth_attempt_count_ = 0;
     ServerBase* m_server;
+    std::chrono::steady_clock::time_point session_start_;
 
 public:
     void set_authenticated(bool v) { session_authenticated_ = v; }
