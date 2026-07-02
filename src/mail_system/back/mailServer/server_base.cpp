@@ -63,33 +63,34 @@ ServerBase::ServerBase(const ServerConfig& config,
         }
 
         // ---- 2. 创建存储 ----
+        const auto& sc = config.storage;
         std::shared_ptr<storage::IStorageProvider> main_storage;
-        if (config.storage_provider == "distributed") {
+        if (sc.provider == "distributed") {
             main_storage = std::make_shared<storage::DistributedFileStorageProvider>(
-                config.distributed_storage_roots, config.distributed_storage_replica_count);
-        } else if (config.storage_provider == "hdfs_web") {
+                sc.distributed.roots, sc.distributed.replica_count);
+        } else if (sc.provider == "hdfs_web") {
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
             main_storage = std::make_shared<storage::HdfsWebStorageProvider>(
-                config.hdfs_endpoint, config.hdfs_base_path, config.hdfs_user,
-                config.hdfs_replication, static_cast<long>(config.hdfs_timeout_ms));
+                sc.hdfs.endpoint, sc.hdfs.base_path, sc.hdfs.user,
+                sc.hdfs.replication, static_cast<long>(sc.hdfs.timeout_ms));
 #else
             throw std::runtime_error("hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON");
 #endif
-        } else if (config.storage_provider == "null") {
+        } else if (sc.provider == "null") {
             main_storage = std::make_shared<storage::NullStorageProvider>();
-        } else if (config.storage_provider == "s3") {
+        } else if (sc.provider == "s3") {
             main_storage = std::make_shared<storage::S3StorageProvider>(
-                config.s3_endpoint, config.s3_bucket,
-                config.s3_access_key, config.s3_secret_key,
-                config.s3_region, static_cast<long>(config.s3_timeout_ms),
-                config.s3_use_path_style);
+                sc.s3.endpoint, sc.s3.bucket,
+                sc.s3.access_key, sc.s3.secret_key,
+                sc.s3.region, static_cast<long>(sc.s3.timeout_ms),
+                sc.s3.use_path_style);
         } else {
-            if (!std::filesystem::exists(config.mail_storage_path))
-                std::filesystem::create_directories(config.mail_storage_path);
-            if (!std::filesystem::exists(config.attachment_storage_path))
-                std::filesystem::create_directories(config.attachment_storage_path);
+            if (!std::filesystem::exists(sc.local.mail_path))
+                std::filesystem::create_directories(sc.local.mail_path);
+            if (!std::filesystem::exists(sc.local.attachment_path))
+                std::filesystem::create_directories(sc.local.attachment_path);
             main_storage = std::make_shared<storage::LocalFileStorageProvider>(
-                config.mail_storage_path, config.attachment_storage_path);
+                sc.local.mail_path, sc.local.attachment_path);
         }
         {
             std::string err;

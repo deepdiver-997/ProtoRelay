@@ -74,6 +74,8 @@ struct FsmTestFixture {
         cfg.system_domain      = "test.local";
         cfg.mail_storage_path  = "/tmp/smtps_fsm_test_mail";
         cfg.attachment_storage_path = "/tmp/smtps_fsm_test_att";
+        cfg.storage.local.mail_path       = "/tmp/smtps_fsm_test_mail";
+        cfg.storage.local.attachment_path = "/tmp/smtps_fsm_test_att";
 
         system("mkdir -p /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att");
 

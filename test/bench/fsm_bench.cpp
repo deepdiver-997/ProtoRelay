@@ -120,6 +120,8 @@ int main(int argc, char* argv[]) {
     cfg.system_domain      = "test.local";
     cfg.mail_storage_path  = "/tmp/fsm_bench_mail";
     cfg.attachment_storage_path = "/tmp/fsm_bench_att";
+    cfg.storage.local.mail_path       = "/tmp/fsm_bench_mail";
+    cfg.storage.local.attachment_path = "/tmp/fsm_bench_att";
 
     BenchServer server(cfg, io_pool, worker_pool, router, persist_q);
 

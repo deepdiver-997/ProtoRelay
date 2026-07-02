@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/storage/storage_config.h"
 
 namespace mail_system {
 
@@ -186,8 +187,9 @@ struct ServerConfig {
     std::string router_config_file;
     ShardRouterConfig router_config;
 
-    std::string storage_provider;
-    std::string mail_storage_path;
+    storage::StorageConfig storage;             // 新版嵌套存储配置
+    std::string storage_provider;               // deprecated: use storage.provider
+    std::string mail_storage_path;              // deprecated: use storage.local
     std::string attachment_storage_path;
     std::vector<std::string> distributed_storage_roots;
     size_t distributed_storage_replica_count;
@@ -432,9 +434,19 @@ struct ServerConfig {
             router_config.shard_count = 1;
         }
 
-        storage_provider   = j.value("storage_provider", storage_provider);
-        mail_storage_path  = resolve_path(filename, j.value("mail_storage_path", mail_storage_path));
-        attachment_storage_path = resolve_path(filename, j.value("attachment_storage_path", attachment_storage_path));
+        // 新版嵌套格式: "storage": { "provider": "...", "local": {...}, "s3": {...}, ... }
+        {
+            std::string base_dir = std::filesystem::path(filename).parent_path().string();
+            if (j.contains("storage") && j["storage"].is_object())
+                storage = storage::StorageConfig::from_json(j["storage"], base_dir);
+            else
+                storage = storage::StorageConfig::from_json(j, base_dir);
+        }
+
+        // 向后兼容: 同步到平铺字段（其他代码可能仍读取这些字段）
+        storage_provider   = storage.provider;
+        mail_storage_path  = storage.local.mail_path;
+        attachment_storage_path = storage.local.attachment_path;
 
         system_name           = j.value("system_name", system_name);
         system_domain         = j.value("system_domain", system_domain);
