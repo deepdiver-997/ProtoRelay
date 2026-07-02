@@ -30,7 +30,7 @@ SmtpExecResult run_test(const std::vector<std::string>& responses,
     record.sender = "sender@test.com";
     record.recipient = "rcpt@example.com";
 
-    OutboundIdentityConfig id_cfg;
+    OutboundConfig id_cfg;
     id_cfg.helo_domain = "outbound.test";
     id_cfg.dkim_enabled = false;
 

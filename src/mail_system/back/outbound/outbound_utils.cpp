@@ -237,7 +237,7 @@ std::string join_header_names_colon(const std::vector<std::string>& names) {
 
 std::string build_dkim_header(const std::unordered_map<std::string, std::string>& headers,
                               const std::string& canonical_body,
-                              const OutboundIdentityConfig& identity_config,
+                              const OutboundConfig& identity_config,
                               std::string& error_out,
                               const std::vector<std::string>* signed_headers_override = nullptr) {
     const std::string selector = trim_ascii_ws(identity_config.dkim_selector);
@@ -318,7 +318,7 @@ bool ensure_mail_raw_payload_loaded(mail& mail_data) {
 std::string build_outbound_message(const OutboxRecord& record,
                                    const mail* hot_mail,
                                    const std::string& header_from,
-                                   const OutboundIdentityConfig& identity_config,
+                                   const OutboundConfig& identity_config,
                                    bool* dkim_applied,
                                    std::string* dkim_error,
                                    std::string* message_id_out) {

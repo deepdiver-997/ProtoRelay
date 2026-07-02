@@ -53,7 +53,7 @@ SmtpExecResult execute_smtp_transaction(
     const std::string& helo_domain,
     const std::string& envelope_sender,
     const std::string& header_from,
-    const OutboundIdentityConfig& identity_config,
+    const OutboundConfig& identity_config,
     bool allow_starttls_upgrade,
     bool expect_greeting,
     const ContinueFn& should_continue)

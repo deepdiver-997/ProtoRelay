@@ -45,7 +45,7 @@ std::string join_ports(const std::vector<std::uint16_t>& ports) {
     return oss.str();
 }
 
-std::chrono::milliseconds compute_adaptive_wait(const OutboundPollingConfig& cfg,
+std::chrono::milliseconds compute_adaptive_wait(const OutboundConfig& cfg,
                                                 std::size_t empty_claim_rounds,
                                                 bool has_memory_pending) {
     const int busy_sleep_ms = std::max(1, cfg.busy_sleep_ms);
@@ -76,8 +76,7 @@ std::string rewrite_sender_domain(const std::string& sender, const std::string& 
 
 SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                                    const mail* hot_mail,
-                                   const std::vector<std::uint16_t>& outbound_ports,
-                                   const OutboundIdentityConfig& identity_config,
+                                   const OutboundConfig& config,
                                    const std::string& target_host,
                                    const ContinueFn& should_continue) {
     SmtpExecResult result;
@@ -86,8 +85,8 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
         return result;
     }
 
-    if (outbound_ports.empty()) {
-        result.error_message = "outbound_ports is empty";
+    if (config.ports.empty()) {
+        result.error_message = "config.ports is empty";
         return result;
     }
 
@@ -96,11 +95,11 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                      record.mail_id,
                      record.recipient,
                      target_host,
-                     join_ports(outbound_ports));
+                     join_ports(config.ports));
 
-    const std::string helo_domain = identity_config.helo_domain.empty() ? "outbound.local" : identity_config.helo_domain;
-    const std::string envelope_sender = rewrite_sender_domain(record.sender, identity_config.mail_from_domain);
-    const std::string header_from = identity_config.rewrite_header_from ? envelope_sender : record.sender;
+    const std::string helo_domain = config.helo_domain.empty() ? "outbound.local" : config.helo_domain;
+    const std::string envelope_sender = rewrite_sender_domain(record.sender, config.mail_from_domain);
+    const std::string header_from = config.rewrite_header_from ? envelope_sender : record.sender;
 
     boost::asio::io_context io_context;
     boost::asio::ssl::context ssl_ctx(boost::asio::ssl::context::tls_client);
@@ -115,7 +114,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
     }
 
     std::uint16_t connected_port = 0;
-    for (auto port : outbound_ports) {
+    for (auto port : config.ports) {
         if (should_continue && !should_continue()) {
             result.error_message = "outbound client stopping";
             break;
@@ -175,7 +174,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                                               helo_domain,
                                               envelope_sender,
                                               header_from,
-                                              identity_config,
+                                              config,
                                               false,
                                               true,
                                               should_continue);
@@ -188,7 +187,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                                               helo_domain,
                                               envelope_sender,
                                               header_from,
-                                              identity_config,
+                                              config,
                                               true,
                                               true,
                                               should_continue);
@@ -230,7 +229,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
                                                   helo_domain,
                                                   envelope_sender,
                                                   header_from,
-                                                  identity_config,
+                                                  config,
                                                   false,
                                                   false,
                                                   should_continue);
@@ -248,7 +247,7 @@ SmtpExecResult run_plain_smtp_flow(const OutboxRecord& record,
         LOG_OUTBOUND_WARN("Outbound SMTP connect failed: outbox_id={}, host={}, ports=[{}]",
                         record.id,
                         target_host,
-                        join_ports(outbound_ports));
+                        join_ports(config.ports));
         return result;
     }
 
@@ -268,44 +267,36 @@ SmtpOutboundClient::SmtpOutboundClient(std::shared_ptr<router::IShardRouter> sha
                                        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
                                        std::shared_ptr<IDnsResolver> dns_resolver,
                                        std::shared_ptr<std::atomic<bool>> server_interrupt_flag,
-                                       OutboundIdentityConfig identity_config,
-                                       OutboundPollingConfig polling_config,
-                                                                             std::string local_domain,
-                                                                             std::vector<std::uint16_t> outbound_ports,
-                                                                             int max_delivery_attempts)
+                                       OutboundConfig config,
+                                       std::string local_domain)
     : m_shardRouter(std::move(shard_router)),
       io_thread_pool_(std::move(io_thread_pool)),
       worker_thread_pool_(std::move(worker_thread_pool)),
       dns_resolver_(std::move(dns_resolver)),
-            server_interrupt_flag_(std::move(server_interrupt_flag)),
-            identity_config_(std::move(identity_config)),
-        polling_config_(std::move(polling_config)),
-            local_domain_(std::move(local_domain)),
-            outbound_ports_(std::move(outbound_ports)),
-            max_delivery_attempts_(std::max(1, max_delivery_attempts)) {
-        if (outbound_ports_.empty()) {
-                outbound_ports_.push_back(25);
-        }
+      server_interrupt_flag_(std::move(server_interrupt_flag)),
+      config_(std::move(config)),
+      local_domain_(std::move(local_domain)) {
+    if (config_.ports.empty())
+        config_.ports.push_back(25);
+    config_.max_attempts = std::max<size_t>(1, config_.max_attempts);
 
     std::ostringstream oss;
     oss << "outbound-worker-" << std::this_thread::get_id();
     worker_id_ = oss.str();
 
-    // 初始化 shard 优先级顺序（后续可按延迟排序）
     if (m_shardRouter) {
         steal_shard_order_ = m_shardRouter->shard_priority_order();
         home_shard_ = steal_shard_order_.empty() ? 0 : steal_shard_order_.front();
     }
 
-    polling_config_.busy_sleep_ms = std::max(1, polling_config_.busy_sleep_ms);
-    polling_config_.backoff_base_ms = std::max(1, polling_config_.backoff_base_ms);
-    polling_config_.backoff_max_ms = std::max(polling_config_.busy_sleep_ms, polling_config_.backoff_max_ms);
+    config_.busy_sleep_ms   = std::max(1, config_.busy_sleep_ms);
+    config_.backoff_base_ms = std::max(1, config_.backoff_base_ms);
+    config_.backoff_max_ms  = std::max(config_.busy_sleep_ms, config_.backoff_max_ms);
 
-    if (identity_config_.dkim_enabled) {
+    if (config_.dkim_enabled) {
         LOG_OUTBOUND_INFO("DKIM config loaded: selector={}, domain={}, key_file={}",
-                          identity_config_.dkim_selector,
-                          identity_config_.dkim_domain,
-                          identity_config_.dkim_private_key_file);
+                          config_.dkim_selector, config_.dkim_domain,
+                          config_.dkim_private_key_file);
     }
 }
 
@@ -321,16 +312,16 @@ void SmtpOutboundClient::start() {
 
     orchestrator_thread_ = std::thread([this]() { run_loop(); });
     std::ostringstream ports;
-    for (std::size_t i = 0; i < outbound_ports_.size(); ++i) {
-        ports << outbound_ports_[i];
-        if (i + 1 < outbound_ports_.size()) {
+    for (std::size_t i = 0; i < config_.ports.size(); ++i) {
+        ports << config_.ports[i];
+        if (i + 1 < config_.ports.size()) {
             ports << ",";
         }
     }
-    LOG_OUTBOUND_INFO("SmtpOutboundClient started, local_domain={}, outbound_ports=[{}], max_delivery_attempts={}",
+    LOG_OUTBOUND_INFO("SmtpOutboundClient started, local_domain={}, config.ports=[{}], max_delivery_attempts={}",
                     local_domain_,
                     ports.str(),
-                    max_delivery_attempts_);
+                    config_.max_attempts);
 }
 
 void SmtpOutboundClient::stop() {
@@ -414,7 +405,7 @@ void SmtpOutboundClient::run_loop() {
 
         std::unique_lock<std::mutex> lock(notify_mutex_);
         const auto wait_duration =
-            compute_adaptive_wait(polling_config_,
+            compute_adaptive_wait(config_,
                                   empty_claim_rounds,
                                   !ownership_queue_.empty() || !hot_record_queue_.empty());
         notify_cv_.wait_for(lock,
@@ -691,8 +682,7 @@ void SmtpOutboundClient::dispatch_delivery_task(const OutboxRecord& record,
 
             exec_result = run_plain_smtp_flow(record,
                                               hot_mail_ctx.get(),
-                                              outbound_ports_,
-                                              identity_config_,
+                                              config_,
                                               host,
                                               should_continue);
             if (exec_result.success) {

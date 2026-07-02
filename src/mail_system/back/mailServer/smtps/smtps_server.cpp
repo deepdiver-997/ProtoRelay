@@ -39,20 +39,20 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         }
 
         if (!m_outboundClient) {
-            outbound::OutboundIdentityConfig outbound_identity;
-            outbound_identity.helo_domain = cfg->outbound_helo_domain;
-            outbound_identity.mail_from_domain = cfg->outbound_mail_from_domain;
-            outbound_identity.rewrite_header_from = cfg->outbound_rewrite_header_from;
-            outbound_identity.dkim_enabled = cfg->outbound_dkim_enabled;
-            outbound_identity.dkim_selector = cfg->outbound_dkim_selector;
-            outbound_identity.dkim_domain = cfg->outbound_dkim_domain;
-            outbound_identity.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
-
-            outbound::OutboundPollingConfig outbound_polling;
-            outbound_polling.busy_sleep_ms = static_cast<int>(cfg->outbound_poll_busy_sleep_ms);
-            outbound_polling.backoff_base_ms = static_cast<int>(cfg->outbound_poll_backoff_base_ms);
-            outbound_polling.backoff_max_ms = static_cast<int>(cfg->outbound_poll_backoff_max_ms);
-            outbound_polling.backoff_shift_cap = static_cast<std::size_t>(cfg->outbound_poll_backoff_shift_cap);
+            outbound::OutboundConfig oc;
+            oc.helo_domain           = cfg->outbound_helo_domain;
+            oc.mail_from_domain      = cfg->outbound_mail_from_domain;
+            oc.rewrite_header_from   = cfg->outbound_rewrite_header_from;
+            oc.dkim_enabled          = cfg->outbound_dkim_enabled;
+            oc.dkim_selector         = cfg->outbound_dkim_selector;
+            oc.dkim_domain           = cfg->outbound_dkim_domain;
+            oc.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
+            oc.ports                 = cfg->outbound_ports;
+            oc.max_attempts          = cfg->outbound_max_attempts;
+            oc.busy_sleep_ms         = static_cast<int>(cfg->outbound_poll_busy_sleep_ms);
+            oc.backoff_base_ms       = static_cast<int>(cfg->outbound_poll_backoff_base_ms);
+            oc.backoff_max_ms        = static_cast<int>(cfg->outbound_poll_backoff_max_ms);
+            oc.backoff_shift_cap     = cfg->outbound_poll_backoff_shift_cap;
 
             m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
                 m_shardRouter,
@@ -60,11 +60,8 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
                 m_workerThreadPool,
                 std::make_shared<outbound::CaresDnsResolver>(),
                 m_outboundInterruptFlag,
-                std::move(outbound_identity),
-                outbound_polling,
-                m_domain,
-                cfg->outbound_ports,
-                static_cast<int>(cfg->outbound_max_attempts)
+                std::move(oc),
+                m_domain
             );
             m_persistentQueue->set_outbound_client(m_outboundClient);
             m_outboundClient->inject_metrics(get_metrics());

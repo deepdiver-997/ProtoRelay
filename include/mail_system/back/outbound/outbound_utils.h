@@ -14,7 +14,7 @@ bool ensure_mail_raw_payload_loaded(mail& mail_data);
 std::string build_outbound_message(const OutboxRecord& record,
                                    const mail* hot_mail,
                                    const std::string& header_from,
-                                   const OutboundIdentityConfig& identity_config,
+                                   const OutboundConfig& identity_config,
                                    bool* dkim_applied,
                                    std::string* dkim_error,
                                    std::string* message_id_out = nullptr);
