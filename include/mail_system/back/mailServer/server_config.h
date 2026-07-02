@@ -12,6 +12,7 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/storage/storage_config.h"
+#include "mail_system/back/outbound/outbound_config.h"
 
 namespace mail_system {
 
@@ -434,19 +435,11 @@ struct ServerConfig {
             router_config.shard_count = 1;
         }
 
-        // 新版嵌套格式: "storage": { "provider": "...", "local": {...}, "s3": {...}, ... }
-        {
+        // 存储配置: "storage": { "provider": "...", "local": {...}, ... }
+        if (j.contains("storage") && j["storage"].is_object()) {
             std::string base_dir = std::filesystem::path(filename).parent_path().string();
-            if (j.contains("storage") && j["storage"].is_object())
-                storage = storage::StorageConfig::from_json(j["storage"], base_dir);
-            else
-                storage = storage::StorageConfig::from_json(j, base_dir);
+            storage = storage::StorageConfig::from_json(j["storage"], base_dir);
         }
-
-        // 向后兼容: 同步到平铺字段（其他代码可能仍读取这些字段）
-        storage_provider   = storage.provider;
-        mail_storage_path  = storage.local.mail_path;
-        attachment_storage_path = storage.local.attachment_path;
 
         system_name           = j.value("system_name", system_name);
         system_domain         = j.value("system_domain", system_domain);

@@ -39,10 +39,6 @@ struct DeliveryCompletion {
     std::string error_message;
 };
 
-// backward compat: 旧代码仍可使用这些别名
-// using OutboundIdentityConfig = OutboundConfig;
-// using OutboundPollingConfig  = OutboundConfig;
-
 struct HotMailDispatch {
     std::unique_ptr<mail> mail_ptr;
     std::vector<OutboxRecord> reserved_records;
