@@ -78,7 +78,7 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
   - localhost per-conn 受临时端口池限制（~16384 个），详见 bench-report
 - M2 Pro (12 核) macOS 单机测试结果，不等同于生产 SLA
 - **72303 msg/s 不含磁盘/数据库开销**（null storage + null DB），仅 FSM + TCP loopback
-- 压测天花板配置：`"storage_provider": "null"` + `"use_database": false`
+- 压测天花板配置：`"storage": {"provider": "null"}` + `"use_database": false`
 - C++ `smtp_client` 是主要压测工具；Python `cl.py` 保留用于 TLS/AUTH 冒烟测试
 
 ### 性能调优要点

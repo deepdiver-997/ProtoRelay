@@ -128,13 +128,16 @@ UID is the Snowflake `mail_id` (globally unique, monotonically increasing).
 
 ## Configuration
 
-### imapsConfig.json
+### IMAP listener configuration (in smtpsConfig.json)
+
+IMAP 监听器通过主配置文件中的 `listeners` 数组配置：
 
 ```json
 {
-  "address": "0.0.0.0",
-  "enable_ssl": true,
-  "ssl_port": 993,
+  "listeners": [
+    { "type": "imap_ssl",  "port": 993 },
+    { "type": "imap_tcp",  "port": 143 }
+  ],
   "enable_tcp": true,
   "tcp_port": 143,
   "certFile": "crt/server.crt",
@@ -156,14 +159,14 @@ Key differences from SMTP config:
 
 ## Integration
 
-To start the IMAP server alongside the existing SMTP server:
+IMAP 和 SMTP 共用同一个配置文件 `config/smtpsConfig.json`，通过 `listeners` 中的 `type` 区分协议。
 
 ```cpp
 #include "mail_system/back/mailServer/imaps_server.h"
 
-// In your main() after SMTP server:
-ServerConfig imap_cfg;
-imap_cfg.loadFromFile("config/imapsConfig.json");
+// 与 SMTP server 共用 config
+ServerConfig cfg;
+cfg.loadFromFile("config/smtpsConfig.json");
 
 // Share the same thread pools & DB pool for efficiency
 auto imap_server = std::make_shared<ImapsServer>(

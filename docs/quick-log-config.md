@@ -79,7 +79,7 @@ grep -c "error" logs/mail_system.log
 cmake -B build && make -j4
 
 # 运行
-./test/smtpsServer
+./build/smtpsServer
 
 # 查看数据库日志
 tail -f logs/mail_system.log | grep DATABASE
@@ -92,7 +92,7 @@ tail -f logs/mail_system.log | grep DATABASE
 cmake -B build && make -j4
 
 # 运行
-./test/smtpsServer
+./build/smtpsServer
 
 # 只监控错误
 tail -f logs/mail_system.log | grep -E "(error|critical)"
@@ -108,7 +108,7 @@ tail -f logs/mail_system.log | grep -E "(error|critical)"
 
 # 重新编译并运行
 cmake -B build && make -j4
-./test/smtpsServer
+./build/smtpsServer
 
 # 查看 SQL 执行日志
 tail -f logs/mail_system.log | grep DB_QUERY

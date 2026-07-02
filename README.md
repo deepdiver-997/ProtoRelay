@@ -78,7 +78,7 @@ Operational note:
   - localhost per-conn limited by ephemeral port pool (~16384); see bench-report
 - M2 Pro (12-core) macOS single-machine figures, not a production SLA
 - **72303 msg/s 不含任何磁盘/数据库开销**（null storage + null DB），仅 FSM + TCP loopback
-- Use `"storage_provider": "null"` + `"use_database": false` for ceiling benchmarks
+- Use `"storage": {"provider": "null"}` + `"use_database": false` for ceiling benchmarks
 - C++ `smtp_client` is the primary bench tool; Python `cl.py` for TLS/AUTH smoke tests
 
 ### Performance Tuning Notes

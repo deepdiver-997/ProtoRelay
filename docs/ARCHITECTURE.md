@@ -30,7 +30,7 @@ Current implementation status:
 ```text
 +--------------------------------------------------------------+
 | Application Entry                                             |
-| test/smtps_test.cpp                                           |
+| test/smtps_test.cpp → build/smtpsServer                       |
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
@@ -122,25 +122,17 @@ Responsibilities:
 - Resolve destination MX/host policy and attempt SMTP delivery.
 - Retry with capped backoff until success or max attempts.
 
-Operational knobs (from server config):
+Configuration (via `outbound` section in smtpsConfig.json):
 
-- `outbound_max_attempts`
-- `outbound_poll_busy_sleep_ms`
-- `outbound_poll_backoff_base_ms`
-- `outbound_poll_backoff_max_ms`
-- `outbound_poll_backoff_shift_cap`
-- `outbound_ports`
-
-Identity knobs:
-
-- `outbound_helo_domain`
-- `outbound_mail_from_domain`
-- `outbound_rewrite_header_from`
-- `outbound_dkim_*`
+- `outbound.max_attempts`
+- `outbound.polling.busy_sleep_ms` / `backoff_base_ms` / `backoff_max_ms` / `backoff_shift_cap`
+- `outbound.ports`
+- `outbound.helo_domain` / `mail_from_domain` / `rewrite_header_from`
+- `outbound.dkim.enabled` / `selector` / `domain` / `private_key_file`
 
 ## 4.3 Storage Provider Abstraction
 
-Runtime selectable via `storage_provider`:
+Runtime selectable via `storage.provider`:
 
 - `local`: standard local directories.
 - `null`: no-op, discards all writes. Used for ceiling benchmarks.

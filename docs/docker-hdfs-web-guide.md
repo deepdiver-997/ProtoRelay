@@ -26,7 +26,7 @@ mkdir -p deploy/config deploy/certs deploy/logs deploy/mail deploy/attachments
 
 ## 3. MySQL 配置
 
-编辑 deploy/config/db_config.json（你已完成）。关键项：
+编辑 config/db_config.json（你已完成）。关键项：
 
 - achieve: mysql
 - host: host.docker.internal
@@ -119,7 +119,7 @@ docker compose -f docker/compose.hdfs-web.yml down -v
 2. 报错 Access denied for user
 
 - 原因：MySQL 用户/密码不匹配或无权限。
-- 处理：检查 deploy/config/db_config.json 与 MySQL 授权。
+- 处理：检查 config/db_config.json 与 MySQL 授权。
 
 3. 报错 Unknown database mail
 
