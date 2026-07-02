@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 
 namespace mail_system {
 
@@ -655,7 +656,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_capability(
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
-    std::string caps = "* CAPABILITY IMAP4rev1 AUTH=LOGIN";
+    std::string caps = "* CAPABILITY IMAP4rev1";
     // 非 SSL 连接可以通告 STARTTLS
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>) {
         caps += " STARTTLS";
@@ -1186,9 +1187,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             response += "INTERNALDATE \"" + imap_timestamp(mail_info.send_time) + "\" ";
         }
         if (want_rfc822_size) {
-            // Get body size
-            std::string body = this->read_mail_body(mail_info.body_path);
-            response += "RFC822.SIZE " + std::to_string(body.size()) + " ";
+            // O(1) file size via filesystem metadata, not reading entire body
+            uintmax_t sz = 0;
+            if (!mail_info.body_path.empty()) {
+                std::error_code ec;
+                sz = std::filesystem::file_size(mail_info.body_path, ec);
+            }
+            response += "RFC822.SIZE " + std::to_string(sz) + " ";
         }
         if (want_envelope) {
             // Get sender/recipients

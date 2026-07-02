@@ -180,7 +180,14 @@ void ImapsSession<ConnectionType>::process_read() {
     // 找行结束 \r\n
     size_t line_end = buf.find("\r\n");
     if (line_end == std::string::npos) {
-        // 没有完整行，继续读
+        // 防止无限制缓冲：超过 8192 字节仍无行结束则拒绝
+        if (buf.size() > 8192) {
+            LOG_IMAP_WARN("IMAP command too long ({} bytes), closing", buf.size());
+            auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
+            fsm->send_tagged(self, "*", "BAD", "Command too long");
+            self->close();
+            return;
+        }
         self->do_async_read();
         return;
     }
