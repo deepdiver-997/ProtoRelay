@@ -348,6 +348,7 @@ if(ENABLE_HDFS_WEB_STORAGE)
     )
 endif()
 if(ENABLE_S3_STORAGE)
+    add_compile_definitions(ENABLE_S3_STORAGE=1)
     list(APPEND COMMON_SRCS
         src/mail_system/back/storage/s3_storage_provider.cpp
     )

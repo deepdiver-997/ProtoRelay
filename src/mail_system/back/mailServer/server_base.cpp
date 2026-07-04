@@ -12,7 +12,9 @@
 #endif
 #include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mail_system/back/storage/null_storage_provider.h"
+#ifdef ENABLE_S3_STORAGE
 #include "mail_system/back/storage/s3_storage_provider.h"
+#endif
 #include "mail_system/back/db/null_db_pool.h"
 #include <iostream>
 #include <fstream>
@@ -79,11 +81,15 @@ ServerBase::ServerBase(const ServerConfig& config,
         } else if (sc.provider == "null") {
             main_storage = std::make_shared<storage::NullStorageProvider>();
         } else if (sc.provider == "s3") {
+#ifdef ENABLE_S3_STORAGE
             main_storage = std::make_shared<storage::S3StorageProvider>(
                 sc.s3.endpoint, sc.s3.bucket,
                 sc.s3.access_key, sc.s3.secret_key,
                 sc.s3.region, static_cast<long>(sc.s3.timeout_ms),
                 sc.s3.use_path_style);
+#else
+            throw std::runtime_error("s3 requires ENABLE_S3_STORAGE=ON");
+#endif
         } else {
             if (!std::filesystem::exists(sc.local.mail_path))
                 std::filesystem::create_directories(sc.local.mail_path);
