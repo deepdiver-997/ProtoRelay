@@ -806,20 +806,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     std::string tag = ctx ? ctx->current_tag : "*";
 
     std::string mailbox_name = args;
-    // trim whitespace/quotes
     if (!mailbox_name.empty() && mailbox_name[0] == '"') {
         size_t end = mailbox_name.find('"', 1);
-        if (end != std::string::npos) {
+        if (end != std::string::npos)
             mailbox_name = mailbox_name.substr(1, end - 1);
-        }
     }
+    mailbox_name = this->decode_mailbox_name(mailbox_name);
 
     if (!ctx || !ctx->is_authenticated) {
         send_tagged(session, tag, "BAD", "Not authenticated");
         return;
     }
 
-    // 查找邮箱
     uint64_t mailbox_id = this->find_mailbox_id(ctx->user_id, mailbox_name);
     if (mailbox_id == 0) {
         send_tagged(session, tag, "NO", "Mailbox not found: " + mailbox_name);
