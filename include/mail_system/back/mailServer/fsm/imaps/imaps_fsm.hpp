@@ -405,7 +405,6 @@ public:
         std::string sql = db::sql::build_imap_get_mailbox_mails();
 
         auto result = conn->query(sql, {
-            std::to_string(user_id),
             std::to_string(mailbox_id),
             std::to_string(user_id)
         });

@@ -344,14 +344,13 @@ std::string build_imap_get_inbox_id() {
 }
 
 std::string build_imap_get_mailbox_mails() {
-    return "SELECT m.id, mr.sender, mr.recipient, m.subject, m.body_path, "
+    return "SELECT m.id, COALESCE(mr.sender,'') as sender, COALESCE(mr.recipient,'') as recipient, "
+           "m.subject, m.body_path, "
            "mm.is_starred, mm.is_deleted, mm.is_important, "
-           "mr.status, UNIX_TIMESTAMP(m.send_time) AS send_time "
+           "COALESCE(mr.status,0) as status, UNIX_TIMESTAMP(m.send_time) AS send_time "
            "FROM mail_mailbox mm "
            "JOIN mails m ON mm.mail_id = m.id "
-           "JOIN mail_recipients mr ON mr.mail_id = m.id AND mr.recipient = ("
-           "  SELECT mail_address FROM users WHERE id = ?"
-           ") "
+           "LEFT JOIN mail_recipients mr ON mr.mail_id = m.id "
            "WHERE mm.mailbox_id = ? AND mm.user_id = ? "
            "ORDER BY m.send_time DESC";
 }
