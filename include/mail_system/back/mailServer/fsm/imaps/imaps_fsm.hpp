@@ -265,6 +265,8 @@ public:
         AuthCacheEntry ce;
         if (m_authCache->lookup(mail_address, ce)) {
             if (ce.status != 1) return false;
+            out_shard = ce.shard;
+            out_user_id = ce.user_id;
             if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
                 return bcrypt_verify(password, ce.password_hash);
             return ce.password_hash == password;
@@ -290,7 +292,8 @@ public:
         }
 
         std::string stored = result->get_value(0, "password");
-        m_authCache->store(mail_address, {stored, status});
+        uint64_t user_id = std::stoull(result->get_value(0, "id"));
+        m_authCache->store(mail_address, {stored, status, user_id, shard});
 
         bool ok = false;
         if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
@@ -303,7 +306,7 @@ public:
         }
 
         if (ok) {
-            out_user_id = std::stoull(result->get_value(0, "id"));
+            out_user_id = user_id;
             conn->execute(db::sql::build_update_last_login(), {mail_address});
         }
         return ok;

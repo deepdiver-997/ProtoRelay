@@ -586,7 +586,19 @@ void TraditionalImapsFsm<ConnectionType>::process_event(
         if (state_handler_it != state_handlers_.end()) {
             auto event_handler_it = state_handler_it->second.find(event);
             if (event_handler_it != state_handler_it->second.end()) {
-                event_handler_it->second(session, args);
+                LOG_IMAP_INFO("IMAP handler: state={} event={} tag={}",
+                    static_cast<int>(session->get_current_state()),
+                    static_cast<int>(event), tag);
+                try {
+                    event_handler_it->second(session, args);
+                } catch (const std::exception& e) {
+                    LOG_IMAP_ERROR("IMAP handler exception: {} tag={}", e.what(), tag);
+                    send_tagged(session, tag, "NO", "Internal server error");
+                } catch (...) {
+                    LOG_IMAP_ERROR("IMAP handler unknown exception tag={}", tag);
+                    send_tagged(session, tag, "NO", "Internal server error");
+                }
+                LOG_IMAP_INFO("IMAP handler done: tag={}", tag);
                 return;
             }
         }
@@ -1163,6 +1175,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
 
     // Build response
     std::string response;
+    LOG_IMAP_INFO("FETCH building response: seq={}-{} mails={}", seq_start, seq_end, mails.size());
     // 从 seq_start 到 seq_end（注意 mails 是按 send_time DESC 排的）
     // 序列号: mail 在列表的下标 + 1
     for (uint64_t seq = seq_start; seq <= seq_end; ++seq) {
@@ -1858,6 +1871,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
     std::string subargs = args.substr(space + 1);
     std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
 
+    LOG_IMAP_INFO("UID subcmd={} args={}", subcmd, subargs);
     if (subcmd == "FETCH") {
         handle_fetch(session, subargs);
     } else if (subcmd == "STORE") {
@@ -1869,6 +1883,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
     } else {
         send_tagged(session, tag, "BAD", "Unknown UID subcommand");
     }
+    LOG_IMAP_INFO("UID subcmd done: {}", subcmd);
 }
 
 // ---------- COPY / MOVE (共享实现) ----------

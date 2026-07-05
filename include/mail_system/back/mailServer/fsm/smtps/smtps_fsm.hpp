@@ -253,6 +253,7 @@ public:
         AuthCacheEntry ce;
         if (m_authCache->lookup(mail_address, ce)) {
             if (ce.status != 1) return false;
+            out_shard = ce.shard;
             if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
                 return bcrypt_verify(password, ce.password_hash);
             return ce.password_hash == password;
@@ -268,7 +269,7 @@ public:
         int status = std::stoi(result->get_value(0, "status"));
         if (status != 1) { LOG_AUTH_WARN("User account disabled: {}", mail_address); return false; }
         std::string stored = result->get_value(0, "password");
-        m_authCache->store(mail_address, {stored, status});
+        m_authCache->store(mail_address, {stored, status, 0, shard});
         bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
                         ? bcrypt_verify(password, stored)
                         : (stored == password);

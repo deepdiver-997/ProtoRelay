@@ -196,6 +196,24 @@ TEST(fetch_without_login) {
     std::cout << "  [PASS] fetch_without_login" << std::endl;
 }
 
+// ========== UID FETCH crash repro ==========
+
+TEST(uid_fetch_no_db) {
+    auto h = fx.make_session();
+    auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+    ctx->is_authenticated = true;
+    ctx->user_id = 1;
+    ctx->mailbox_selected = true;
+    ctx->selected_mailbox_id = 1;
+    ctx->current_tag = "A001";
+    h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
+
+    // 直接调用 UID → FETCH handler（模拟客户端发 UID FETCH 1:* (FLAGS)）
+    fx.fsm->process_event(h.session, ImapEvent::UID, "A001", "FETCH 1:* (FLAGS)");
+    auto& w = h.conn->written();
+    std::cout << "  [PASS] uid_fetch_no_db response=[" << w.substr(0, 80) << "]" << std::endl;
+}
+
 // ========== 命令顺序错误 ==========
 
 TEST(invalid_command_in_state) {
@@ -224,6 +242,9 @@ int main() {
         // ── 未认证拒绝 ──
         test_select_without_login(fx);
         test_fetch_without_login(fx);
+
+        // ── UID FETCH crash repro ──
+        test_uid_fetch_no_db(fx);
 
         // ── 命令错误 ──
         test_invalid_command_in_state(fx);

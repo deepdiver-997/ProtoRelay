@@ -10,7 +10,9 @@ namespace mail_system {
 
 struct AuthCacheEntry {
     std::string password_hash;
-    int status = 1;  // 1 = active
+    int status = 1;      // 1 = active
+    uint64_t user_id = 0;
+    int shard = 0;
 };
 
 // SMTP/IMAP 共享的认证缓存 — 避免同一用户多次查 DB
