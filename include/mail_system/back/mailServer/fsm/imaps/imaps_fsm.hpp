@@ -28,6 +28,13 @@
 
 namespace mail_system {
 
+// stoull/stoi/stoll 安全包装 — 非数字输入返回 0
+inline uint64_t safe_stoull(const std::string& s) {
+    try { return std::stoull(s); }
+    catch (const std::invalid_argument&) { return 0; }
+    catch (const std::out_of_range&)     { return 0; }
+}
+
 // ====================================================================
 // IMAP 状态枚举 (RFC 3501 §3 基本状态)
 // ====================================================================
@@ -285,14 +292,14 @@ public:
             return false;
         }
 
-        int status = std::stoi(result->get_value(0, "status"));
+        int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
         if (status != 1) {
             LOG_AUTH_WARN("User account disabled: {}", mail_address);
             return false;
         }
 
         std::string stored = result->get_value(0, "password");
-        uint64_t user_id = std::stoull(result->get_value(0, "id"));
+        uint64_t user_id = safe_stoull(result->get_value(0, "id"));
         m_authCache->store(mail_address, {stored, status, user_id, shard});
 
         bool ok = false;
@@ -329,9 +336,9 @@ public:
         }
 
         for (size_t i = 0; i < result->get_row_count(); ++i) {
-            uint64_t id = std::stoull(result->get_value(i, "id"));
+            uint64_t id = safe_stoull(result->get_value(i, "id"));
             std::string name = result->get_value(i, "name");
-            int box_type = std::stoi(result->get_value(i, "box_type"));
+            int box_type = static_cast<int>(safe_stoull(result->get_value(i, "box_type")));
             mailboxes.emplace_back(id, name, box_type);
         }
         return true;
@@ -356,7 +363,7 @@ public:
             db::sql::build_imap_get_mailbox_by_name(),
             {std::to_string(user_id), name_utf8});
         if (result && result->get_row_count() > 0) {
-            return std::stoull(result->get_value(0, "id"));
+            return safe_stoull(result->get_value(0, "id"));
         }
 
         // IMAP: "INBOX" → find the inbox mailbox (box_type=1)
@@ -367,7 +374,7 @@ public:
                 db::sql::build_imap_get_inbox_id(),
                 {std::to_string(user_id)});
             if (result && result->get_row_count() > 0) {
-                return std::stoull(result->get_value(0, "id"));
+                return safe_stoull(result->get_value(0, "id"));
             }
         }
 
@@ -409,7 +416,7 @@ public:
 
         for (size_t i = 0; i < result->get_row_count(); ++i) {
             MailboxMailInfo info;
-            info.mail_id = std::stoull(result->get_value(i, "id"));
+            info.mail_id = safe_stoull(result->get_value(i, "id"));
             info.sender = result->get_value(i, "sender");
             info.recipient = result->get_value(i, "recipient");
             info.subject = result->get_value(i, "subject");
@@ -417,8 +424,8 @@ public:
             info.is_starred = result->get_value(i, "is_starred") == "1";
             info.is_deleted = result->get_value(i, "is_deleted") == "1";
             info.is_important = result->get_value(i, "is_important") == "1";
-            info.status = std::stoi(result->get_value(i, "status"));
-            info.send_time = static_cast<time_t>(std::stoll(result->get_value(i, "send_time")));
+            info.status = result->get_value(i, "status").empty() ? 0 : static_cast<int>(safe_stoull(result->get_value(i, "status")));
+            info.send_time = static_cast<time_t>(safe_stoull(result->get_value(i, "send_time")));
             mails.push_back(std::move(info));
         }
         return true;
@@ -440,10 +447,10 @@ public:
             return false;
         }
 
-        info.mail_id = std::stoull(result->get_value(0, "id"));
+        info.mail_id = safe_stoull(result->get_value(0, "id"));
         info.subject = result->get_value(0, "subject");
         info.body_path = result->get_value(0, "body_path");
-        info.send_time = static_cast<time_t>(std::stoll(result->get_value(0, "send_time")));
+        info.send_time = static_cast<time_t>(safe_stoull(result->get_value(0, "send_time")));
         return true;
     }
 
@@ -743,7 +750,7 @@ public:
             db::sql::build_imap_select_status_total(),
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
-            return static_cast<size_t>(std::stoull(result->get_value(0, "cnt")));
+            return static_cast<size_t>(safe_stoull(result->get_value(0, "cnt")));
         }
         return 0;
     }
@@ -759,7 +766,7 @@ public:
             db::sql::build_imap_mailbox_unseen_count(),
             {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
-            return static_cast<size_t>(std::stoull(result->get_value(0, "cnt")));
+            return static_cast<size_t>(safe_stoull(result->get_value(0, "cnt")));
         }
         return 0;
     }
@@ -774,7 +781,7 @@ public:
             db::sql::build_imap_mailbox_uidnext(),
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
-            return std::stoull(result->get_value(0, "uidnext"));
+            return safe_stoull(result->get_value(0, "uidnext"));
         }
         return 1;
     }
@@ -803,7 +810,7 @@ public:
             {std::to_string(mailbox_id), std::to_string(user_id)});
         if (result) {
             for (size_t i = 0; i < result->get_row_count(); ++i) {
-                ids.push_back(std::stoull(result->get_value(i, "mail_id")));
+                ids.push_back(safe_stoull(result->get_value(i, "mail_id")));
             }
         }
         return ids;

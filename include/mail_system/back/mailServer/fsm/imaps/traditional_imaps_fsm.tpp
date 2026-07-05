@@ -7,13 +7,6 @@
 
 namespace mail_system {
 
-// stoull 安全包装 — 非数字输入返回 0
-inline uint64_t safe_stoull(const std::string& s) {
-    try { return safe_stoull(s); }
-    catch (const std::invalid_argument&) { return 0; }
-    catch (const std::out_of_range&)     { return 0; }
-}
-
 // ====================================================================
 // 工具方法
 // ====================================================================
@@ -1104,6 +1097,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     std::shared_ptr<SessionBase<ConnectionType>> session,
     const std::string& args)
 {
+    LOG_IMAP_INFO("FETCH ENTER args=[{}]", args);
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
