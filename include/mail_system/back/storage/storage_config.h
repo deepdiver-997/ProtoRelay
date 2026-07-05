@@ -39,6 +39,16 @@ struct DistributedStorageConfig {
 };
 
 // === 统一存储配置 ===
+enum class StorageProviderType { Local, Null, S3, HdfsWeb, Distributed };
+
+inline StorageProviderType provider_type_from_string(const std::string& s) {
+    if (s == "distributed") return StorageProviderType::Distributed;
+    if (s == "hdfs_web")    return StorageProviderType::HdfsWeb;
+    if (s == "null")        return StorageProviderType::Null;
+    if (s == "s3")          return StorageProviderType::S3;
+    return StorageProviderType::Local;
+}
+
 struct StorageConfig {
     std::string provider = "local";  // "local" | "null" | "s3" | "hdfs_web" | "distributed"
 

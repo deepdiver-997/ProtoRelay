@@ -77,17 +77,12 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 
 // 全局服务器指针，用于信号处理
 std::unique_ptr<ImapsServer> g_server = nullptr;
+volatile sig_atomic_t g_signal_flag = 0;
 
-// 信号处理函数
+// 信号处理函数（信号安全，只写 volatile sig_atomic_t）
 void signal_handler(int signal) {
-    if (signal == 1) {
-        if (g_server) g_server->request_stop();
-    }
-    if (signal == 2) {
-        if (g_server) {
-            g_server->reload_config(g_server->m_configFilePath);
-        }
-    }
+    // SIGHUP → reload, SIGINT/SIGTERM → stop
+    g_signal_flag = (signal == SIGHUP) ? 2 : 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -153,14 +148,33 @@ int main(int argc, char* argv[]) {
         g_server->start();
 
         LOG_SERVER_INFO("IMAPS Server running with {} listener(s)", config.listeners.size());
-        LOG_SERVER_INFO("Press Ctrl+C to stop");
+        LOG_SERVER_INFO("Press Ctrl+C to stop, SIGHUP to reload config");
 
-        // 主循环
-        g_server->run();
+        // 主循环：轮询信号标志
+        //   signal=1 (SIGINT/SIGTERM) → stop
+        //   signal=2 (SIGHUP) → reload config → continue running
+        for (;;) {
+            while (!g_signal_flag) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+
+            if (g_signal_flag == 2) {
+                // SIGHUP → reload config, keep running
+                LOG_SERVER_INFO("SIGHUP reload");
+                g_signal_flag = 0;
+                g_server->reload_config(g_server->m_configFilePath);
+                continue;  // 回到 polling 循环
+            }
+
+            // SIGINT or SIGTERM → stop
+            LOG_SERVER_INFO("Shutting down...");
+            g_server->request_stop();  // 原子设状态 Pausing
+            break;
+        }
 
         LOG_SERVER_INFO("IMAPS Server stopped");
 
-        // 释放服务器资源
+        // request_stop + reset 触发 ServerBase 析构 → RAII 释放所有资源
         g_server.reset();
 
         // 等待后台线程退出

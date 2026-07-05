@@ -1,5 +1,6 @@
 #!/bin/bash
 # 构建脚本 - 支持 Debug / Release / SafeRelease 模式
+# 交叉编译: cross-x64 模式自动处理 sysroot、Homebrew 屏蔽等细节
 
 set -e  # 任何命令失败则停止
 
@@ -9,6 +10,10 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-${SCRIPT_DIR}/artifacts}"
 EXTRA_CMAKE_ARGS_STR="${EXTRA_CMAKE_ARGS:-}"
 GENERATOR="${CMAKE_GENERATOR:-}"
 USE_BOOST_LEGACY_FIND="${USE_BOOST_LEGACY_FIND:-ON}"
+
+# 交叉编译 sysroot 路径（家目录下，重启不消失）
+CROSS_SYSROOT="${CROSS_SYSROOT:-${HOME}/.protorelay/sysroot/usr}"
+CROSS_SYSROOT_SERVER="${CROSS_SYSROOT_SERVER:-root@120.24.169.213}"
 
 # 颜色输出
 GREEN='\033[0;32m'
@@ -54,6 +59,7 @@ cleanup_root_cmake_artifacts() {
 # 使用方法
 if [ "$#" -lt 1 ]; then
     echo "Usage: $0 <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64]"
+    echo "       $0 sync-sysroot [server]"
     echo ""
     echo "Examples:"
     echo "  $0 Debug           # 构建 Debug 版本（无优化，启用所有调试日志）"
@@ -65,13 +71,28 @@ if [ "$#" -lt 1 ]; then
     echo "  $0 SafeRelease clean"
     echo "  $0 Release clean 1 object-only   # 仅编译 .o，不做最终链接"
     echo "  $0 Debug object-only             # 快速验证编译（需头文件，不强制链接库）"
-    echo "  $0 Release clean 1 cross-x64 object-only  # 交叉编译到 Linux x86_64（推荐）"
+    echo "  $0 Release cross-x64             # 交叉编译到 Linux x86_64（自动处理 sysroot）"
+    echo "  $0 sync-sysroot                  # 从服务器同步 spdlog/fmt 头文件到本地 sysroot"
     echo ""
     echo "Env override: BUILD_JOBS=<n>, EXTRA_CMAKE_ARGS='<...>'"
-        echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
-        echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
+    echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
+    echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
+    echo "              CROSS_SYSROOT=<path>, CROSS_SYSROOT_SERVER=<ssh-host>"
     echo ""
     exit 1
+fi
+
+# ---- sync-sysroot 子命令 ----
+if [ "$1" = "sync-sysroot" ]; then
+    SERVER="${2:-${CROSS_SYSROOT_SERVER}}"
+    SYSROOT="$CROSS_SYSROOT"
+    echo -e "${BLUE}[INFO]${NC} Syncing sysroot headers from ${SERVER}..."
+    echo -e "${BLUE}[INFO]${NC} Target: ${SYSROOT}"
+    mkdir -p "$SYSROOT"
+    ssh "$SERVER" "tar czf - -C /usr/include spdlog fmt" | tar xzf - -C "$SYSROOT"
+    FILE_COUNT=$(find "$SYSROOT" -type f 2>/dev/null | wc -l | tr -d ' ')
+    print_success "Sysroot synced: ${FILE_COUNT} files at ${SYSROOT}"
+    exit 0
 fi
 
 BUILD_TYPE="$1"
@@ -99,6 +120,11 @@ for arg in "${@:2}"; do
     fi
 done
 
+# 不同编译模式使用独立的构建目录，避免 host/cross 切换时互相清缓存
+if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
+    BUILD_DIR="${BUILD_DIR}/cross-x64"
+fi
+
 resolve_cross_compiler() {
     local env_cc="$1" env_cxx="$2" cc cxx
 
@@ -125,6 +151,34 @@ if [[ "$BUILD_TYPE" != "Debug" && "$BUILD_TYPE" != "Release" && "$BUILD_TYPE" !=
     print_warning "Invalid build type: $BUILD_TYPE"
     echo "Must be 'Debug', 'Release' or 'SafeRelease'"
     exit 1
+fi
+
+# ---- 交叉编译预检：工具链 + sysroot（必须在清理构建目录之前） ----
+if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
+    # 1. 检查交叉编译器
+    resolve_cross_compiler "$CROSS_CC" "$CROSS_CXX"
+    print_info "Cross C compiler : ${CROSS_CC}"
+    print_info "Cross C++ compiler: ${CROSS_CXX}"
+
+    # 2. 检查 sysroot 头文件（服务器 spdlog/fmt）
+    if [ ! -d "$CROSS_SYSROOT/spdlog" ] || [ ! -d "$CROSS_SYSROOT/fmt" ]; then
+        print_warning "Sysroot headers not found at: $CROSS_SYSROOT"
+        echo ""
+        echo "  The cross-x64 build needs server-side spdlog/fmt headers to avoid ABI mismatches."
+        echo "  Run once to sync them (they will persist across reboots):"
+        echo ""
+        echo -e "    ${GREEN}$0 sync-sysroot${NC}"
+        echo ""
+        echo "  Or set CROSS_SYSROOT env to an alternative path."
+        exit 1
+    fi
+    print_info "Sysroot headers : ${CROSS_SYSROOT}"
+
+    # 3. 交叉编译强制 object-only（避免 host/target link 不匹配）
+    if [[ "$BUILD_OBJECT_ONLY" != "ON" ]]; then
+        print_warning "cross-x64 defaults to object-only to avoid host/target link mismatch"
+        BUILD_OBJECT_ONLY="ON"
+    fi
 fi
 
 CMAKE_BUILD_TYPE="$BUILD_TYPE"
@@ -155,29 +209,6 @@ if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
     if [ -n "$CACHED_SOURCE_DIR" ] && [ "$CACHED_SOURCE_DIR" != "$SCRIPT_DIR" ]; then
         print_warning "Detected stale CMake cache from: $CACHED_SOURCE_DIR"
         print_info "Auto-cleaning build directory due to source mismatch..."
-        rm -rf "$BUILD_DIR"
-        mkdir -p "$BUILD_DIR"
-        cd "$BUILD_DIR"
-    fi
-fi
-
-# 自动修复：跨平台模式切换时，若缓存目标平台/编译器与当前模式不一致，清理并重新配置。
-if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
-    CACHED_SYSTEM_NAME="$(sed -n 's/^CMAKE_SYSTEM_NAME[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | head -n1)"
-    CACHED_CXX_COMPILER="$(sed -n 's/^CMAKE_CXX_COMPILER:FILEPATH=//p' "$BUILD_DIR/CMakeCache.txt" | head -n1)"
-
-    CACHE_MODE="host"
-    if [[ "$CACHED_SYSTEM_NAME" == "Linux" ]] || [[ "$CACHED_CXX_COMPILER" == *"x86_64-linux-gnu"* ]]; then
-        CACHE_MODE="cross"
-    fi
-
-    EXPECTED_MODE="host"
-    if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
-        EXPECTED_MODE="cross"
-    fi
-
-    if [[ "$CACHE_MODE" != "$EXPECTED_MODE" ]]; then
-        print_warning "Detected stale CMake cache mode: ${CACHE_MODE}; expected: ${EXPECTED_MODE}. Auto-cleaning build directory..."
         rm -rf "$BUILD_DIR"
         mkdir -p "$BUILD_DIR"
         cd "$BUILD_DIR"
@@ -255,15 +286,6 @@ if [[ "$BUILD_TYPE" == "SafeRelease" && -z "${BUILD_JOBS:-}" && -z "$USER_JOBS" 
     BUILD_JOBS_VALUE=1
 fi
 
-if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
-    resolve_cross_compiler "$CROSS_CC" "$CROSS_CXX"
-
-    if [[ "$BUILD_OBJECT_ONLY" != "ON" ]]; then
-        print_warning "cross-x64 defaults to object-only to avoid host/target link mismatch"
-        BUILD_OBJECT_ONLY="ON"
-    fi
-fi
-
 if ! [[ "$BUILD_JOBS_VALUE" =~ ^[0-9]+$ ]] || [ "$BUILD_JOBS_VALUE" -lt 1 ]; then
     print_warning "Invalid jobs value: $BUILD_JOBS_VALUE"
     echo "jobs must be an integer >= 1"
@@ -284,12 +306,43 @@ if [[ "$USE_BOOST_LEGACY_FIND" == "ON" ]]; then
 fi
 
 if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
-    CROSS_SYSROOT="$($CROSS_CXX -print-sysroot 2>/dev/null || true)"
+    _CROSS_COMPILER_SYSROOT="$($CROSS_CXX -print-sysroot 2>/dev/null || true)"
     cmake_args+=(
         -DCMAKE_SYSTEM_NAME=Linux
         -DCMAKE_SYSTEM_PROCESSOR=x86_64
         -DCMAKE_CXX_COMPILER="$CROSS_CXX"
+        -DSYSROOT_INCLUDE="$CROSS_SYSROOT"
     )
+
+    if [ -n "$_CROSS_COMPILER_SYSROOT" ]; then
+        cmake_args+=( -DCMAKE_SYSROOT="$_CROSS_COMPILER_SYSROOT" )
+    fi
+
+    # ---- 自动屏蔽 Homebrew spdlog/fmt（防止 cmake 误找） ----
+    _HB_SPDLOG_CMAKE="/opt/homebrew/lib/cmake/spdlog"
+    _HB_SPDLOG_INC="/opt/homebrew/include/spdlog"
+    _HB_FMT_INC="/opt/homebrew/include/fmt"
+    _MASKS=()
+    for _d in "$_HB_SPDLOG_CMAKE" "$_HB_SPDLOG_INC" "$_HB_FMT_INC"; do
+        if [ -d "$_d" ] || [ -f "$_d" ]; then
+            _MASKS+=("$_d")
+        fi
+    done
+    if [ ${#_MASKS[@]} -gt 0 ]; then
+        print_info "Temporarily masking Homebrew spdlog/fmt for cmake configure..."
+        for _d in "${_MASKS[@]}"; do
+            mv "$_d" "${_d}.bak"
+        done
+        # 确保在脚本退出（正常/异常）时恢复
+        _restore_masks() {
+            for _d in "${_MASKS[@]}"; do
+                if [ -e "${_d}.bak" ] && [ ! -e "$_d" ]; then
+                    mv "${_d}.bak" "$_d"
+                fi
+            done
+        }
+        trap _restore_masks EXIT
+    fi
 
     # Cross mode commonly lacks target libcurl development files on macOS hosts.
     # Default to OFF unless user explicitly overrides via EXTRA_CMAKE_ARGS.
@@ -303,10 +356,6 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
     if [[ "$EXTRA_CMAKE_ARGS_STR" != *"ENABLE_DEBUG_LOGS="* ]]; then
         print_info "cross-x64 mode: forcing -DENABLE_DEBUG_LOGS=OFF (override via EXTRA_CMAKE_ARGS if needed)"
         cmake_args+=( -DENABLE_DEBUG_LOGS=OFF )
-    fi
-
-    if [ -n "$CROSS_SYSROOT" ]; then
-        cmake_args+=( -DCMAKE_SYSROOT="$CROSS_SYSROOT" )
     fi
 fi
 
@@ -323,6 +372,17 @@ fi
 cmake_args+=( "${SAFE_CMAKE_ARGS[@]}" )
 
 cmake "${cmake_args[@]}"
+
+# ---- 恢复 Homebrew（cmake configure 完成后即可恢复） ----
+if [ ${#_MASKS[@]} -gt 0 ]; then
+    trap - EXIT  # 取消 trap，手动恢复
+    for _d in "${_MASKS[@]}"; do
+        if [ -e "${_d}.bak" ] && [ ! -e "$_d" ]; then
+            mv "${_d}.bak" "$_d"
+        fi
+    done
+    unset _MASKS _restore_masks _HB_SPDLOG_CMAKE _HB_SPDLOG_INC _HB_FMT_INC
+fi
 
 # 编译
 print_info "Building with ${BUILD_JOBS_VALUE} thread(s)..."

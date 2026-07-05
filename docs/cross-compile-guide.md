@@ -15,37 +15,39 @@ macOS ARM64 (开发机)              Linux x86_64 (服务器 120.24.169.213)
 - **链接**：`.o` 上传到服务器，用服务器本地 g++-13 链接（库 ABI 匹配）
 - **原因**：macOS Homebrew 的 spdlog/fmt 版本与 Ubuntu 22.04 不同，交叉链接会失败
 
+## 前置准备（仅首次）
+
+### 1. 安装交叉编译器
+
+```bash
+brew install x86_64-linux-gnu-binutils
+```
+
+### 2. 同步服务器 sysroot 头文件
+
+```bash
+# 从服务器拉取 spdlog/fmt 头文件到本地 sysroot（家目录，重启不消失）
+bash build.sh sync-sysroot
+```
+
+头文件保存在 `~/.protorelay/sysroot/usr/`，后续无需重复同步。仅当服务器更新 spdlog/fmt 时需要重新同步。
+
+`build.sh` 在交叉编译时会**自动**：
+- 检查 sysroot 头文件是否存在
+- 设置 `SYSROOT_INCLUDE` cmake 变量
+- 临时屏蔽 Homebrew 的 spdlog/fmt（避免 cmake 误找），configure 完成后自动恢复
+
 ## 完整流程
 
 ### 1. 编译
 
 ```bash
-# 先准备服务器头文件（首次或服务器更新后需要）
-ssh root@120.24.169.213 "tar -czf /tmp/server-headers.tar.gz \
-  /usr/include/spdlog /usr/include/fmt"
-scp root@120.24.169.213:/tmp/server-headers.tar.gz /tmp/
-tar -xzf /tmp/server-headers.tar.gz -C /tmp/server-sysroot/usr/include/
-
-# 用服务器头文件覆盖交叉编译器 sysroot 中的版本
-SYSROOT=$(x86_64-linux-gnu-g++ -print-sysroot)/usr/include
-cp -r /tmp/server-sysroot/usr/include/spdlog $SYSROOT/
-cp -r /tmp/server-sysroot/usr/include/fmt $SYSROOT/
-
-# 交叉编译（必须先禁用 Homebrew 的 spdlog/fmt 查找）
-mv /opt/homebrew/lib/cmake/spdlog /opt/homebrew/lib/cmake/spdlog.bak
-mv /opt/homebrew/include/spdlog /opt/homebrew/include/spdlog.bak
-mv /opt/homebrew/include/fmt /opt/homebrew/include/fmt.bak
-
-EXTRA_CMAKE_ARGS="-DENABLE_S3_STORAGE=OFF" bash build.sh Release clean cross-x64 8
-
-# 恢复 Homebrew
-mv /opt/homebrew/lib/cmake/spdlog.bak /opt/homebrew/lib/cmake/spdlog
-mv /opt/homebrew/include/spdlog.bak /opt/homebrew/include/spdlog
-mv /opt/homebrew/include/fmt.bak /opt/homebrew/include/fmt
+# 交叉编译（build.sh 自动处理所有细节）
+EXTRA_CMAKE_ARGS="-DENABLE_S3_STORAGE=OFF" bash build.sh Release cross-x64 8
 ```
 
-- `ENABLE_S3_STORAGE=OFF` 必须设置，交叉编译器没有 libcurl
-- `build.sh cross-x64` 自动使用 `x86_64-linux-gnu-g++` 并跳过链接
+- `ENABLE_S3_STORAGE=OFF`：交叉编译器没有 libcurl，S3 模块需显式关闭（非 S3 场景均需此参数）
+- `cross-x64` 自动使用 `x86_64-linux-gnu-g++` 并跳过链接（object-only）
 - 产物在 `artifacts/linux-x86_64/Release/obj/`
 
 ### 2. 上传
@@ -89,6 +91,16 @@ systemctl start imapserver.service
   -o /tmp/smtpsServer_new --compiler g++-13
 ```
 
+## 一键部署
+
+```bash
+# 完整流程：同步 sysroot → 编译 → 上传 → 链接 → 重启服务
+bash deploy.sh
+
+# 全量重新编译
+bash deploy.sh clean
+```
+
 ## 常见问题
 
 ### spdlog/fmt ABI 不匹配
@@ -97,7 +109,7 @@ systemctl start imapserver.service
 
 **原因**：macOS Homebrew 的 spdlog 使用 fmt v12，服务器 Ubuntu 22.04 使用 fmt v8（libfmt8）
 
-**解决**：编译前把服务器的 spdlog/fmt 头文件覆盖到交叉编译器 sysroot（见上面步骤1）
+**解决**：运行 `bash build.sh sync-sysroot` 同步服务器头文件。build.sh 交叉编译时自动使用 sysroot 中的头文件。
 
 ### Boost awaitable.hpp std::exchange 错误
 
@@ -135,8 +147,10 @@ systemctl start imapserver.service
 
 | 文件 | 作用 |
 |------|------|
-| `build.sh` | 编译脚本，`cross-x64` 模式启用交叉编译 |
+| `build.sh` | 编译脚本，`cross-x64` 模式启用交叉编译（自动处理 Homebrew 屏蔽、sysroot） |
+| `deploy.sh` | 一键部署脚本 |
 | `artifacts/linux-x86_64/Release/obj/link.sh` | 服务器端链接脚本 |
+| `~/.protorelay/sysroot/usr/` | 本地 sysroot 头文件缓存（spdlog/fmt） |
 | `config/imapsConfig.json` | 服务器 IMAP 配置 |
 | `/opt/smtpServer/` | 服务器部署目录 |
 | `/etc/systemd/system/imapserver.service` | systemd 服务定义 |
