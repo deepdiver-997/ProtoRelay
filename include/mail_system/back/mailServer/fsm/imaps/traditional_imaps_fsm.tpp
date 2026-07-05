@@ -1901,11 +1901,17 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
         if (uid_set.find(':') != std::string::npos) {
             size_t c = uid_set.find(':');
             std::string u1 = uid_set.substr(0, c), u2 = uid_set.substr(c + 1);
-            uint64_t uid1 = safe_stoull(u1), uid2 = (u2 == "*") ? UINT64_MAX : safe_stoull(u2);
-            auto it1 = uid_to_seq.find(uid1), it2 = uid_to_seq.find(uid2);
-            if (uid2 == UINT64_MAX) seq_set = std::to_string(it1 != uid_to_seq.end() ? it1->second : 0) + ":*";
-            else seq_set = std::to_string(it1 != uid_to_seq.end() ? it1->second : 0) + ":"
-                         + std::to_string(it2 != uid_to_seq.end() ? it2->second : 0);
+            auto it1 = uid_to_seq.find(safe_stoull(u1));
+            uint64_t s1 = (it1 != uid_to_seq.end()) ? it1->second : 0;
+            if (u2 == "*")
+                seq_set = std::to_string(s1) + ":*";
+            else {
+                auto it2 = uid_to_seq.find(safe_stoull(u2));
+                uint64_t s2 = (it2 != uid_to_seq.end()) ? it2->second : 0;
+                seq_set = std::to_string(s1) + ":" + std::to_string(s2);
+            }
+        } else if (uid_set == "*") {
+            seq_set = "*";
         } else {
             auto it = uid_to_seq.find(safe_stoull(uid_set));
             seq_set = std::to_string(it != uid_to_seq.end() ? it->second : 0);
