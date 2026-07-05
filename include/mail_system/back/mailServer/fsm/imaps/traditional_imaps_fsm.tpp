@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <unordered_map>
 
 namespace mail_system {
 
@@ -1877,6 +1878,41 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
     std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
 
     LOG_IMAP_INFO("UID subcmd={} args={}", subcmd, subargs);
+
+    // UID FETCH/STORE/COPY: 把 UID 序列号映射为 mails 数组下标+1
+    if (subcmd == "FETCH" || subcmd == "STORE" || subcmd == "COPY") {
+        std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+        if (!this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails) || mails.empty()) {
+            send_tagged(session, tag, "OK", subcmd + " completed (empty)");
+            return;
+        }
+        // 构建 UID → seq 映射
+        std::unordered_map<uint64_t, uint64_t> uid_to_seq;
+        for (size_t i = 0; i < mails.size(); ++i)
+            uid_to_seq[mails[i].mail_id] = i + 1;
+
+        // 找到 args 中的空格（分割 序列号 和 属性）
+        size_t sp = subargs.find(' ');
+        std::string uid_set = (sp != std::string::npos) ? subargs.substr(0, sp) : subargs;
+        std::string rest    = (sp != std::string::npos) ? subargs.substr(sp) : "";
+
+        // UID set → seq set
+        std::string seq_set;
+        if (uid_set.find(':') != std::string::npos) {
+            size_t c = uid_set.find(':');
+            std::string u1 = uid_set.substr(0, c), u2 = uid_set.substr(c + 1);
+            uint64_t uid1 = safe_stoull(u1), uid2 = (u2 == "*") ? UINT64_MAX : safe_stoull(u2);
+            auto it1 = uid_to_seq.find(uid1), it2 = uid_to_seq.find(uid2);
+            if (uid2 == UINT64_MAX) seq_set = std::to_string(it1 != uid_to_seq.end() ? it1->second : 0) + ":*";
+            else seq_set = std::to_string(it1 != uid_to_seq.end() ? it1->second : 0) + ":"
+                         + std::to_string(it2 != uid_to_seq.end() ? it2->second : 0);
+        } else {
+            auto it = uid_to_seq.find(safe_stoull(uid_set));
+            seq_set = std::to_string(it != uid_to_seq.end() ? it->second : 0);
+        }
+        subargs = seq_set + rest;
+    }
+
     if (subcmd == "FETCH") {
         handle_fetch(session, subargs);
     } else if (subcmd == "STORE") {
