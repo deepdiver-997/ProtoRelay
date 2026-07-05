@@ -1137,7 +1137,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
-    bool want_body = attrs.find("BODY") != std::string::npos;
+    bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
+    bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos || attrs.find("BODY[HEADER]") != std::string::npos;
+    if (!want_body && !want_body_header && attrs.find("BODY") != std::string::npos)
+        want_body = true; // fallback: generic BODY request
     [[maybe_unused]] bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
     // Determine sequence range
@@ -1239,9 +1242,17 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             );
             response += "ENVELOPE " + envelope + " ";
         }
+        if (want_body_header) {
+            std::string body_content = this->read_mail_body(mail_info.body_path);
+            // Extract headers (everything before \r\n\r\n)
+            std::string headers = body_content;
+            size_t hdr_end = body_content.find("\r\n\r\n");
+            if (hdr_end != std::string::npos)
+                headers = body_content.substr(0, hdr_end + 2); // include trailing \r\n
+            response += "BODY[HEADER] " + build_fetch_body_response(headers, headers.size()) + " ";
+        }
         if (want_body) {
             std::string body_content = this->read_mail_body(mail_info.body_path);
-            // BODY[] (entire message)
             response += "BODY[] " + build_fetch_body_response(body_content, body_content.size()) + " ";
         }
         // Remove trailing space
