@@ -603,6 +603,10 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
             clean_key += ch;
     }
 
+    // Add missing base64 padding (DNS TXT records often strip trailing =)
+    int missing_pad = (4 - (clean_key.size() % 4)) % 4;
+    clean_key.append(missing_pad, '=');
+
     int pubkey_len = static_cast<int>(clean_key.size());
     std::vector<unsigned char> pubkey_decoded(pubkey_len);
     int decoded = EVP_DecodeBlock(pubkey_decoded.data(),
@@ -610,12 +614,13 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
                                   pubkey_len);
     if (decoded <= 0) {
         error_out = "failed to base64-decode DKIM public key (len="
-                  + std::to_string(pubkey_len) + ")";
+                  + std::to_string(pubkey_len) + ", orig="
+                  + std::to_string(pubkey_len - missing_pad) + ")";
         LOG_SERVER_WARN("DKIM base64 decode failed: domain={}, selector={}, key_len={}",
-                         sig.domain, sig.selector, pubkey_len);
+                         sig.domain, sig.selector, pubkey_len - missing_pad);
         return false;
     }
-    // Adjust for padding
+    // OpenSSL EVP_DecodeBlock includes padding bytes in output, adjust
     if (pubkey_len > 0 && clean_key.back() == '=') decoded--;
     if (pubkey_len > 1 && clean_key[pubkey_len - 2] == '=') decoded--;
     pubkey_decoded.resize(static_cast<size_t>(decoded));
