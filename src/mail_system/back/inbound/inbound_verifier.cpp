@@ -529,6 +529,7 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
 
     std::string pubkey_b64;
     for (const auto& rec : txt_records) {
+        LOG_SERVER_INFO("DKIM TXT record ({} bytes): {}", rec.size(), rec);
         // DKIM key record looks like: "k=rsa; p=MIGfMA0..."
         auto tags = parse_tags(rec);
         auto it_k = tags.find("k");
@@ -537,6 +538,8 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
         auto it_p = tags.find("p");
         if (it_p != tags.end() && !it_p->second.empty()) {
             pubkey_b64 = it_p->second;
+            LOG_SERVER_INFO("DKIM p= value ({} bytes, mod4={})",
+                            pubkey_b64.size(), pubkey_b64.size() % 4);
             break;
         }
     }

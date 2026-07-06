@@ -173,17 +173,10 @@ void txt_query_callback(void* arg, int status, int timeouts, unsigned char* abuf
             if (!it->txt || it->length == 0) {
                 continue;
             }
-            std::string record;
-            record.reserve(it->length);
-            const unsigned char* ptr = it->txt;
-            const unsigned char* end = it->txt + it->length;
-            while (ptr < end) {
-                unsigned char seg_len = *ptr;
-                ++ptr;
-                record.append(reinterpret_cast<const char*>(ptr), seg_len);
-                ptr += seg_len;
-            }
-            ctx->records.push_back(std::move(record));
+            // c-ares txt already contains the raw text content,
+            // NOT a length-prefixed segment format.
+            ctx->records.emplace_back(
+                reinterpret_cast<const char*>(it->txt), it->length);
         }
         ares_free_data(txt_reply);
     }
