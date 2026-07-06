@@ -116,8 +116,10 @@ private:
         std::string selector;
         std::string body_hash;
         std::string signature;
+        std::string body_canon = "simple";   // c= tag body algo (simple/relaxed)
+        std::string header_canon = "simple"; // c= tag header algo (simple/relaxed)
         std::vector<std::string> signed_headers;
-        std::string raw_value;  // 完整的 DKIM-Signature 值（不含头名）
+        std::string raw_value;
     };
     std::vector<DkimSignature> parse_dkim_signatures(const std::string& raw_headers);
     bool verify_dkim_signature(const DkimSignature& sig,

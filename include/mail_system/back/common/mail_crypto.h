@@ -97,6 +97,33 @@ inline std::string normalize_body_simple(const std::string& body) {
     return oss.str();
 }
 
+// DKIM "relaxed" body canonicalization (RFC 6376 §3.4.4):
+// - Ignores all trailing empty lines
+// - Reduces runs of WSP within lines to a single SP
+// - Removes trailing WSP from each line
+inline std::string normalize_body_relaxed(const std::string& body) {
+    auto lines = split_lines_lf(body);
+    while (!lines.empty() && lines.back().empty())
+        lines.pop_back();
+    if (lines.empty())
+        return "";
+    std::ostringstream oss;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::string collapsed;
+        bool in_sp = false;
+        for (char ch : lines[i]) {
+            if (ch == ' ' || ch == '\t') {
+                in_sp = true;
+            } else {
+                if (in_sp) { collapsed += ' '; in_sp = false; }
+                collapsed += ch;
+            }
+        }
+        oss << collapsed << "\r\n";
+    }
+    return oss.str();
+}
+
 // ---------- crypto ----------
 
 inline std::string base64_encode(const unsigned char* data, std::size_t size) {

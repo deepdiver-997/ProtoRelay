@@ -500,6 +500,18 @@ InboundVerifier::parse_dkim_signatures(const std::string& raw_headers) {
             split(it_h->second, ':', sig.signed_headers);
         }
 
+        // 解析 c= 标签（规范化算法）: "simple/simple", "relaxed/relaxed" 等
+        auto it_c = tags.find("c");
+        if (it_c != tags.end()) {
+            auto slash = it_c->second.find('/');
+            if (slash != std::string::npos) {
+                sig.header_canon = to_lower(outbound::trim_ascii_ws(it_c->second.substr(0, slash)));
+                sig.body_canon   = to_lower(outbound::trim_ascii_ws(it_c->second.substr(slash + 1)));
+            } else {
+                sig.header_canon = sig.body_canon = to_lower(outbound::trim_ascii_ws(it_c->second));
+            }
+        }
+
         if (!sig.domain.empty() && !sig.selector.empty() && !sig.signature.empty()) {
             sigs.push_back(std::move(sig));
         }
@@ -534,11 +546,13 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
         return false;
     }
 
-    // 2. Normalize body and verify body hash
-    std::string canonical_body = outbound::normalize_body_simple(raw_body);
+    // 2. Normalize body and verify body hash (respect c= tag)
+    std::string canonical_body = (sig.body_canon == "relaxed")
+        ? outbound::normalize_body_relaxed(raw_body)
+        : outbound::normalize_body_simple(raw_body);
     std::string computed_bh = outbound::sha256_base64(canonical_body);
     if (computed_bh != sig.body_hash) {
-        error_out = "DKIM body hash mismatch";
+        error_out = "DKIM body hash mismatch (canon=" + sig.body_canon + ")";
         return false;
     }
 

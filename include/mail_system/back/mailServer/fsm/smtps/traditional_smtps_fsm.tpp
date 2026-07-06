@@ -418,7 +418,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                         client_ip.compare(0, 3, "10.") == 0 ||
                         client_ip.compare(0, 8, "192.168.") == 0 ||
                         (client_ip.compare(0, 4, "172.") == 0)) {
-                        // skip PTR for private IPs
+                        // private/localhost IPs are implicitly trusted
+                        ctx->is_trusted_server = true;
                     } else {
                         auto hostnames = resolver->resolve_ptr_cached(client_ip);
                         for (const auto& h : hostnames) {
