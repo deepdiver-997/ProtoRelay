@@ -553,6 +553,8 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
     std::string computed_bh = outbound::sha256_base64(canonical_body);
     if (computed_bh != sig.body_hash) {
         error_out = "DKIM body hash mismatch (canon=" + sig.body_canon + ")";
+        LOG_SERVER_WARN("DKIM body hash mismatch: domain={}, selector={}, canon={}",
+                         sig.domain, sig.selector, sig.body_canon);
         return false;
     }
 
@@ -592,20 +594,30 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
 
     // 4. Verify RSA-SHA256 signature
     // Decode base64 public key → DER → EVP_PKEY
-    // The DKIM public key is stored as base64-encoded DER SubjectPublicKeyInfo
-    // First, base64 decode
-    int pubkey_len = static_cast<int>(pubkey_b64.size());
+    // DKIM TXT records often contain embedded whitespace (spaces, newlines)
+    // in the base64 value — strip all non-base64 chars before decoding.
+    std::string clean_key;
+    clean_key.reserve(pubkey_b64.size());
+    for (char ch : pubkey_b64) {
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+            clean_key += ch;
+    }
+
+    int pubkey_len = static_cast<int>(clean_key.size());
     std::vector<unsigned char> pubkey_decoded(pubkey_len);
     int decoded = EVP_DecodeBlock(pubkey_decoded.data(),
-                                  reinterpret_cast<const unsigned char*>(pubkey_b64.data()),
+                                  reinterpret_cast<const unsigned char*>(clean_key.data()),
                                   pubkey_len);
     if (decoded <= 0) {
-        error_out = "failed to base64-decode DKIM public key";
+        error_out = "failed to base64-decode DKIM public key (len="
+                  + std::to_string(pubkey_len) + ")";
+        LOG_SERVER_WARN("DKIM base64 decode failed: domain={}, selector={}, key_len={}",
+                         sig.domain, sig.selector, pubkey_len);
         return false;
     }
     // Adjust for padding
-    if (pubkey_len > 0 && pubkey_b64.back() == '=') decoded--;
-    if (pubkey_len > 1 && pubkey_b64[pubkey_len - 2] == '=') decoded--;
+    if (pubkey_len > 0 && clean_key.back() == '=') decoded--;
+    if (pubkey_len > 1 && clean_key[pubkey_len - 2] == '=') decoded--;
     pubkey_decoded.resize(static_cast<size_t>(decoded));
 
     const unsigned char* key_ptr = pubkey_decoded.data();
@@ -645,8 +657,11 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
                                                    static_cast<size_t>(sig_decoded_len));
         if (verify_result == 1) {
             ok = true;
+            LOG_SERVER_INFO("DKIM pass: domain={}, selector={}", sig.domain, sig.selector);
         } else {
             error_out = "DKIM signature verification failed";
+            LOG_SERVER_WARN("DKIM signature verify failed: domain={}, selector={}",
+                            sig.domain, sig.selector);
         }
     } while (false);
 
