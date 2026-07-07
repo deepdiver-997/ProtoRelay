@@ -687,7 +687,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
     // after_persist: wait for persistence, then reply
     auto pool = session->get_server()->m_workerThreadPool;
-    pool->post(make_copyable([s = session]() mutable {
+    pool->post([s = session]() mutable {
         auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(s.get());
         if (!smtp_s) { if (s) s->close(); return; }
         if (!smtp_s->has_pending_mail_submission()) { s->close(); return; }
@@ -723,9 +723,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         smtp_s->clear_pending_mail_submission();
         s->do_async_write("451 Requested action aborted: local processing timeout\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
-    }));
+    });
 }
-
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
     std::shared_ptr<SessionBase<ConnectionType>> session, const std::string&)

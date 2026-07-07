@@ -164,7 +164,7 @@ public:
         auto buf = boost::asio::buffer(read_buffer_);
 
         conn->async_read(buf,
-            make_copyable([self = this->shared_from_this()](
+            [self = this->shared_from_this()](
                 const boost::system::error_code& error, std::size_t bytes) mutable {
                 if (self->closed_) return;
 
@@ -190,7 +190,7 @@ public:
                     self->handle_read(self->take_buffered_input());
                     self->process_read();
                 }
-            }));
+            });
     }
 
     // 异步写：有流水线数据时批量累积 + 同步回调链处理后续命令，
