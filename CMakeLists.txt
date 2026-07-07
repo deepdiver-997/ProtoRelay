@@ -386,6 +386,19 @@ if(BUILD_OBJECT_ONLY)
     add_library(mailServer_obj OBJECT test/mail_server_combined.cpp)
 endif()
 
+# ---- 单元测试 ----
+add_executable(test_inbound_verifier test/test_inbound_verifier.cpp)
+target_include_directories(test_inbound_verifier PRIVATE "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(test_inbound_verifier PRIVATE "${CMAKE_BINARY_DIR}/generated")
+if(SYSROOT_INCLUDE)
+    target_include_directories(test_inbound_verifier BEFORE PRIVATE SYSTEM ${SYSROOT_INCLUDE})
+endif()
+if(spdlog_FOUND)
+    target_include_directories(test_inbound_verifier PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+endif()
+target_link_libraries(test_inbound_verifier PRIVATE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_compile_features(test_inbound_verifier PRIVATE cxx_std_20)
+
 # 全局输出目录 - 可执行文件到test目录，其他到build目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
 
