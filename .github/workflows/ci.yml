@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---- 单元测试 (快速反馈，2-3 分钟) ----
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libspdlog-dev libc-ares-dev \
+                                  libmysqlclient-dev libboost-system-dev libboost-thread-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build test_inbound_verifier
+        run: cmake --build build --target test_inbound_verifier -j$(nproc)
+
+      - name: Run tests
+        run: ./build/test_inbound_verifier
+
+  # ---- 完整构建 (确认所有 target 能编译) ----
+  full-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libspdlog-dev libc-ares-dev \
+                                  libmysqlclient-dev libboost-system-dev libboost-thread-dev \
+                                  nlohmann-json3-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build all
+        run: cmake --build build -j$(nproc)
