@@ -227,7 +227,11 @@ public:
     virtual void process_read() = 0;
 
     virtual bool has_buffered_input() const {
-        return command_read_buffer_.find('\n') != std::string::npos;
+        // 检查是否有完整行（\r\n），而非仅 \n。
+        // 若只检查 \n，遇到不带 \r 的数据时会与 process_read 形成死循环：
+        // has_buffered_input→true → pipeline 循环 → process_read 找不到 \r\n
+        // → do_async_read → has_buffered_input→true → 无限空转
+        return command_read_buffer_.find("\r\n") != std::string::npos;
     }
     virtual std::string take_buffered_input() {
         std::string s = std::move(command_read_buffer_);
