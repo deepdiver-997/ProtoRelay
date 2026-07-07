@@ -350,6 +350,10 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
         print_info "cross-x64 mode: forcing -DENABLE_HDFS_WEB_STORAGE=OFF (override via EXTRA_CMAKE_ARGS if needed)"
         cmake_args+=( -DENABLE_HDFS_WEB_STORAGE=OFF )
     fi
+    if [[ "$EXTRA_CMAKE_ARGS_STR" != *"ENABLE_S3_STORAGE="* ]]; then
+        print_info "cross-x64 mode: forcing -DENABLE_S3_STORAGE=OFF (override via EXTRA_CMAKE_ARGS if needed)"
+        cmake_args+=( -DENABLE_S3_STORAGE=OFF )
+    fi
 
     # Cross artifacts are usually used for production deployment; keep debug logs OFF
     # unless the user explicitly opts in.

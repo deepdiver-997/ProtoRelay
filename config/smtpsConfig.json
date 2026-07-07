@@ -34,8 +34,8 @@
 
   "log_level": "info",
   "log_to_console": false,
-  "log_to_file": false,
-  "log_file": "logs/server.log",
+  "log_to_file": true,
+  "log_file": "/tmp/logs/server.log",
 
   "storage": {
     "provider": "local",

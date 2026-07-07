@@ -613,25 +613,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 bool any_hard = (cfg->inbound_spf_mode == "hard" ||
                                 cfg->inbound_dkim_mode == "hard" ||
                                 cfg->inbound_dmarc_mode == "hard");
-                auto pool = session->get_server()->m_workerThreadPool;
                 bool spf_done = ctx->spf_checked;
                 inbound::SpfResult stored_spf;
                 if (spf_done) { stored_spf.result = ctx->spf_result; stored_spf.reason = ctx->spf_reason; }
 
-                auto task = [resolver, client_ip, mail_from, helo, headers, raw_body,
-                             cfg = *cfg, spf_done, stored_spf]() -> inbound::VerificationResult {
-                    inbound::VerificationResult result;
+                inbound::VerificationResult result;
                     inbound::InboundVerifier verifier(*resolver);
-                    verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, cfg, result,
+                    verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, *cfg, result,
                                         spf_done ? &stored_spf : nullptr);
-                    return result;
-                };
-
-                auto fut = pool->submit(std::move(task));
-                auto timeout = std::chrono::milliseconds(cfg->inbound_auth_timeout_ms);
-
-                if (fut.wait_for(timeout) == std::future_status::ready) {
-                    inbound::VerificationResult result = fut.get();
                     ctx->verification_run = true;
 
                     if (any_hard) {
@@ -656,14 +645,6 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                         cfg->system_domain, result, mf_domain);
                     if (!ctx->auth_results_header.empty())
                         ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
-                } else {
-                    if (any_hard) {
-                        smtp_session->discard_current_mail();
-                        session->do_async_write("451 4.7.1 Inbound verification timeout\r\n",
-                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
-                        return;
-                    }
-                }
             }
         }
     }

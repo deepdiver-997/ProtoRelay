@@ -523,6 +523,7 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
                                             const std::string& raw_headers,
                                             const std::string& raw_body,
                                             std::string& error_out) {
+    try {
     // 1. Fetch public key via DNS
     std::string key_domain = sig.selector + "._domainkey." + sig.domain;
     auto txt_records = dns_.resolve_txt(key_domain);
@@ -554,14 +555,20 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
         ? outbound::normalize_body_relaxed(raw_body)
         : outbound::normalize_body_simple(raw_body);
     std::string computed_bh = outbound::sha256_base64(canonical_body);
+    LOG_SERVER_INFO("DKIM body hash: expected={}.. computed={}.. canon={} body_len={}",
+                     sig.body_hash.substr(0, 8), computed_bh.substr(0, 8),
+                     sig.body_canon, raw_body.size());
     if (computed_bh != sig.body_hash) {
         error_out = "DKIM body hash mismatch (canon=" + sig.body_canon + ")";
-        LOG_SERVER_WARN("DKIM body hash mismatch: domain={}, selector={}, canon={}",
-                         sig.domain, sig.selector, sig.body_canon);
+        LOG_SERVER_WARN("DKIM bh mismatch: domain={}, selector={}, canon={}, exp={}, got={}",
+                         sig.domain, sig.selector, sig.body_canon,
+                         sig.body_hash.substr(0, 16), computed_bh.substr(0, 16));
         return false;
     }
 
     // 3. Build signing input
+    LOG_SERVER_INFO("DKIM step3: building signing input, headers={} h_count={}",
+                    raw_headers.size(), sig.signed_headers.size());
     // Parse raw headers into a map for canonicalization
     auto header_map = parse_headers_map(raw_headers);
 
@@ -569,12 +576,9 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
     for (const auto& hname : sig.signed_headers) {
         auto it = header_map.find(to_lower(hname));
         if (it == header_map.end()) {
-            // Header not present in message — skip (DKIM allows this)
-            continue;
+            continue; // Header not present in message — skip (DKIM allows this)
         }
-        std::string canonical_name;
-        // Preserve original header case from raw headers
-        auto orig_vals = get_header_values(raw_headers, hname);
+        auto orig_vals = get_header_values(raw_headers, to_lower(hname));
         if (orig_vals.empty()) continue;
         signing_input += outbound::canonicalize_header_relaxed(hname, orig_vals[0]);
     }
@@ -593,12 +597,17 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
             dkim_for_signing = dkim_for_signing.substr(0, b_pos + 2);
         }
     }
-    signing_input += outbound::canonicalize_header_relaxed("DKIM-Signature", dkim_for_signing);
+    // DKIM-Signature is always the last header — it MUST NOT have a trailing CRLF
+    // (the signing process computes the hash WITHOUT the trailing CRLF of this header)
+    std::string dkim_canon = outbound::canonicalize_header_relaxed("DKIM-Signature", dkim_for_signing);
+    if (dkim_canon.size() >= 2 && dkim_canon.substr(dkim_canon.size() - 2) == "\r\n") {
+        dkim_canon.resize(dkim_canon.size() - 2);
+    }
+    signing_input += dkim_canon;
 
     // 4. Verify RSA-SHA256 signature
+    LOG_SERVER_INFO("DKIM step4: decoding key, key_b64_len={}", pubkey_b64.size());
     // Decode base64 public key → DER → EVP_PKEY
-    // DKIM TXT records often contain embedded whitespace (spaces, newlines)
-    // in the base64 value — strip all non-base64 chars before decoding.
     std::string clean_key;
     clean_key.reserve(pubkey_b64.size());
     for (char ch : pubkey_b64) {
@@ -628,26 +637,45 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
     if (pubkey_len > 1 && clean_key[pubkey_len - 2] == '=') decoded--;
     pubkey_decoded.resize(static_cast<size_t>(decoded));
 
+    LOG_SERVER_INFO("DKIM key decoded={} bytes, calling d2i_PUBKEY...", decoded);
+    Logger::get_instance().flush();
     const unsigned char* key_ptr = pubkey_decoded.data();
     EVP_PKEY* pkey = d2i_PUBKEY(nullptr, &key_ptr, static_cast<long>(decoded));
+    LOG_SERVER_INFO("DKIM d2i_PUBKEY returned pkey={}", (void*)pkey);
+    Logger::get_instance().flush();
     if (!pkey) {
-        error_out = "failed to parse DKIM public key (DER)";
+        error_out = "failed to parse DKIM public key (DER, decoded_len="
+                  + std::to_string(decoded) + ")";
         return false;
     }
 
-    // Decode base64 signature
-    int sig_b64_len = static_cast<int>(sig.signature.size());
+    // Decode base64 signature (strip whitespace from folded header lines)
+    LOG_SERVER_INFO("DKIM step5: decode sig, sig_b64_raw={}", sig.signature.size());
+    std::string clean_sig;
+    clean_sig.reserve(sig.signature.size());
+    for (char ch : sig.signature) {
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+            clean_sig += ch;
+    }
+    int missing_sig_pad = (4 - (clean_sig.size() % 4)) % 4;
+    clean_sig.append(missing_sig_pad, '=');
+
+    int sig_b64_len = static_cast<int>(clean_sig.size());
     std::vector<unsigned char> sig_decoded(sig_b64_len);
     int sig_decoded_len = EVP_DecodeBlock(sig_decoded.data(),
-                                          reinterpret_cast<const unsigned char*>(sig.signature.data()),
+                                          reinterpret_cast<const unsigned char*>(clean_sig.data()),
                                           sig_b64_len);
     if (sig_decoded_len <= 0) {
         EVP_PKEY_free(pkey);
-        error_out = "failed to base64-decode DKIM signature";
+        error_out = "failed to base64-decode DKIM signature (sig_len="
+                  + std::to_string(sig_b64_len) + ", err=" + std::to_string(sig_decoded_len) + ")";
+        LOG_SERVER_WARN("DKIM sig decode failed: domain={}, selector={}, sig_len={}, ret={}",
+                        sig.domain, sig.selector, sig_b64_len, sig_decoded_len);
         return false;
     }
-    if (sig_b64_len > 0 && sig.signature.back() == '=') sig_decoded_len--;
-    if (sig_b64_len > 1 && sig.signature[sig_b64_len - 2] == '=') sig_decoded_len--;
+    if (sig_b64_len > 0 && clean_sig.back() == '=') sig_decoded_len--;
+    if (sig_b64_len > 1 && clean_sig[clean_sig.size() - 2] == '=') sig_decoded_len--;
+    LOG_SERVER_INFO("DKIM sig decoded: raw={} adjusted={}", sig_b64_len > 0 ? std::to_string(sig_b64_len) : "0", sig_decoded_len);
 
     // Verify
     EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
@@ -665,17 +693,33 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
                                                    static_cast<size_t>(sig_decoded_len));
         if (verify_result == 1) {
             ok = true;
-            LOG_SERVER_INFO("DKIM pass: domain={}, selector={}", sig.domain, sig.selector);
+            LOG_SERVER_INFO("DKIM VERIFY PASS: domain={}, selector={}", sig.domain, sig.selector);
+            Logger::get_instance().flush();
         } else {
             error_out = "DKIM signature verification failed";
-            LOG_SERVER_WARN("DKIM signature verify failed: domain={}, selector={}",
-                            sig.domain, sig.selector);
+            LOG_SERVER_WARN("DKIM VERIFY FAIL: domain={}, selector={}, sig_len={}",
+                            sig.domain, sig.selector, sig_decoded_len);
+            Logger::get_instance().flush();
         }
     } while (false);
 
     EVP_MD_CTX_free(md_ctx);
     EVP_PKEY_free(pkey);
     return ok;
+
+    } catch (const std::exception& e) {
+        error_out = std::string("DKIM verify exception: ") + e.what();
+        LOG_SERVER_WARN("DKIM EXCEPTION: domain={}, selector={}, what={}",
+                        sig.domain, sig.selector, e.what());
+        Logger::get_instance().flush();
+        return false;
+    } catch (...) {
+        error_out = "DKIM verify unknown exception";
+        LOG_SERVER_WARN("DKIM UNKNOWN EXCEPTION: domain={}, selector={}",
+                        sig.domain, sig.selector);
+        Logger::get_instance().flush();
+        return false;
+    }
 }
 
 DkimResult InboundVerifier::check_dkim(const std::string& raw_headers,
