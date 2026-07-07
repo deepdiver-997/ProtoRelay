@@ -121,27 +121,31 @@ void ImapsSession<ConnectionType>::process_read() {
     auto& buf = session->command_read_buffer_;
 
     // IDLE 状态特殊处理：等待 DONE
+    // 批量消费缓冲区中的所有行，避免每次只处理一行导致流水线循环
+    // 反复拷贝整个缓冲区（O(n²) CPU 空转）
     if (session->context_.idle_mode) {
-        // 检查是否是 DONE
-        size_t line_end = buf.find("\r\n");
-        if (line_end != std::string::npos) {
+        while (true) {
+            size_t line_end = buf.find("\r\n");
+            if (line_end == std::string::npos) {
+                // 没有完整行，需要更多数据
+                self->do_async_read();
+                return;
+            }
             std::string line = buf.substr(0, line_end);
             buf.erase(0, line_end + 2);
-            // Trim
-            line.erase(line.find_last_not_of(" \t\r\n") + 1);
+            // Trim trailing whitespace
+            auto trim_end = line.find_last_not_of(" \t\r\n");
+            if (trim_end != std::string::npos) line.resize(trim_end + 1);
             std::string upper = line;
             std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
             if (upper == "DONE") {
                 session->context_.idle_mode = false;
                 auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-                // For DONE, write OK response and go back to reading
                 fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
                 return;
             }
+            // 非 DONE 行 → 丢弃，继续循环处理下一行
         }
-        // No DONE yet, keep reading
-        self->do_async_read();
-        return;
     }
 
     // 检查是否在等待 literal
