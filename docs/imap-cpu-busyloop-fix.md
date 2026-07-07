@@ -2,7 +2,35 @@
 
 ## 现象
 
-IMAP 服务进程（imapsServer）的两个 IO 线程各占用约 100% CPU，累计 CPU 时间远超正常水平（运行 5 小时累积 3 天 CPU 时间）。
+IMAP 服务进程（imapsServer）的两个 IO 线程各占用约 100% CPU，累计 CPU 时间远超正常水平（运行 5 小时累积 3 天 CPU 时间）。SMTP 进程未受影响。
+
+## 背景：IMAP vs SMTP 的流水线消费差异
+
+两个协议共享 `SessionBase::do_async_read()` 中的同一个流水线消费循环：
+
+```
+session_base.h:
+  async_read 回调
+    └→ command_read_buffer_.append(data)
+    └→ while (has_buffered_input())
+         ├→ handle_read(take_buffered_input())   // 取出全部缓冲
+         └→ process_read()                       // 处理一行/一个命令
+```
+
+但 **handle_read** 的实现截然不同，这是 SMTP 不受影响的根本原因：
+
+| | SMTP | IMAP |
+|---|---|---|
+| `handle_read(data)` | 直接调用 `parse_smtp_command(data)`，内部消费一行并从 `command_read_buffer_` 中移除 | 仅 `command_read_buffer_.append(data)` — 全部放回 |
+| `process_read()` | 调用 `fsm->auto_process_event()` — 4 行代码 | 直接操作 `command_read_buffer_` 逐行解析，200+ 行 |
+| 缓冲区消费时机 | `handle_read` 阶段就消费了 | `process_read` 阶段才消费 |
+| 特殊状态 | 无持久等待状态 | **IDLE 模式**：服务器无限期等待客户端发 `DONE` |
+
+关键差异：SMTP 的 `handle_read` 就完成了数据消费，`process_read` 只是触发 FSM。FSM 处理后调用 `do_async_read()` 时，缓冲区已空，所以 `has_buffered_input()` 返回 false → 真正启动异步读。
+
+IMAP 的 `handle_read` 只是把数据放回缓冲区，`process_read` 才逐行消费。消费一行后若还有数据，调用 `do_async_read()` 时 `has_buffered_input()` 仍为 true → 立即返回 → 流水线循环再次 `take_buffered_input`（全量拷贝）→ 再次 `process_read`。
+
+---
 
 ## 根因 1：IDLE 模式流水线循环 O(n²) 空转
 
@@ -12,7 +40,7 @@ IMAP 服务进程（imapsServer）的两个 IO 线程各占用约 100% CPU，累
 
 ### 触发条件
 
-客户端发送 `IDLE` 命令进入 IDLE 状态后，如果缓冲区中有多个非 `DONE` 行（如管道化的后续命令或垃圾数据），会触发死循环。
+客户端发送 `IDLE` 命令进入 IDLE 状态后，如果缓冲区中有多个非 `DONE` 的完整行（如管道化的后续命令或垃圾数据），就会触发。
 
 ### 调用链
 
@@ -22,44 +50,44 @@ async_read 回调
   └→ while (has_buffered_input())              ← 流水线消费循环
        ├→ handle_read(take_buffered_input())    ← 全量取出再全量放回（拷贝整个缓冲区）
        └→ process_read()
-            └→ IDLE 分支：处理 1 行
+            └→ IDLE 分支：处理 1 行，从 buf 中删除
                  ├→ 非 DONE → do_async_read()
                  │            └→ has_buffered_input() → true → 立即返回
                  └→ return
-       └→ has_buffered_input() → true → 继续循环  ← 又回到 process_read
+       └→ has_buffered_input() → true → 继续循环  ← 再次 copy + process
 ```
 
 ### 原因
 
-旧代码在 IDLE 模式下每次只处理**一行**。处理完后调用 `do_async_read()` 期望等待新数据，但 `do_async_read()` 发现缓冲区还有 `\n` 就立即返回。流水线外层循环再次调用 `handle_read(take_buffered_input())` 完整拷贝剩余缓冲，然后再次进入 `process_read`。每轮迭代拷贝整个剩余缓冲区，时间复杂度 O(n²)。
+旧代码在 IDLE 模式下每次只处理**一行**，然后调用 `do_async_read()` 期望等待新数据。但由于 IMAP 的 `handle_read` 不消费数据，缓冲区中剩余的完整行导致 `has_buffered_input()` 仍为 true → `do_async_read()` 立即返回。外层流水线循环再次调用 `handle_read(take_buffered_input())` 全量拷贝剩余缓冲 → 再次进入 `process_read`。每轮迭代拷贝整个剩余缓冲区，n 行数据产生 O(n²) 字符拷贝量。
 
 ### 修复
 
 将 IDLE 模式下的逐行处理改为内部 `while(true)` 循环，一次性消费缓冲区中所有行：
 
 ```cpp
-// 修复前：每次只处理 1 行
+// 修复前：每次只处理 1 行，依赖外层流水线循环
 if (session->context_.idle_mode) {
     size_t line_end = buf.find("\r\n");
     if (line_end != std::string::npos) {
         // 处理 1 行
         if (upper == "DONE") { ... return; }
     }
-    self->do_async_read();  // ← 回到流水线循环
+    self->do_async_read();
     return;
 }
 
-// 修复后：批量消费所有行
+// 修复后：内部 while(true) 批量消费所有行后再返回
 if (session->context_.idle_mode) {
     while (true) {
         size_t line_end = buf.find("\r\n");
         if (line_end == std::string::npos) {
-            self->do_async_read();  // 缓冲区无完整行，真正等待新数据
+            self->do_async_read();  // 无完整行，真正等待新数据
             return;
         }
-        // 提取行、删除
+        // 提取行、从 buf 删除
         if (upper == "DONE") { ... return; }
-        // 非 DONE → 丢弃，继续循环
+        // 非 DONE → 丢弃，继续循环消费下一行
     }
 }
 ```
@@ -74,7 +102,7 @@ if (session->context_.idle_mode) {
 
 ### 触发条件
 
-客户端发送的数据包含 `\n` 但不含 `\r\n`（如 Unix 风格换行、垃圾数据）。
+TCP 流中存在 `\n` 但尚未收到 `\r\n`（如 Unix 风格换行、网络分片导致 `\r` 和 `\n` 在不同 TCP 包中到达）。
 
 ### 调用链
 
@@ -93,7 +121,8 @@ async_read 回调
 
 ### 原因
 
-`has_buffered_input()` 只检查 `\n`，而 `process_read()` 需要 `\r\n` 才能形成完整命令行。当缓冲区中有 `\n` 但无 `\r\n` 时，两者判断不一致形成死循环：
+`has_buffered_input()` 只检查 `\n`，而 `process_read()` 需要 `\r\n` 才能形成完整命令行。两者判断不一致形成死循环：
+
 - `has_buffered_input()` 认为"有数据可处理" → 触发流水线循环
 - `process_read()` 认为"没有完整行" → 调用 `do_async_read()` 等待
 - `do_async_read()` 又检查 `has_buffered_input()` → true → 立即返回
@@ -114,14 +143,22 @@ virtual bool has_buffered_input() const {
 }
 ```
 
-SMTP 和 IMAP 协议规范（RFC 5321、RFC 3501）均要求 CRLF 行结束符，此改动不会影响正常客户端。
+SMTP 和 IMAP 协议规范（RFC 5321、RFC 3501）均要求 CRLF 行结束符，此改动不影响正常客户端。
+
+---
+
+## 附：为什么 socket 关闭不会中断死循环
+
+两个根因都发生在 `do_async_read()` 的回调内部——回调函数进入 `while(has_buffered_input())` 后永不返回。IO 线程的 `io_context::run()` 事件循环依赖回调返回来处理下一个事件（包括 socket 的 close/EOF 事件）。回调不返回 → 事件循环被阻塞 → 所有新事件（包括 TCP RST/FIN）永远排不上队 → session 永远不退出 → `close()` 永远不会被调用。
+
+这就是为什么即使客户端已经断开（CLOSE-WAIT），进程仍然 100% CPU 空转。
 
 ---
 
 ## 影响范围
 
-- **根因 1**：仅影响 `ImapsSession::process_read()` 的 IDLE 分支
-- **根因 2**：影响所有使用 `SessionBase` 的会话（SMTP + IMAP），但只在缓冲区有异常数据时触发
+- **根因 1**：仅影响 `ImapsSession::process_read()` 的 IDLE 分支。SMTP 没有 IDLE 模式，不受影响
+- **根因 2**：影响所有使用 `SessionBase` 的会话（SMTP + IMAP），但只在缓冲区存在 `\n` 而无 `\r\n` 的异常数据时触发。SMTP 正常流量不受影响因为 SMTP 客户端都使用 CRLF
 
 ## 验证
 
