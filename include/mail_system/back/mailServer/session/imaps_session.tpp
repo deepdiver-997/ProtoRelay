@@ -94,134 +94,64 @@ void ImapsSession<ConnectionType>::start_after_starttls(std::shared_ptr<ImapsSes
 }
 
 // ====================================================================
-// handle_read: 把裸数据追加到行缓冲区
+// handle_read: 解析一行命令（tag/command/args），store for process_read
+// SMTP 的 handle_read 消费命令 → IMAP 的 handle_read 也消费命令
 // ====================================================================
 template <typename ConnectionType>
 void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
-    this->command_read_buffer_.append(data);
-}
-
-// ====================================================================
-// compute_reply_delay
-// ====================================================================
-template <typename ConnectionType>
-std::chrono::milliseconds ImapsSession<ConnectionType>::compute_reply_delay() const {
-    return std::chrono::milliseconds(0);
-}
-
-// ====================================================================
-// process_read: 从缓冲区提取一条完整命令，调用 FSM 处理
-// 这是 SMTP 模式的正确对照 —— FSM 通过 do_async_write 发响应
-// 且持有 session 的 unique_ptr 生命周期
-// ====================================================================
-template <typename ConnectionType>
-void ImapsSession<ConnectionType>::process_read() {
     auto self = this->shared_from_this();
     auto* session = this;
-    auto& buf = session->command_read_buffer_;
 
-    // IDLE 状态特殊处理：等待 DONE
-    // 批量消费缓冲区中的所有行，避免每次只处理一行导致流水线循环
-    // 反复拷贝整个缓冲区（O(n²) CPU 空转）
-    if (session->context_.idle_mode) {
-        while (true) {
-            size_t line_end = buf.find("\r\n");
-            if (line_end == std::string::npos) {
-                // 没有完整行，需要更多数据
-                self->do_async_read();
-                return;
-            }
-            std::string line = buf.substr(0, line_end);
-            buf.erase(0, line_end + 2);
-            // Trim trailing whitespace
-            auto trim_end = line.find_last_not_of(" \t\r\n");
-            if (trim_end != std::string::npos) line.resize(trim_end + 1);
-            std::string upper = line;
-            std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-            if (upper == "DONE") {
-                session->context_.idle_mode = false;
-                auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-                fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
-                return;
-            }
-            // 非 DONE 行 → 丢弃，继续循环处理下一行
-        }
-    }
-
-    // 检查是否在等待 literal
+    // literal 数据累积：data 是 extract_one_line 返回的原始 chunk
     if (session->awaiting_literal_) {
-        size_t needed = session->expected_literal_size_ - session->literal_data_buffer_.size();
-        size_t available = buf.size();
-
-        if (available >= needed) {
-            session->literal_data_buffer_.append(buf.substr(0, needed));
-            buf.erase(0, needed);
+        session->literal_data_buffer_.append(data);
+        size_t& expected = session->expected_literal_size_;
+        if (session->literal_data_buffer_.size() >= expected) {
             session->awaiting_literal_ = false;
-
-            LOG_IMAP_DEBUG("Literal completed: {} bytes", session->literal_data_buffer_.size());
-
-            // 如果还有 \r\n，消耗掉
-            if (buf.size() >= 2 && buf[0] == '\r' && buf[1] == '\n') {
-                buf.erase(0, 2);
-            }
-
-            // 处理 APPEND 最终处理
-            session->last_command_args_ = session->literal_data_buffer_;
-
-            auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-            fsm->process_event(self, ImapEvent::APPEND,
-                               session->current_tag_, session->last_command_args_);
-            return;
-        } else {
-            // 还不够，继续读
-            session->literal_data_buffer_.append(buf);
-            buf.clear();
-            self->do_async_read();
-            return;
+            session->last_command_args_ = std::move(session->literal_data_buffer_);
+            session->context_.current_tag = session->current_tag_;
+            session->command_parsed_ = true;
+            session->next_event_ = ImapEvent::APPEND;
         }
-    }
-
-    // 找行结束 \r\n
-    size_t line_end = buf.find("\r\n");
-    if (line_end == std::string::npos) {
-        // 防止无限制缓冲：超过 8192 字节仍无行结束则拒绝
-        if (buf.size() > 8192) {
-            LOG_IMAP_WARN("IMAP command too long ({} bytes), closing", buf.size());
-            auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-            fsm->send_tagged(self, "*", "BAD", "Command too long");
-            self->close();
-            return;
-        }
-        self->do_async_read();
         return;
     }
 
-    std::string line = buf.substr(0, line_end);
-    buf.erase(0, line_end + 2);
+    // 去掉行尾的 \r\n（由 extract_one_line 保留在 data 中）
+    std::string line = data;
+    if (line.size() >= 2 && line.substr(line.size() - 2) == "\r\n")
+        line.resize(line.size() - 2);
 
-    if (line.empty()) {
-        // 空行，继续读
-        self->do_async_read();
-        return;
-    }
+    // Trim trailing whitespace
+    auto trim_end = line.find_last_not_of(" \t");
+    if (trim_end != std::string::npos) line.resize(trim_end + 1);
+
+    if (line.empty()) return;  // 空行，忽略（下轮 do_async_read 取新数据）
 
     LOG_IMAP_DETAIL_DEBUG("IMAP line: [{}]", line);
+
+    // IDLE 模式：只认 DONE
+    if (session->context_.idle_mode) {
+        std::string upper = line;
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+        if (upper == "DONE") {
+            session->idle_done_received_ = true;
+            session->command_parsed_ = true;
+        }
+        return;
+    }
 
     // 检查是否 literal 声明（行尾的 {size}）
     size_t brace_pos = line.rfind('{');
     if (brace_pos != std::string::npos && line.back() == '}') {
-        // 提取大小
         std::string size_str = line.substr(brace_pos + 1);
         size_str.pop_back();
         try {
             size_t literal_size = std::stoull(size_str);
             std::string cmd_part = line.substr(0, brace_pos);
-            // Trim trailing space from command part
-            while (!cmd_part.empty() && cmd_part.back() == ' ') {
+            while (!cmd_part.empty() && cmd_part.back() == ' ')
                 cmd_part.pop_back();
-            }
 
-            // 解析 tag + command
+            // 解析 tag + command（literal 声明行去掉 {size} 后的部分）
             size_t first_space = cmd_part.find(' ');
             if (first_space != std::string::npos) {
                 session->current_tag_ = cmd_part.substr(0, first_space);
@@ -240,76 +170,55 @@ void ImapsSession<ConnectionType>::process_read() {
                 session->last_command_args_.clear();
             }
 
-            // 保存 APPEND preamble（literal 覆盖 last_command_args_ 之前）
-            if (session->current_command_ == "APPEND") {
+            if (session->current_command_ == "APPEND")
                 session->context_.pending_append_preamble = session->last_command_args_;
-            }
 
             std::transform(session->current_command_.begin(), session->current_command_.end(),
                           session->current_command_.begin(), ::toupper);
             LOG_IMAP_DEBUG("Literal declared: cmd={}, size={}", session->current_command_, literal_size);
 
-            // 检查缓冲区是否已有足够的 literal 数据
+            // 进入等待 literal 模式：后续 handle_read 调用会累积数据
+            session->awaiting_literal_ = true;
+            session->expected_literal_size_ = literal_size;
+            session->literal_data_buffer_.clear();
+
+            // 立即把当前缓冲区中已有的数据（literal body）消费掉
+            auto& buf = this->command_read_buffer_;
             if (buf.size() >= literal_size) {
                 session->literal_data_buffer_ = buf.substr(0, literal_size);
                 buf.erase(0, literal_size);
-                // 消耗尾随 \r\n
-                if (buf.size() >= 2 && buf[0] == '\r' && buf[1] == '\n') {
+                if (buf.size() >= 2 && buf[0] == '\r' && buf[1] == '\n')
                     buf.erase(0, 2);
-                }
-                session->last_command_args_ = session->literal_data_buffer_;
+                session->awaiting_literal_ = false;
+                session->last_command_args_ = std::move(session->literal_data_buffer_);
                 session->context_.current_tag = session->current_tag_;
-
-                auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-                fsm->process_event(self, ImapEvent::APPEND,
-                                   session->current_tag_, session->literal_data_buffer_);
+                session->command_parsed_ = true;
+                session->next_event_ = ImapEvent::APPEND;
                 return;
             } else {
-                // 发送 + 继续响应，然后等待更多数据
-                session->awaiting_literal_ = true;
-                session->expected_literal_size_ = literal_size;
+                // 发送继续响应，literal 数据不够时累积
                 session->literal_data_buffer_ = buf;
                 buf.clear();
-
                 auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
                 fsm->send_continuation(self, "Ready for literal data");
                 return;
             }
         } catch (const std::exception& e) {
             LOG_IMAP_ERROR("Invalid literal size: {}", e.what());
-            // Fall through to normal command processing
         }
     }
 
-    // ===== 普通命令解析（无 literal）=====
+    // ===== 普通命令解析 =====
     std::string tag, cmd, args;
 
     size_t first_space = line.find(' ');
     if (first_space == std::string::npos) {
-        // 只有 tag 或只有命令
         tag = line;
         cmd = line;
         std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
-
-        // DONE 特殊处理
-        if (cmd == "DONE" && session->context_.idle_mode) {
-            session->context_.idle_mode = false;
-            auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-            fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
-            return;
-        }
-
-        auto it = get_imap_command_map().find(cmd);
-        if (it != get_imap_command_map().end()) {
-            session->next_event_ = it->second;
-        } else {
-            session->next_event_ = ImapEvent::ERROR;
-            args = "Unknown command: " + cmd;
-        }
     } else {
         tag = line.substr(0, first_space);
         std::string rest = line.substr(first_space + 1);
-
         size_t second_space = rest.find(' ');
         if (second_space != std::string::npos) {
             cmd = rest.substr(0, second_space);
@@ -318,30 +227,87 @@ void ImapsSession<ConnectionType>::process_read() {
             cmd = rest;
             args.clear();
         }
-
         std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
-
-        LOG_IMAP_DETAIL_DEBUG("IMAP parsed: tag=[{}] cmd=[{}] args=[{}]", tag, cmd, args);
-
-        auto it = get_imap_command_map().find(cmd);
-        if (it != get_imap_command_map().end()) {
-            session->next_event_ = it->second;
-        } else {
-            session->next_event_ = ImapEvent::ERROR;
-            args = "Unknown command: " + cmd;
-        }
     }
 
-    // 保存到 context
+    LOG_IMAP_DETAIL_DEBUG("IMAP parsed: tag=[{}] cmd=[{}] args=[{}]", tag, cmd, args);
+
+    auto it = get_imap_command_map().find(cmd);
+    if (it != get_imap_command_map().end())
+        session->next_event_ = it->second;
+    else {
+        session->next_event_ = ImapEvent::ERROR;
+        args = "Unknown command: " + cmd;
+    }
+
     session->current_tag_ = tag;
     session->current_command_ = cmd;
     session->last_command_args_ = args;
     session->context_.current_tag = tag;
+    session->command_parsed_ = true;
+}
 
-    // 调用 FSM 处理事件 —— FSM 内通过 do_async_write 发送响应
-    // 并在回调中继续 do_async_read
+// ====================================================================
+// has_buffered_input / extract_one_line 重载
+// literal 等待模式下需特殊处理——literal 数据是纯字节流无 \r\n
+// ====================================================================
+template <typename ConnectionType>
+bool ImapsSession<ConnectionType>::has_buffered_input() const {
+    if (awaiting_literal_)
+        return !this->command_read_buffer_.empty();
+    return SessionBase<ConnectionType>::has_buffered_input();
+}
+
+template <typename ConnectionType>
+std::string ImapsSession<ConnectionType>::extract_one_line() {
+    if (awaiting_literal_)
+        return this->take_buffered_input();  // literal 数据按 chunk 返回
+    return SessionBase<ConnectionType>::extract_one_line();
+}
+
+// ====================================================================
+// compute_reply_delay
+// ====================================================================
+template <typename ConnectionType>
+std::chrono::milliseconds ImapsSession<ConnectionType>::compute_reply_delay() const {
+    return std::chrono::milliseconds(0);
+}
+
+// ====================================================================
+// process_read: 根据 handle_read 解析的状态分发到 FSM
+// 与 SMTP 一致——handle_read 消费命令，process_read 执行 FSM
+// ====================================================================
+template <typename ConnectionType>
+void ImapsSession<ConnectionType>::process_read() {
+    auto self = this->shared_from_this();
+    auto* session = this;
+
+    if (!session->command_parsed_) return;
+
+    // IDLE DONE
+    if (session->idle_done_received_) {
+        session->idle_done_received_ = false;
+        session->command_parsed_ = false;
+        session->context_.idle_mode = false;
+        auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
+        fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
+        return;
+    }
+
+    // APPEND literal 完成
+    if (session->next_event_ == ImapEvent::APPEND && !session->awaiting_literal_) {
+        session->command_parsed_ = false;
+        auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
+        fsm->process_event(self, ImapEvent::APPEND,
+                           session->current_tag_, session->last_command_args_);
+        return;
+    }
+
+    // 普通命令
+    session->command_parsed_ = false;
     auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-    fsm->process_event(self, session->next_event_, tag, args);
+    fsm->process_event(self, session->next_event_,
+                       session->current_tag_, session->last_command_args_);
 }
 
 // ====================================================================

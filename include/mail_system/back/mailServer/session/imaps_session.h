@@ -35,6 +35,8 @@ public:
 
     void handle_read(const std::string& data) override;
     void process_read() override;
+    bool has_buffered_input() const override;
+    std::string extract_one_line() override;
     std::chrono::milliseconds compute_reply_delay() const override;
     void* get_fsm() const override;
     void* get_context() override;
@@ -71,6 +73,10 @@ private:
     bool awaiting_literal_ = false;
     size_t expected_literal_size_ = 0;
     std::string literal_data_buffer_;
+
+    // handle_read 解析完成标志，process_read 据此分发 FSM
+    bool command_parsed_ = false;
+    bool idle_done_received_ = false;
 };
 
 using TcpImapsSession = ImapsSession<TcpConnection>;
