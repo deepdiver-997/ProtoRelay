@@ -1096,7 +1096,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    const std::string& args, bool is_uid)
 {
     LOG_IMAP_INFO("FETCH ENTER args=[{}]", args);
     auto* ctx = static_cast<ImapContext*>(session->get_context());
@@ -1133,7 +1133,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         return;
     }
 
-    bool want_uid = attrs.find("UID") != std::string::npos;
+    // RFC 3501: UID FETCH 响应必须无条件包含 UID
+    bool want_uid = is_uid || attrs.find("UID") != std::string::npos;
     bool want_flags = attrs.find("FLAGS") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
@@ -1919,7 +1920,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
     }
 
     if (subcmd == "FETCH") {
-        handle_fetch(session, subargs);
+        handle_fetch(session, subargs, true);  // is_uid=true → 强制包含 UID
     } else if (subcmd == "STORE") {
         handle_store(session, subargs);
     } else if (subcmd == "SEARCH") {

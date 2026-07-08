@@ -106,7 +106,8 @@ private:
     void handle_examine(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_list(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_status(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_fetch(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_fetch(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args,
+                      bool is_uid = false);
     void handle_store(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_expunge(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_close(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
