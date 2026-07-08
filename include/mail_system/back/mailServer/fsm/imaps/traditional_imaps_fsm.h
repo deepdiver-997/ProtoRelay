@@ -119,7 +119,8 @@ private:
     void handle_unsubscribe(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_lsub(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_append(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_search(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_search(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args,
+                       bool is_uid = false);
     void handle_uid(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_starttls(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
     void handle_copy(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);

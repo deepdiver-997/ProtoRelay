@@ -1808,7 +1808,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_search(
     std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    const std::string& args, bool is_uid)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1836,15 +1836,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
     std::string response = "* SEARCH";
     for (size_t i = 0; i < mails.size(); ++i) {
         const auto& m = mails[i];
-        size_t seq = i + 1;
-
         bool match = true;
         if (search_unseen) match = (m.status == 1);
         else if (search_seen) match = (m.status == 0);
         if (search_deleted) match = m.is_deleted;
 
         if (match) {
-            response += " " + std::to_string(seq);
+            // UID SEARCH 返回 mail_id，普通 SEARCH 返回 seq number
+            response += " " + std::to_string(is_uid ? m.mail_id : (i + 1));
         }
     }
     response += "\r\n";
@@ -1924,7 +1923,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
     } else if (subcmd == "STORE") {
         handle_store(session, subargs);
     } else if (subcmd == "SEARCH") {
-        handle_search(session, subargs);
+        handle_search(session, subargs, true);  // is_uid=true → 返回 mail_id
     } else if (subcmd == "COPY") {
         handle_copy(session, subargs);
     } else {
