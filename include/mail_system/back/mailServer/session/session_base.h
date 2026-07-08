@@ -184,10 +184,9 @@ public:
                 self->command_read_buffer_.append(
                     self->read_buffer_.data(), bytes);
 
-                // 流水线消费：每次取全部缓冲数据（含 body 块），
-                // parse_smtp_command 提取一行(非IN_MESSAGE)或处理body(IN_MESSAGE)
+                // 流水线消费：每次从缓冲区取一行，传给 handle_read 处理
                 while (self->has_buffered_input()) {
-                    self->handle_read(self->take_buffered_input());
+                    self->handle_read(self->extract_one_line());
                     self->process_read();
                 }
             });
@@ -227,12 +226,21 @@ public:
     virtual void process_read() = 0;
 
     virtual bool has_buffered_input() const {
-        // 检查是否有完整行（\r\n），而非仅 \n。
-        // 若只检查 \n，遇到不带 \r 的数据时会与 process_read 形成死循环：
-        // has_buffered_input→true → pipeline 循环 → process_read 找不到 \r\n
-        // → do_async_read → has_buffered_input→true → 无限空转
+        // 默认检查 \r\n（IMAP）。SMTP 重载为检查 \n。
         return command_read_buffer_.find("\r\n") != std::string::npos;
     }
+
+    // 从 command_read_buffer_ 中提取一行（含行结束符），删除已提取部分。
+    // 默认使用 \r\n。SMTP 重载为 \n（保持对仅发 LF 客户端的兼容）。
+    virtual std::string extract_one_line() {
+        auto pos = command_read_buffer_.find("\r\n");
+        if (pos == std::string::npos) return {};
+        std::string line = command_read_buffer_.substr(0, pos + 2);
+        command_read_buffer_.erase(0, pos + 2);
+        return line;
+    }
+
+    // 取出全部缓冲数据（兼容旧调用方，如 SMTP IN_MESSAGE 状态）
     virtual std::string take_buffered_input() {
         std::string s = std::move(command_read_buffer_);
         command_read_buffer_.clear();

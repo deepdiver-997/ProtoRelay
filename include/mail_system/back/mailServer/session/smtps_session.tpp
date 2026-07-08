@@ -53,6 +53,27 @@ void SmtpsSession<ConnectionType>::handle_read(const std::string& data) {
 }
 
 template <typename ConnectionType>
+bool SmtpsSession<ConnectionType>::has_buffered_input() const {
+    // SMTP 保持对裸 \n 的兼容性（部分客户端不遵守 CRLF 规范）
+    if (state_ == SmtpsState::IN_MESSAGE)
+        return !this->command_read_buffer_.empty();
+    return this->command_read_buffer_.find('\n') != std::string::npos;
+}
+
+template <typename ConnectionType>
+std::string SmtpsSession<ConnectionType>::extract_one_line() {
+    // IN_MESSAGE 状态下返回全部缓冲数据（body 按块处理）
+    if (state_ == SmtpsState::IN_MESSAGE)
+        return this->take_buffered_input();
+
+    auto pos = this->command_read_buffer_.find('\n');
+    if (pos == std::string::npos) return {};
+    std::string line = this->command_read_buffer_.substr(0, pos + 1);
+    this->command_read_buffer_.erase(0, pos + 1);
+    return line;
+}
+
+template <typename ConnectionType>
 std::chrono::milliseconds SmtpsSession<ConnectionType>::compute_reply_delay() const {
     return std::chrono::milliseconds(0);
 }
@@ -769,27 +790,16 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
     std::string trimmed;
 
     if (state_ != SmtpsState::IN_MESSAGE) {
-        this->command_read_buffer_ += data;
+        // extract_one_line 已返回一条完整命令（含 \n），直接 trim 即可
+        trimmed = algorithm::trim(data);
 
-        const auto newline_pos = this->command_read_buffer_.find('\n');
-        if (newline_pos == std::string::npos) {
-            next_event_ = SmtpsEvent::TIMEOUT;
-            last_command_args_.clear();
-            return;
-        }
-
-        std::string line = this->command_read_buffer_.substr(0, newline_pos + 1);
-        this->command_read_buffer_.erase(0, newline_pos + 1);
-        trimmed = algorithm::trim(line);
-
-        // Ignore standalone CRLF and continue with buffered/next data.
         if (trimmed.empty()) {
             next_event_ = SmtpsEvent::TIMEOUT;
             last_command_args_.clear();
             return;
         }
 
-        LOG_SESSION_DEBUG("Handling data: {}", line);
+        LOG_SESSION_DEBUG("Handling data: {}", data);
     } else {
         trimmed = algorithm::trim(data);
         LOG_SESSION_DEBUG("Handling data: {}", data);
