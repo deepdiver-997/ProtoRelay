@@ -61,6 +61,9 @@ public:
     MYSQL_RES* (*mysql_stmt_result_metadata)(MYSQL_STMT*) = nullptr;
     unsigned int (*mysql_stmt_field_count)(MYSQL_STMT*) = nullptr;
     int (*mysql_stmt_store_result)(MYSQL_STMT*) = nullptr;
+    // STMT_ATTR_UPDATE_MAX_LENGTH：store_result 预计算 max_length，
+    // 结果缓冲一次到位，杜绝截断重取路径（09-06 UAF 根因）
+    int (*mysql_stmt_attr_set)(MYSQL_STMT*, enum enum_stmt_attr_type, const void*) = nullptr;
     my_bool (*mysql_stmt_bind_result)(MYSQL_STMT*, MYSQL_BIND*) = nullptr;
     int (*mysql_stmt_fetch)(MYSQL_STMT*) = nullptr;
     int (*mysql_stmt_fetch_column)(MYSQL_STMT*, MYSQL_BIND*, unsigned int, unsigned long) = nullptr;

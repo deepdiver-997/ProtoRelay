@@ -25,8 +25,10 @@ using namespace mail_system;
 
 namespace {
 
-// >256 字节的 UTF-8 值（300 个汉字 = 900 字节），恰好踩中旧的 256 字节默认缓冲
-const char* kBigExpr = "REPEAT('中', 300)";
+// >256 字节 ASCII 值，踩中旧的 256 字节默认缓冲。刻意用 ASCII：
+// UTF-8 字面量会被非 utf8 连接字符集 reinterpret（实测 900 字节
+// 长度对内容错），与被测逻辑无关的假阳性。
+const char* kBigExpr = "REPEAT('x', 900)";
 
 } // namespace
 
@@ -89,9 +91,7 @@ int main() {
 
     // ---- 剧情 2：>256 字节列必须完整取回（MYSQL_DATA_TRUNCATED 不得中止结果集）----
     {
-        // 期望值：300 个 "中" 的 UTF-8 字节
-        std::string want;
-        for (int i = 0; i < 300; ++i) want += "\xe4\xb8\xad";
+        std::string want(900, 'x');
 
         // 1) MariaDB async 路径（AsyncStmtOp 结果拉取）
         {
@@ -107,9 +107,17 @@ int main() {
                 return 1;
             }
             if (res->get_row_count() != 1 || res->get_value(0, "big_subject") != want) {
-                std::cout << "FAIL: async big-column value wrong/truncated (len="
-                          << (res->get_row_count() ? res->get_value(0, "big_subject").size() : 0)
-                          << ", expect " << want.size() << ")\n";
+                const std::string got = res->get_value(0, "big_subject");
+                size_t xc = 0; unsigned char first_nonx = 0;
+                for (char c : got) {
+                    if (c == 'x') ++xc;
+                    else if (!first_nonx) first_nonx = (unsigned char)c;
+                }
+                std::printf("FAIL: async big-column wrong (len=%zu expect=%zu xcount=%zu "
+                            "first_nonx=%02x hex[0..15]:", got.size(), want.size(), xc, first_nonx);
+                for (int k = 0; k < 16 && k < (int)got.size(); ++k)
+                    std::printf(" %02x", (unsigned char)got[k]);
+                std::printf("\n");
                 return 1;
             }
         }
@@ -133,6 +141,64 @@ int main() {
         }
 
         std::cout << "PASS: 900-byte column fetched intact via async + sync (DATA_TRUNCATED handled)\n";
+    }
+
+    // ---- 剧情 3（2026-09-06）：截断行后面还有行 —— UAF 回归 ----
+    // d3a739c 的截断重取在 buffers[i].resize() 释放旧 256 字节缓冲后没有
+    // 重绑 stmt 内部的 bind（bind_result 是按值拷贝），下一行 mysql_stmt_fetch
+    // 会把数据 memcpy 进已释放的旧缓冲（ASan: WRITE of size 256 → 生产
+    // tcache 连环崩溃）。**必须多行且长列在靠前的行**：剧情 2 的单行长列
+    // 没有"下一行"，踩不到悬垂指针，因此拦不住该回归。ASan 单测构建下
+    // 本场景在修复缺失时直接 abort。
+    {
+        const std::string sql =
+            "SELECT REPEAT('x', 900) AS v, 1 AS ord "
+            "UNION ALL SELECT 'short-1', 2 "
+            "UNION ALL SELECT 'short-2', 3 "
+            "ORDER BY ord";
+        std::string want_long(900, 'x');
+
+        // 1) MariaDB async 路径
+        {
+            auto sc = pool->acquire_connection();
+            if (!sc->is_valid()) { std::cout << "FAIL: acquire for multi-row test\n"; return 1; }
+            std::shared_ptr<IDBResult> res;
+            bool done = false;
+            sc->operator->()->async_query(sql,
+                [&](std::shared_ptr<IDBResult> r) { res = r; done = true; });
+            if (!done || !res) {
+                std::cout << "FAIL: async multi-row query returned null result\n";
+                return 1;
+            }
+            if (res->get_row_count() != 3
+                || res->get_value(0, "v") != want_long
+                || res->get_value(1, "v") != "short-1"
+                || res->get_value(2, "v") != "short-2") {
+                std::cout << "FAIL: async multi-row values corrupted (UAF on stale bind?)\n";
+                return 1;
+            }
+        }
+
+        // 2) MySQL 同步 query 路径（生产 IMAP/SMTP 的 MySQLConnection::query）
+        {
+            MySQLService svc;
+            auto conn = svc.create_connection(cfg.host, cfg.user, cfg.password,
+                                              cfg.database, cfg.port);
+            auto res = conn->query(sql, {});
+            if (!res) {
+                std::cout << "FAIL: mysql sync multi-row query returned null result\n";
+                return 1;
+            }
+            if (res->get_row_count() != 3
+                || res->get_value(0, "v") != want_long
+                || res->get_value(1, "v") != "short-1"
+                || res->get_value(2, "v") != "short-2") {
+                std::cout << "FAIL: mysql sync multi-row values corrupted (UAF on stale bind?)\n";
+                return 1;
+            }
+        }
+
+        std::cout << "PASS: truncated long column in multi-row result, later rows intact\n";
     }
 
     return 0;

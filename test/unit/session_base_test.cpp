@@ -62,6 +62,7 @@ int main() {
         auto& conn = s->get_connection();
         conn.set_read_data("HELO x\r\n");
         s->do_async_read();
+        s->get_connection().pump_executor();
         expect_true(s->read_lines.size() == 1 && s->read_lines[0] == "HELO x\r\n",
                     "single line read + processed");
         expect_true(s->process_count == 1, "process_read invoked");
@@ -74,6 +75,7 @@ int main() {
         auto& conn = s->get_connection();
         conn.set_read_data("HELO x\r\nMAIL FROM:<a@b>\r\n");
         s->do_async_read();
+        s->get_connection().pump_executor();
         expect_true(s->read_lines.size() == 2, "pipelined lines consumed in one read");
         expect_true(s->read_lines[0] == "HELO x\r\n" &&
                     s->read_lines[1] == "MAIL FROM:<a@b>\r\n", "lines in order");
@@ -85,6 +87,7 @@ int main() {
         auto& conn = s->get_connection();
         conn.set_read_data("HELO x");          // 无换行
         s->do_async_read();
+        s->get_connection().pump_executor();
         expect_true(s->read_lines.empty(), "incomplete line not processed");
         expect_true(s->buffered_size() == 6, "incomplete line stays buffered");
     }
@@ -95,6 +98,7 @@ int main() {
         auto& conn = s->get_connection();
         conn.set_read_data("");                 // 无数据 → eof
         s->do_async_read();
+        s->get_connection().pump_executor();
         expect_true(s->is_closed(), "read error closes session");
     }
 
@@ -104,6 +108,7 @@ int main() {
         s->close();
         s->get_connection().set_read_data("HELO x\r\n");
         s->do_async_read();
+        s->get_connection().pump_executor();
         expect_true(s->read_lines.empty(), "no read after close");
     }
 
@@ -113,6 +118,7 @@ int main() {
         auto& conn = s->get_connection();
         int cb = 0;
         s->do_async_write("220 ok\r\n", [&cb](auto, auto) { cb++; });
+        s->get_connection().pump_executor();
         expect_true(conn.written() == "220 ok\r\n", "write flushed to connection");
         expect_true(cb == 1, "write callback invoked");
     }
@@ -122,6 +128,7 @@ int main() {
         auto s = make_session();
         s->close();
         s->do_async_write("data", nullptr);
+        s->get_connection().pump_executor();
         expect_true(s->get_connection().written().empty(), "no write after close");
     }
 
@@ -132,12 +139,14 @@ int main() {
         s->append_raw("NOOP\r\n");              // 缓冲中的命令
         int cb1 = 0;
         s->do_async_write("250 ok\r\n", [&cb1](auto, auto) { cb1++; });
+        s->get_connection().pump_executor();
         expect_true(cb1 == 1, "pipelined write callback synchronous");
         expect_true(conn.written().empty(), "pipelined write held in pending buffer");
         s->drain_buffered_commands();
         expect_true(s->read_lines.size() == 1, "buffered command consumed by drain");
         int cb2 = 0;
         s->do_async_write("221 bye\r\n", [&cb2](auto, auto) { cb2++; });
+        s->get_connection().pump_executor();
         expect_true(conn.written() == "250 ok\r\n221 bye\r\n",
                     "pending response flushed together with next write");
     }
@@ -160,6 +169,7 @@ int main() {
         auto s = std::make_shared<SmallBufSession>(std::make_unique<MockConnection>());
         s->get_connection().set_read_data("ABCDEFGH");   // 8 > 4 且无换行
         s->do_async_read();
+        s->get_connection().pump_executor();
         expect_true(s->is_closed(), "over command buffer limit closes session");
     }
 
@@ -168,6 +178,7 @@ int main() {
         auto s = make_session();
         auto& conn = s->get_connection();
         s->close();
+        s->get_connection().pump_executor();   // socket 关闭经队列串行，排空后生效
         expect_true(s->is_closed(), "close sets closed");
         expect_true(!conn.is_open(), "close closes underlying connection");
         s->close();                              // 幂等
@@ -186,7 +197,44 @@ int main() {
         s->append_raw("NOOP\r\n");
         s->do_async_write("250 ok\r\n", nullptr);   // 进 pending，不落连接
         s->close();                                 // close 刷 pending
+        s->get_connection().pump_executor();   // 排空队列：flush 发起 + socket 关闭
         expect_true(conn.written() == "250 ok\r\n", "close flushes pending response");
+    }
+
+    // ── 09-06 回归：在途写未完成时 close，handler 不得再触达会话 ──
+    // 对应 ASan asan.714738（UAF：会话析构后 ssl 多阶段 op 摸尸）的
+    // 行为级回归测试：flush/完成回调必须持有 self，close 后到达的
+    // 完成事件只允许丢弃。
+    {
+        auto s = make_session();
+        auto& conn = s->get_connection();
+        conn.set_deferred_write(true);
+        int cb = 0;
+        s->do_async_write("data\r\n", [&cb](auto, auto) { cb++; });
+        s->get_connection().pump_executor();
+        expect_true(conn.written() == "data\r\n", "deferred write buffered to connection");
+        expect_true(cb == 0, "deferred write callback not yet invoked");
+        s->close();                          // mock close 丢弃挂起的 handler
+        conn.trigger_deferred_write();       // 模拟在途 op 的迟到完成：不得崩溃/重复写
+        expect_true(cb == 0, "late completion after close must be dropped");
+        expect_true(s->is_closed(), "session stays closed");
+    }
+
+    // ── 09-06 回归：close 后发起必须被拦截（initiate 与 close 串行化）──
+    {
+        auto s = make_session();
+        auto& conn = s->get_connection();
+        conn.set_read_data("NOOP\r\n");
+        s->close();
+        s->do_async_read();
+        s->get_connection().pump_executor();
+        conn.set_read_data("NOOP\r\n");
+        s->do_async_read();                  // close 后反复发起：必须 no-op
+        s->do_async_write("250 ok\r\n", nullptr);
+        s->get_connection().pump_executor();
+        expect_true(s->get_connection().written().empty(),
+                    "no initiation of any kind after close");
+        expect_true(s->read_lines.empty(), "no read initiation after close");
     }
 
     // ── trace：前缀记录 + 64KB 上限 + 干净关闭丢弃 ────────────

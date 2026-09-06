@@ -99,6 +99,7 @@ bool MariaDbDriver::ensure_loaded() {
     ok &= sym(&mysql_stmt_result_metadata,    "mysql_stmt_result_metadata");
     ok &= sym(&mysql_stmt_field_count,        "mysql_stmt_field_count");
     ok &= sym(&mysql_stmt_store_result,       "mysql_stmt_store_result");
+    ok &= sym(&mysql_stmt_attr_set,           "mysql_stmt_attr_set");
     ok &= sym(&mysql_stmt_bind_result,        "mysql_stmt_bind_result");
     ok &= sym(&mysql_stmt_fetch,              "mysql_stmt_fetch");
     ok &= sym(&mysql_stmt_fetch_column,       "mysql_stmt_fetch_column");
@@ -397,6 +398,12 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(
         }
     }
 
+    {
+        // store_result 时预计算 max_length → 缓冲按真实上限一次分配
+        const unsigned char update_max_length = 1;   // STMT_ATTR_UPDATE_MAX_LENGTH
+        D.mysql_stmt_attr_set(stmt, (enum enum_stmt_attr_type)0,
+                              &update_max_length);
+    }
     if (D.mysql_stmt_execute(stmt) != 0) {
         LOG_DB_QUERY_ERROR("MariaDB stmt execute error: {}", D.mysql_stmt_error(stmt));
         return nullptr;
@@ -410,17 +417,20 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(
             return nullptr;
         }
 
+        // store_result 必须先于缓冲分配：STMT_ATTR_UPDATE_MAX_LENGTH 让它
+        // 计算每列真实 max_length；此前先读 max_length 再 store，读到的永远
+        // 是 0 → 缓冲恒 256 字节 → 长列必进截断重取（09-06 NUL 填充假值）
+        if (D.mysql_stmt_store_result(stmt) != 0) {
+            LOG_DB_QUERY_ERROR("MariaDB stmt store result error: {}", D.mysql_stmt_error(stmt));
+            D.mysql_free_result(meta);
+            return nullptr;
+        }
+
         size_t num_fields = D.mysql_num_fields(meta);
         std::vector<std::string> colNames;
         MYSQL_FIELD* fields = D.mysql_fetch_fields(meta);
         for (size_t i = 0; i < num_fields; ++i) {
             colNames.push_back(fields[i].name);
-        }
-
-        if (D.mysql_stmt_store_result(stmt) != 0) {
-            LOG_DB_QUERY_ERROR("MariaDB stmt store result error: {}", D.mysql_stmt_error(stmt));
-            D.mysql_free_result(meta);
-            return nullptr;
         }
 
         std::vector<std::vector<std::string>> rows;
@@ -458,11 +468,16 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(
                         buffers[i].resize(result_lengths[i]);
                         result_binds[i].buffer = buffers[i].data();
                         result_binds[i].buffer_length = buffers[i].size();
-                        // bind 数组在 bind_result 时已拷贝进 stmt 内部，resize 释放
-                        // 旧缓冲后必须整体重绑，否则下一行 stmt_fetch 写悬垂指针
-                        //（同 mysql_service.cpp 的 heap-use-after-free 修复）
+                        // 顺序有讲究：先 fetch_column 用【本地】bind 取全量
+                        //（fetch_column 只认传入的 bind，与 stmt 内部副本无关），
+                        // 再 bind_result 整体重绑同步内部副本供后续行使用。
+                        // 若先 rebind：MariaDB 的 bind_result 会重置取数游标，
+                        // 随后的 fetch_column 静默不拷贝（返回 0 但内容全 NUL，
+                        // 实测 09-06）。反过来 mysql_service（libmysqlclient）
+                        // 两种顺序都行。
+                        D.mysql_stmt_fetch_column(stmt, &result_binds[i],
+                                                  (unsigned int)i, 0);
                         D.mysql_stmt_bind_result(stmt, result_binds.data());
-                        D.mysql_stmt_fetch_column(stmt, &result_binds[i], i, 0);
                     }
                     row_data[i] = std::string(buffers[i].data(), result_lengths[i]);
                 }
@@ -579,6 +594,11 @@ bool MariaDBConnection::execute(const std::string& sql, const std::vector<std::s
         }
     }
 
+    {
+        // store_result 时预计算 max_length → 缓冲按真实上限一次分配
+        const unsigned char update_max_length = 1;   // STMT_ATTR_UPDATE_MAX_LENGTH
+        D.mysql_stmt_attr_set(stmt, (enum enum_stmt_attr_type)0, &update_max_length);
+    }
     if (D.mysql_stmt_execute(stmt) != 0) {
         LOG_DB_QUERY_ERROR("MariaDB stmt execute error: {}", D.mysql_stmt_error(stmt));
         return false;
@@ -789,7 +809,13 @@ static std::shared_ptr<IDBResult> read_stmt_rows(MYSQL_STMT* stmt, MariaDbDriver
                     // 旧缓冲后必须整体重绑，否则下一行 stmt_fetch 写悬垂指针
                     //（同 mysql_service.cpp 的 heap-use-after-free 修复）
                     D.mysql_stmt_bind_result(stmt, rbinds.data());
-                    D.mysql_stmt_fetch_column(stmt, &rbinds[i], (unsigned int)i, 0);
+                    if (D.mysql_stmt_fetch_column(stmt, &rbinds[i], (unsigned int)i, 0) != 0) {
+                        LOG_DB_QUERY_ERROR(
+                            "MariaDB async stmt_fetch_column failed: col={} msg='{}'",
+                            i, D.mysql_stmt_error(stmt));
+                        D.mysql_free_result(meta);
+                        return nullptr;
+                    }
                 }
                 row_data[i] = std::string(buffers[i].data(), rlens[i]);
             }
@@ -883,6 +909,11 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
     if (!execute_done) {
         int rc;
         if (!execute_started) {
+            // STMT_ATTR_UPDATE_MAX_LENGTH：store 完成后 max_length 为真实列长，
+            // read_stmt_rows 的缓冲一次到位，正常路径不进截断重取分支
+            const unsigned char update_max_length = 1;
+            D.mysql_stmt_attr_set(stmt, (enum enum_stmt_attr_type)0,
+                                  &update_max_length);
             rc = D.mysql_stmt_execute_start(&ret, stmt);
             execute_started = true;
         } else {

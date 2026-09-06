@@ -33,6 +33,7 @@
 
 | 文档 | 内容 |
 |------|------|
+| [bugfixes/2026-09-06-stmt-truncated-refetch-uaf.md](bugfixes/2026-09-06-stmt-truncated-refetch-uaf.md) | ASan soak 三连：stmt 截断重取 UAF（tcache 连环崩溃根因）+ 会话生命周期 UAF + close 同步 SSL_shutdown 阻塞 |
 | [bugfixes/2026-09-04-subject-too-long-silent-loss.md](bugfixes/2026-09-04-subject-too-long-silent-loss.md) | 超长主题 1406 回滚静默丢信 + 行折叠加固 |
 | [bugfixes/2026-08-27-counter-triangle-bug.md](bugfixes/2026-08-27-counter-triangle-bug.md) | counter 累加成 N*(N+1)/2 |
 | [bugfixes/2026-08-21-mail-body-rotation-fix.md](bugfixes/2026-08-21-mail-body-rotation-fix.md) | 正文文件错位写坏 |

@@ -361,6 +361,12 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
     }
 
     // 执行语句
+    {
+        // STMT_ATTR_UPDATE_MAX_LENGTH：store_result 预计算 max_length，
+        // 缓冲按真实上限一次分配，正常路径不再进截断重取分支
+        char update_max_length = 1;
+        mysql_stmt_attr_set(stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &update_max_length);
+    }
     if (mysql_stmt_execute(stmt) != 0) {
         LOG_DB_QUERY_ERROR("MySQL stmt execute error: {}", mysql_stmt_error(stmt));
         return nullptr;
@@ -442,7 +448,15 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
                         // WRITE of size 256；mysql_stmt_fetch_column 只救当前行
                         // 当前列，救不了后续行）。
                         mysql_stmt_bind_result(stmt, result_binds.data());
-                        mysql_stmt_fetch_column(stmt, &result_binds[i], i, 0);
+                        if (mysql_stmt_fetch_column(stmt, &result_binds[i], i, 0) != 0) {
+                            // fetch_column 失败若被吞掉，row_data 会拿到
+                            // "截断旧数据 + NUL 填充"的假值，必须报错
+                            LOG_DB_QUERY_ERROR(
+                                "MySQL stmt_fetch_column failed: col={} msg='{}'",
+                                i, mysql_stmt_error(stmt));
+                            mysql_free_result(meta);
+                            return nullptr;
+                        }
                     }
                     row_data[i] = std::string(buffers[i].data(), result_lengths[i]);
                 }
@@ -600,6 +614,12 @@ bool MySQLConnection::execute(const std::string& sql, const std::vector<std::str
     }
 
     // 执行语句
+    {
+        // STMT_ATTR_UPDATE_MAX_LENGTH：store_result 预计算 max_length，
+        // 缓冲按真实上限一次分配，正常路径不再进截断重取分支
+        char update_max_length = 1;
+        mysql_stmt_attr_set(stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &update_max_length);
+    }
     if (mysql_stmt_execute(stmt) != 0) {
         LOG_DB_QUERY_ERROR("MySQL stmt execute error: {}", mysql_stmt_error(stmt));
         return false;

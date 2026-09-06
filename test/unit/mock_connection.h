@@ -151,12 +151,20 @@ public:
     }
 
     boost::asio::any_io_executor get_executor() override {
-        // watchdog（SessionBase::rearm/disarm_timeout）无条件 post 到连接 executor。
-        // 必须返回真实 executor：空 any_io_executor 上 post 直接抛
-        // bad_executor，所有起 session 的 FSM 单测全灭。
-        // 返回私有 io_context 的 executor：post 进队但测试不 run() →
-        // watchdog 定时器永不创建/不触发，对单测惰性无害。
+        // watchdog（SessionBase::rearm/disarm_timeout）与发起序列化（09-06）的
+        // socket 发起都 post 到这里。返回真实 io_context executor（自定义内联
+        // executor 不满足 any_io_executor 的属性要求）——post 进队但测试不
+        // run()，需要观察发起效果的用例调用 pump_executor() 手动排空。
         return boost::asio::any_io_executor{exec_ctx_.get_executor()};
+    }
+
+    // 排空发起队列：SessionBase 09-06 起 socket 发起经 post 串行化，单测
+    // 无常驻 IO 线程，用例在 do_async_read/write 之后调用本方法驱动发起。
+    void pump_executor() {
+        // poll 发现无任务时 io_context 会自动进入 stopped 态，之后的 post
+        // 全部静默空转——restart 后才能继续驱动后续发起。
+        if (exec_ctx_.stopped()) exec_ctx_.restart();
+        exec_ctx_.poll();
     }
 
     void async_write(boost::asio::const_buffer buf, WriteHandler h) override {
