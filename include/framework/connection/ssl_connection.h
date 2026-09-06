@@ -67,7 +67,11 @@ public:
     // 关闭连接
     void close() override {
         boost::system::error_code ec;
-        stream_->shutdown(ec);
+        // 不做同步 SSL_shutdown：它会阻塞 IO 线程等对端 close_notify，对端沉默
+        // （手机 App 停靠连接 / 硬断开）就是无限 poll —— 09-05 17:29 全网断连
+        // 根因（gdb 实锤两 IO 线程卡死于此）。直接关 TCP 层：该 socket 上排队的
+        // ssl 多阶段 op 立刻以错误完成，其最外层完成回调持有会话 shared_ptr，
+        // 会话必然活到 op 走完才析构（生命周期不变量，见 session_base.tpp close）。
         stream_->lowest_layer().close(ec);
     }
 

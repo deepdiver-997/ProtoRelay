@@ -24,8 +24,9 @@ SessionBase<ConnectionType>::~SessionBase() {
 // ================================================================
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::close() {
-    if (closed_) return;
-    closed_ = true;
+    // 原子去重：close 可能从 IO 线程（读完成/watchdog）、worker 线程（DB 回调
+    // 链）并发进入，exchange 保证关停动作只跑一份
+    if (closed_.exchange(true)) return;
 
     // 释放 watchdog：cancel 让 async_wait 的 handler 以 operation_aborted 立即
     // 返回 → io_context 释放其捕获的 self（断 timeout_timer_ ↔ self 的引用循环）
@@ -44,18 +45,50 @@ void SessionBase<ConnectionType>::close() {
         m_server->decrement_connection_count();
     }
 
-    // 将 pipeline 模式下积压的响应刷到连接再关闭
-    if (!pending_write_buf_.empty() && connection_ && connection_->is_open()) {
-        auto payload = std::make_shared<std::string>(std::move(pending_write_buf_));
+    // 拿 self：析构期安全网路径（~SessionBase → close）shared_from_this 不可用。
+    // 该路径不可能有在途 op（op 回调都持 self，析构必然发生在全部 handler 退出
+    // 之后），也无并发发起 → 直接同步关连接即可。
+    std::shared_ptr<SessionBase<ConnectionType>> self;
+    try {
+        self = this->shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
         pending_write_buf_.clear();
-        connection_->async_write(boost::asio::buffer(*payload),
-            [payload](const boost::system::error_code&, std::size_t) {});
+    }
+
+    // 连接关闭序列化到连接 executor，与所有 op 发起同队列 FIFO 串行：
+    //   flush 发起（先 post）→ socket 关闭（后 post）。
+    // 由此 close 与 initiate 永不并发（asio UB 点）；close 后已排队 op 以错误
+    // 完成，其回调持有 self → 会话活到全部 op 走完才析构（生命周期不变量）。
+    if (self && !pending_write_buf_.empty() && connection_ && connection_->is_open()) {
+        auto payload = std::make_shared<std::string>(
+            std::move(pending_write_buf_));
+        pending_write_buf_.clear();
+        auto flush_ex = connection_->get_executor();
+        boost::asio::post(std::move(flush_ex),
+            [self, payload] {
+                if (self->connection_ && self->connection_->is_open()) {
+                    self->connection_->async_write(
+                        boost::asio::buffer(*payload),
+                        // handler 必须持 self：ssl 多阶段 op 在 socket 关闭后
+                        // 仍会走错误阶段，会话必须活到本 op 全链走完
+                        [self, payload](const boost::system::error_code&,
+                                        std::size_t) {});
+                }
+            });
     }
 
     try {
         if (connection_ && connection_->is_open()) {
-            connection_->close();
-            LOG_SESSION_INFO("Session closed for {}", get_client_ip());
+            if (self) {
+                auto close_ex = connection_->get_executor();
+                boost::asio::post(std::move(close_ex), [self] {
+                    if (self->connection_) self->connection_->close();
+                    LOG_SESSION_INFO("Session closed for {}", self->get_client_ip());
+                });
+            } else {
+                connection_->close();
+                LOG_SESSION_INFO("Session closed for {}", get_client_ip());
+            }
         }
     } catch (const std::exception& e) {
         LOG_SESSION_ERROR("Error closing session: {}", e.what());
@@ -120,54 +153,63 @@ void SessionBase<ConnectionType>::do_async_read() {
     // 缓冲区已有完整行 → 返回，由外层 while 循环统一消费
     if (has_buffered_input()) return;
 
-    auto* conn = connection_.get();
-    auto buf = boost::asio::buffer(read_buffer_);
+    // 发起序列化：asio 允许"close 有 pending op 的 socket"（取消语义），但
+    // **禁止 initiate 与 close 并发**（未定义行为）。do_async_read 可能从
+    // worker 线程（DB 回调续跑）进入，直接发起会与 IO 线程的 close 竞争；
+    // post 到连接自己的 executor 与关闭动作同队列串行，post 内复查 closed_
+    // 拦住"check 时还活着、排队期间被 close"的发起。
+    auto self = this->shared_from_this();
+    auto ex = connection_->get_executor();
+    boost::asio::post(std::move(ex), [self] {
+        if (self->closed_ || !self->connection_) return;
+        if (self->has_buffered_input()) return;
+        self->connection_->async_read(
+            boost::asio::buffer(self->read_buffer_),
+            [self](
+                const boost::system::error_code& error, std::size_t bytes) mutable {
+                if (self->closed_) return;
 
-    conn->async_read(buf,
-        [self = this->shared_from_this()](
-            const boost::system::error_code& error, std::size_t bytes) mutable {
-            if (self->closed_) return;
+                // watchdog 回收点：timer 到期已置 close_requested_ 并 cancel 本读 → 这里
+                // 以 operation_aborted 完成 → 见标志即正常 close（对端断电时唯一观察点）。
+                if (self->close_requested_) { self->close(); return; }
 
-            // watchdog 回收点：timer 到期已置 close_requested_ 并 cancel 本读 → 这里
-            // 以 operation_aborted 完成 → 见标志即正常 close（对端断电时唯一观察点）。
-            if (self->close_requested_) { self->close(); return; }
+                if (error) {
+                    LOG_SESSION_ERROR("Error reading data: {}", error.message());
+                    self->handle_error(error);
+                    return;
+                }
 
-            if (error) {
-                LOG_SESSION_ERROR("Error reading data: {}", error.message());
-                self->handle_error(error);
-                return;
-            }
+                if (bytes == 0) {
+                    self->do_async_read();
+                    return;
+                }
 
-            if (bytes == 0) {
-                self->do_async_read();
-                return;
-            }
+                self->last_bytes_transferred_ = bytes;
+                // 原始 TCP 数据追加到命令缓冲区（可能包含多行 + 不完整尾行）
+                self->command_read_buffer_.append(
+                    self->read_buffer_.data(), bytes);
 
-            self->last_bytes_transferred_ = bytes;
-            // 原始 TCP 数据追加到命令缓冲区（可能包含多行 + 不完整尾行）
-            self->command_read_buffer_.append(
-                self->read_buffer_.data(), bytes);
+                // 无换行数据的无界累积防线：单次 read() 受 read_buffer_（8KB）约束，
+                // 内核侧由 TCP 接收窗口兜底，但应用层若永远等不到换行符，缓冲会
+                // 随发送持续增长（SMTP DATA 单行无 CRLF 的 200MB 就从这里过）。
+                // 超上限直接断开：超限数据不可能是合法命令/合法邮件。
+                if (self->command_read_buffer_.size() > self->max_command_buffer_bytes()) {
+                    LOG_SESSION_ERROR("Command buffer {} bytes without a complete line (limit {}), closing",
+                                      self->command_read_buffer_.size(),
+                                      self->max_command_buffer_bytes());
+                    self->close();
+                    return;
+                }
 
-            // 无换行数据的无界累积防线：单次 read() 受 read_buffer_（8KB）约束，
-            // 内核侧由 TCP 接收窗口兜底，但应用层若永远等不到换行符，缓冲会
-            // 随发送持续增长（SMTP DATA 单行无 CRLF 的 200MB 就从这里过）。
-            // 超上限直接断开：超限数据不可能是合法命令/合法邮件。
-            if (self->command_read_buffer_.size() > self->max_command_buffer_bytes()) {
-                LOG_SESSION_ERROR("Command buffer {} bytes without a complete line (limit {}), closing",
-                                  self->command_read_buffer_.size(),
-                                  self->max_command_buffer_bytes());
-                self->close();
-                return;
-            }
-
-            // 流水线消费：paused 时停止消费，等待 DB 回调排空
-            while (self->has_buffered_input() && !self->is_paused()) {
-                std::string line = self->extract_one_line();
-                self->trace_append_inbound(line);   // 连接追踪：在"移除点"记录收到的行
-                self->handle_read(line);
-                self->process_read();
-            }
-        });
+                // 流水线消费：paused 时停止消费，等待 DB 回调排空
+                while (self->has_buffered_input() && !self->is_paused()) {
+                    std::string line = self->extract_one_line();
+                    self->trace_append_inbound(line);   // 连接追踪：在"移除点"记录收到的行
+                    self->handle_read(line);
+                    self->process_read();
+                }
+            });
+    });
 }
 
 template <typename ConnectionType>
@@ -188,17 +230,25 @@ void SessionBase<ConnectionType>::do_async_write(
         return;
     }
 
-    auto* conn = connection_.get();
+    // 发起序列化：同 do_async_read —— initiate 与 close 并发是 asio UB，
+    // post 到连接 executor 串行，post 内复查 closed_（close 可能先到）。
+    auto self = this->shared_from_this();
     auto payload = std::make_shared<std::string>(
         std::move(pending_write_buf_) + data);
-    conn->async_write_with_delay(boost::asio::buffer(*payload),
-        compute_reply_delay(),
-        [self = this->shared_from_this(), payload, cb = std::move(callback)](
-            const boost::system::error_code& ec, std::size_t) mutable {
-            if (self->closed_) return;
-            if (ec) { self->handle_error(ec); return; }
-            if (cb) cb(self, ec);
-            else    self->do_async_read();
+    auto ex = connection_->get_executor();
+    boost::asio::post(std::move(ex),
+        [self, payload, cb = std::move(callback)]() mutable {
+            if (self->closed_ || !self->connection_) return;
+            self->connection_->async_write_with_delay(
+                boost::asio::buffer(*payload),
+                self->compute_reply_delay(),
+                [self, payload, cb = std::move(cb)](
+                    const boost::system::error_code& ec, std::size_t) mutable {
+                    if (self->closed_) return;
+                    if (ec) { self->handle_error(ec); return; }
+                    if (cb) cb(self, ec);
+                    else    self->do_async_read();
+                });
         });
 }
 
