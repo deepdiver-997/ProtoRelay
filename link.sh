@@ -237,6 +237,13 @@ add_pkg_libs mysqlclient || add_pkg_libs mariadb || add_pkg_libs libmariadb || F
 # nlohmann/json and Boost.Asio are header-first, but Boost.System/Thread are commonly required.
 FALLBACK_LIBS+=( -lboost_system -lboost_thread -pthread -ldl -lz )
 
+# 额外链接参数（环境变量，空格分隔）。
+# 用途：ASan 交叉部署时由 deploy.sh 传入 -fsanitize=address,undefined，
+# 让目标机 g++ 在链接期拉起 libasan/libubsan（编译侧的 -fsanitize 不够，
+# 链接时不带会直接 undefined symbol: __asan_report_*）。
+# shellcheck disable=SC2206
+EXTRA_LDFLAGS=( ${LINK_EXTRA_FLAGS:-} )
+
 LINK_CMD=( "$CXX_BIN" -o "$OUTPUT" )
 if [[ "$PIE_MODE" != "ON" ]]; then
     # Ubuntu enables PIE by default; many transferred .o files are non-PIE.
@@ -245,6 +252,7 @@ fi
 LINK_CMD+=( "${OBJECTS[@]}" )
 LINK_CMD+=( "${PKG_LIBS[@]}" )
 LINK_CMD+=( "${FALLBACK_LIBS[@]}" )
+LINK_CMD+=( "${EXTRA_LDFLAGS[@]}" )
 
 echo "Entry object : $ENTRY_OBJ_ABS"
 echo "Object root  : $OBJ_ROOT"

@@ -25,6 +25,7 @@ option(BUILD_TESTS "Build test and benchmark targets" ON)
 option(ENABLE_FUZZING "Build libFuzzer harnesses, e.g. mime_fuzz (clang only)" OFF)
 option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
 option(ENABLE_ASAN "Build unit test targets with AddressSanitizer+UBSan (-fsanitize=address,undefined -g -O1)" OFF)
+option(ENABLE_ASAN_SERVER "Build server binaries (smtps/imaps/mailServer) with ASan+UBSan — 线上内存问题诊断构建" OFF)
 option(ENABLE_COVERAGE "Build with coverage instrumentation (clang llvm-cov / gcc lcov)" OFF)
 
 # ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
@@ -453,6 +454,33 @@ else()
         test/server/h2web_main.cpp
     )
     setup_mail_target(h2web)
+endif()
+
+# ================================================================
+# ENABLE_ASAN_SERVER — 邮件服务器二进制的 ASan+UBSan 插桩（线上内存问题诊断）
+# 与单测用的 ENABLE_ASAN 互相独立；object-only 交叉部署时只影响 *_obj 的编译，
+# 链接侧的 -fsanitize 由 link.sh 的 LINK_EXTRA_FLAGS 提供（见 deploy.sh）。
+# ================================================================
+if(ENABLE_ASAN_SERVER)
+    foreach(_t smtpsServer_obj imapsServer_obj mailServer_obj webServer_obj
+               smtpsServer imapsServer mailServer pop3Server webServer)
+        if(TARGET ${_t})
+            target_compile_options(${_t} PRIVATE
+                -fsanitize=address,undefined
+                -fno-sanitize=vptr
+                -fno-sanitize-recover=undefined
+                -fno-omit-frame-pointer
+                -O1)
+            # 注意：这里不写 -g/-g1，调试级别由 build.sh 的 Asan profile
+            # 通过 CMAKE_*_FLAGS_RELEASE 统一给（-g1，避免小内存服务器链接 OOM）
+            get_target_property(_t_type ${_t} TYPE)
+            if(NOT _t_type STREQUAL "OBJECT_LIBRARY")
+                target_link_options(${_t} PRIVATE -fsanitize=address,undefined)
+            endif()
+            unset(_t_type)
+        endif()
+    endforeach()
+    message(STATUS "ENABLE_ASAN_SERVER=ON: server binaries instrumented with ASan+UBSan (-O1)")
 endif()
 
 # ================================================================

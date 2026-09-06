@@ -11,8 +11,18 @@ SERVER="${DEPLOY_SERVER:-root@<SERVER_IP>}"
 TARGET_DIR="/opt/smtpServer"
 SYSROOT="${HOME}/.protorelay/sysroot/usr"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
-BUILD_TYPE="Release"
+# BUILD_TYPE 可用 env 覆盖，如 BUILD_TYPE=Asan（ASan 诊断构建，见 build.sh）
+BUILD_TYPE="${BUILD_TYPE:-Release}"
 MODE="cross-x64 object-only"
+# DEPLOY_SMTP=0 只部署 IMAP（例如 IMAP 换 ASan 诊断版、SMTP 保持现役不动）
+DEPLOY_SMTP="${DEPLOY_SMTP:-1}"
+# ASan 诊断构建：链接期必须带 -fsanitize，否则目标机 g++ 不会拉起
+# libasan/libubsan，运行时直接 undefined symbol: __asan_report_*
+if [ "$BUILD_TYPE" = "Asan" ]; then
+    LINK_EXTRA="-fsanitize=address,undefined"
+else
+    LINK_EXTRA=""
+fi
 # 自动备份保留份数（只回收本脚本生成的 .bak-<日期>-<时刻>，手工打标签的备份不动）
 KEEP_BACKUPS=5
 
@@ -39,6 +49,11 @@ for arg in "$@"; do
             echo "  clean      全量重新编译"
             echo "  --dry-run  构建/上传/链接/校验全跑，但停在替换线上二进制之前。"
             echo "             用于验证部署机制本身，不影响线上服务。"
+            echo ""
+            echo "Env overrides:"
+            echo "  DEPLOY_SERVER=root@host   目标服务器（必填，见 docs/local/server-credentials.md）"
+            echo "  BUILD_TYPE=Asan           部署 ASan+UBSan 诊断构建（默认 Release）"
+            echo "  DEPLOY_SMTP=0             只部署 IMAP，smtpsServer 保持现役不动"
             exit 0 ;;
         *) echo "Unknown: $arg"; exit 1 ;;
     esac
@@ -78,28 +93,47 @@ echo "  Uploaded to obj.new/ (incremental via --link-dest)"
 # --- Step 4: 链接到 *.new ---
 # --obj-root 必须显式给：否则 link.sh 会收集 $TARGET_DIR 下**所有** .o
 # （服务器上还留着历史的 build-obj/），两份对象树混链 → 重复符号。
-echo "[4/6] Linking binaries on server..."
+# --exclude webServer_obj：webServer_obj 树里有一份 COMMON_SRCS 拷贝 + 自己的
+# main，release -O3 下靠内联退化成弱符号才没炸；-O1/ASan 构建下是强符号，
+# 必为 multiple definition（gold 实测）。imaps/smtps 二进制永远不需要它。
+echo "[4/6] Linking binaries on server (link extra: ${LINK_EXTRA:-none})..."
+if [ "$DEPLOY_SMTP" = "1" ]; then
+    ssh_strict "cd '$TARGET_DIR' && \
+        LINK_EXTRA_FLAGS='$LINK_EXTRA' bash link.sh obj.new/CMakeFiles/smtpsServer_obj.dir/test/server/smtps_test.cpp.o \
+            --obj-root obj.new \
+            -o smtpsServer.new --compiler g++-13 \
+            --exclude imaps_test --exclude mail_server --exclude webServer_obj 2>&1 | tail -1"
+else
+    echo "  DEPLOY_SMTP=0: skip smtpsServer (现役不动)"
+fi
 ssh_strict "cd '$TARGET_DIR' && \
-    bash link.sh obj.new/CMakeFiles/smtpsServer_obj.dir/test/server/smtps_test.cpp.o \
-        --obj-root obj.new \
-        -o smtpsServer.new --compiler g++-13 \
-        --exclude imaps_test --exclude mail_server 2>&1 | tail -1"
-ssh_strict "cd '$TARGET_DIR' && \
-    bash link.sh obj.new/CMakeFiles/imapsServer_obj.dir/test/server/imaps_test.cpp.o \
+    LINK_EXTRA_FLAGS='$LINK_EXTRA' bash link.sh obj.new/CMakeFiles/imapsServer_obj.dir/test/server/imaps_test.cpp.o \
         --obj-root obj.new \
         -o imapsServer.new --compiler g++-13 \
-        --exclude smtps_test --exclude mail_server 2>&1 | tail -1"
+        --exclude smtps_test --exclude mail_server --exclude webServer_obj 2>&1 | tail -1"
 
 # 产物校验：链接曾经静默失败过，这里必须挡住
+if [ "$DEPLOY_SMTP" = "1" ]; then
+    NEW_BINS="smtpsServer.new imapsServer.new"
+else
+    NEW_BINS="imapsServer.new"
+fi
 ssh "${SSH_OPTS[@]}" "$SERVER" bash -s <<REMOTE
 set -euo pipefail
 cd '$TARGET_DIR'
-for b in smtpsServer.new imapsServer.new; do
+for b in $NEW_BINS; do
     [ -x "\$b" ] || { echo "missing or not executable: \$b" >&2; exit 1; }
     [ -s "\$b" ] || { echo "empty binary: \$b" >&2; exit 1; }
 done
+if [ '$BUILD_TYPE' = 'Asan' ]; then
+    if ! nm imapsServer.new 2>/dev/null | grep -q __asan_init; then
+        echo "Asan build requested but imapsServer.new has no ASan symbols" >&2
+        exit 1
+    fi
+    echo '  ASan symbols verified in imapsServer.new'
+fi
 echo '  Linked and verified:'
-ls -la smtpsServer.new imapsServer.new | awk '{print "    "\$5, \$9}'
+ls -la $NEW_BINS | awk '{print "    "\$5, \$9}'
 REMOTE
 
 # --- Step 5: 同步配置和辅助文件 ---
@@ -125,11 +159,20 @@ ssh_strict "cd '$TARGET_DIR' && if [ ! -x hash_tool ] || [ hash_tool.cpp -nt has
 echo "  Synced"
 
 # --- Step 6: 备份 + 原子替换 + 重启 + 冒烟 + 失败自动回滚 ---
+if [ "$DEPLOY_SMTP" = "1" ]; then
+    ACTIVE_BINS="smtpsServer imapsServer"
+    SVC_LIST="smtpserver imapserver"
+    SMOKE_SMTP_ENABLED="1"
+else
+    ACTIVE_BINS="imapsServer"
+    SVC_LIST="imapserver"
+    SMOKE_SMTP_ENABLED="0"
+fi
 if [ -n "$DRY_RUN" ]; then
     echo "[6/6] DRY RUN — 停在替换之前，线上二进制未被触碰。"
     ssh_strict "cd '$TARGET_DIR' && \
-        echo '  现役:' && ls -la smtpsServer imapsServer 2>/dev/null | awk '{print \"    \"\$5, \$9}' && \
-        echo '  待替换:' && ls -la smtpsServer.new imapsServer.new | awk '{print \"    \"\$5, \$9}'"
+        echo '  现役:' && ls -la $ACTIVE_BINS 2>/dev/null | awk '{print \"    \"\$5, \$9}' && \
+        echo '  待替换:' && ls -la $NEW_BINS | awk '{print \"    \"\$5, \$9}'"
     echo ""
     echo "空跑完成：构建、上传、链接、产物校验均通过。"
     echo "清理暂存物：ssh \$SERVER 'cd $TARGET_DIR && rm -f *.new && rm -rf obj.new'"
@@ -147,7 +190,7 @@ TS=\$(date +%Y%m%d-%H%M%S)
 BACKED_UP=""
 
 # 备份现役二进制（首次部署时可能不存在）
-for b in smtpsServer imapsServer; do
+for b in $ACTIVE_BINS; do
     if [ -f "\$b" ]; then
         cp -p "\$b" "\$b.bak-\$TS"
         BACKED_UP="yes"
@@ -156,7 +199,7 @@ done
 
 # 原子替换：mv 在同一文件系统上原子；替换正在运行的可执行文件是安全的，
 # 运行中的进程持有旧 inode，直到 restart 才真正切换。
-for b in smtpsServer imapsServer; do
+for b in $ACTIVE_BINS; do
     mv "\$b.new" "\$b"
 done
 echo "  Backed up as *.bak-\$TS, new binaries in place"
@@ -174,20 +217,20 @@ rollback() {
         echo "  !! 本次是首次部署，没有可回滚的备份；服务已停在新二进制上" >&2
         return
     fi
-    for b in smtpsServer imapsServer; do
+    for b in $ACTIVE_BINS; do
         if [ -f "\$b.bak-\$TS" ]; then
             cp -p "\$b.bak-\$TS" "\$b"
         fi
     done
-    systemctl restart smtpserver imapserver || true
+    systemctl restart $SVC_LIST || true
     sleep 2
     echo "  已回滚并重启" >&2
 }
 
 # --- 重启 ---
-systemctl restart smtpserver imapserver
+systemctl restart $SVC_LIST
 sleep 2
-for svc in smtpserver imapserver; do
+for svc in $SVC_LIST; do
     if ! systemctl is-active --quiet "\$svc"; then
         echo "  !! \$svc 未能启动" >&2
         systemctl status "\$svc" --no-pager | head -15 >&2
@@ -237,8 +280,10 @@ smoke_imap() {
     return 0
 }
 
-if ! smoke_smtp; then rollback; exit 1; fi
-echo "  Smoke SMTP  : 220 greeting + EHLO 250 OK"
+if [ '$SMOKE_SMTP_ENABLED' = '1' ]; then
+    if ! smoke_smtp; then rollback; exit 1; fi
+    echo "  Smoke SMTP  : 220 greeting + EHLO 250 OK"
+fi
 if ! smoke_imap; then rollback; exit 1; fi
 echo "  Smoke IMAP  : * OK greeting + CAPABILITY OK"
 
@@ -246,13 +291,12 @@ echo "  Smoke IMAP  : * OK greeting + CAPABILITY OK"
 # 只回收本脚本生成的 .bak-<8位日期>-<6位时刻>；手工打标签的（如 .bak-tls13-...）
 # 不匹配此模式，不会被误删。
 # 注意 || true：无匹配时 ls 返回 1，配合 pipefail 会中断整个部署。
-for b in smtpsServer imapsServer; do
+for b in $ACTIVE_BINS; do
     ls -1t "\$b".bak-????????-?????? 2>/dev/null \
         | tail -n +$((KEEP_BACKUPS + 1)) \
         | xargs -r rm -f || true
 done
 
-echo '  SMTP:' && systemctl status smtpserver --no-pager | head -3 | tail -1
 echo '  IMAP:' && systemctl status imapserver --no-pager | head -3 | tail -1
 echo '  Ports:' && ss -tlnp | grep -E ':(25|465|143|993) ' | awk '{print "    "\$4}' | sort
 REMOTE

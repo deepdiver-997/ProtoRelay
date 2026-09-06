@@ -74,7 +74,7 @@ fi
 
 # 使用方法
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
+    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease|Asan> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
     echo "       $0 sync-sysroot [server]"
     echo ""
     echo "Note: build 永远 per-target 串行（lib → exe → test）+ 单 target 内并行（默认 -j 4）"
@@ -85,6 +85,7 @@ if [ "$#" -lt 1 ]; then
     echo "  $0 Release         # 构建 Release 版本（高优化，仅 INFO 级别日志）"
     echo "  $0 --pure-log Release  # 日志压缩模式：LOG_* → LOG_PURE(hash, args, ts)"
     echo "  $0 SafeRelease     # 低内存兜底构建（2核2G服务器推荐，-j 1/target）"
+    echo "  $0 Asan cross-x64  # ASan+UBSan 诊断构建（线上抓堆损坏用，配 deploy.sh BUILD_TYPE=Asan）"
     echo "  $0 Debug clean     # 清理后重新构建 Debug 版本"
     echo "  $0 Release clean   # 清理后重新构建 Release 版本"
     echo "  $0 Release 1       # per-target -j 1（极低内存服务器）"
@@ -175,9 +176,9 @@ resolve_cross_compiler() {
 }
 
 # 验证构建类型
-if [[ "$BUILD_TYPE" != "Debug" && "$BUILD_TYPE" != "Release" && "$BUILD_TYPE" != "SafeRelease" ]]; then
+if [[ "$BUILD_TYPE" != "Debug" && "$BUILD_TYPE" != "Release" && "$BUILD_TYPE" != "SafeRelease" && "$BUILD_TYPE" != "Asan" ]]; then
     print_warning "Invalid build type: $BUILD_TYPE"
-    echo "Must be 'Debug', 'Release' or 'SafeRelease'"
+    echo "Must be 'Debug', 'Release', 'SafeRelease' or 'Asan'"
     exit 1
 fi
 
@@ -218,6 +219,28 @@ if [[ "$BUILD_TYPE" == "SafeRelease" ]]; then
     SAFE_CMAKE_ARGS+=("-DENABLE_DEBUG_LOGS=OFF")
     SAFE_CMAKE_ARGS+=("-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG -mtune=generic")
     SAFE_CMAKE_ARGS+=("-DCMAKE_C_FLAGS_RELEASE=-O2 -DNDEBUG -mtune=generic")
+fi
+
+# Asan: 线上内存问题诊断构建（ASan+UBSan 插桩，-O1 保留栈帧）。
+# 编译侧 flag 由 ENABLE_ASAN_SERVER 挂到 *_obj 目标；链接侧 -fsanitize
+# 由 link.sh 的 LINK_EXTRA_FLAGS 提供（deploy.sh 在 BUILD_TYPE=Asan 时自动带上）。
+# 调试级别由 ASAN_GLEVEL 控制（默认 1=行号表）：
+#   ASAN_GLEVEL=1  → -g1，ASan 报告可直接还原 文件:行号；
+#                     但小内存服务器（2G）上 ld 峰值 ~900MB，曾把机器顶进
+#                     swap 风暴（2026-09-05 实测 load 42、sshd/邮件端口全部
+#                     无响应）。用前确认服务器内存充裕或已换 gold 链接。
+#   ASAN_GLEVEL=0  → 无调试信息，链接内存≈release 水平（保底方案）；
+#                     报告只有函数名栈，行号用本地 -g1 对象 addr2line 补
+#                     （-g 级别不影响代码布局，两边地址一致）。
+# 注意：ASan 换掉了分配器，glibc 的 tcache/堆元数据检查不再触发——
+# 同一个 bug 在 Asan 版下会以 heap-use-after-free / heap-buffer-overflow
+# 带完整分配+释放双栈的形式在第一现场报警。
+ASAN_GLEVEL="${ASAN_GLEVEL:-1}"
+if [[ "$BUILD_TYPE" == "Asan" ]]; then
+    CMAKE_BUILD_TYPE="Release"
+    SAFE_CMAKE_ARGS+=("-DENABLE_ASAN_SERVER=ON")
+    SAFE_CMAKE_ARGS+=("-DCMAKE_CXX_FLAGS_RELEASE=-O1 -g${ASAN_GLEVEL} -DNDEBUG -fno-omit-frame-pointer")
+    SAFE_CMAKE_ARGS+=("-DCMAKE_C_FLAGS_RELEASE=-O1 -g${ASAN_GLEVEL} -DNDEBUG -fno-omit-frame-pointer")
 fi
 
 # 清理构建目录（可选）
@@ -469,6 +492,13 @@ for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
         done
         [[ $skip -eq 1 ]] && continue
     fi
+    # 2026-09-06 补：目标清单里可能存在 CMake 已不再定义的旧 target
+    # （如 smtp_client/webServer），直接 make 会 No rule 中断整个构建。
+    # 与下方 test 循环同款：先探测存在性，不存在就跳过并提示。
+    if ! cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep -qE "^\.\.\. ${target}\$"; then
+        print_warning "target '$target' not defined by CMake, skipping"
+        continue
+    fi
     print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
     cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
 done
@@ -578,6 +608,18 @@ elif [ "$BUILD_TYPE" = "Release" ]; then
     else
         echo "Start server with: ./build/smtpsServer"
         echo "Or run tests with: cd test && uv run cl.py"
+    fi
+elif [ "$BUILD_TYPE" = "Asan" ]; then
+    echo -e "${GREEN}Asan Diagnostic Mode Enabled (GLEVEL=${ASAN_GLEVEL}):${NC}"
+    echo "  • Sanitizers: AddressSanitizer + UBSan (halt on error)"
+    echo "  • Optimization: -O1 (keep frames resolvable)"
+    echo "  • Debug: -g${ASAN_GLEVEL} (0=函数名栈 / 1=含文件:行号，见 ASAN_GLEVEL 说明)"
+    echo "  • Link on target needs: LINK_EXTRA_FLAGS='-fsanitize=address,undefined' (deploy.sh 自动带)"
+    if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
+        echo "  • Link step: skipped (object-only)"
+        echo "Object files are ready for target-machine linking."
+    else
+        echo "Start server with: ./build/imapsServer"
     fi
 else
     echo -e "${GREEN}SafeRelease Mode Enabled:${NC}"
