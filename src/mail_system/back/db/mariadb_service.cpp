@@ -458,6 +458,10 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(
                         buffers[i].resize(result_lengths[i]);
                         result_binds[i].buffer = buffers[i].data();
                         result_binds[i].buffer_length = buffers[i].size();
+                        // bind 数组在 bind_result 时已拷贝进 stmt 内部，resize 释放
+                        // 旧缓冲后必须整体重绑，否则下一行 stmt_fetch 写悬垂指针
+                        //（同 mysql_service.cpp 的 heap-use-after-free 修复）
+                        D.mysql_stmt_bind_result(stmt, result_binds.data());
                         D.mysql_stmt_fetch_column(stmt, &result_binds[i], i, 0);
                     }
                     row_data[i] = std::string(buffers[i].data(), result_lengths[i]);
@@ -781,6 +785,10 @@ static std::shared_ptr<IDBResult> read_stmt_rows(MYSQL_STMT* stmt, MariaDbDriver
                     buffers[i].resize(rlens[i]);
                     rbinds[i].buffer = buffers[i].data();
                     rbinds[i].buffer_length = buffers[i].size();
+                    // bind 数组在 bind_result 时已拷贝进 stmt 内部，resize 释放
+                    // 旧缓冲后必须整体重绑，否则下一行 stmt_fetch 写悬垂指针
+                    //（同 mysql_service.cpp 的 heap-use-after-free 修复）
+                    D.mysql_stmt_bind_result(stmt, rbinds.data());
                     D.mysql_stmt_fetch_column(stmt, &rbinds[i], (unsigned int)i, 0);
                 }
                 row_data[i] = std::string(buffers[i].data(), rlens[i]);

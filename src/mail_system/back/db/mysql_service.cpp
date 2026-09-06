@@ -434,6 +434,14 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
                         buffers[i].resize(result_lengths[i]);
                         result_binds[i].buffer = buffers[i].data();
                         result_binds[i].buffer_length = buffers[i].size();
+                        // 关键：mysql_stmt_bind_result 会把 bind 数组"拷贝"进 stmt
+                        // 内部，434 行 resize 释放旧缓冲后，stmt 内部仍指向已释放的
+                        // 256 字节旧块 —— 必须整体重绑同步内部副本，否则下一行
+                        // mysql_stmt_fetch 照旧把数据 memcpy 进悬垂指针 =
+                        // heap-use-after-free（线上 tcache 崩溃根因，ASan 报告
+                        // WRITE of size 256；mysql_stmt_fetch_column 只救当前行
+                        // 当前列，救不了后续行）。
+                        mysql_stmt_bind_result(stmt, result_binds.data());
                         mysql_stmt_fetch_column(stmt, &result_binds[i], i, 0);
                     }
                     row_data[i] = std::string(buffers[i].data(), result_lengths[i]);
