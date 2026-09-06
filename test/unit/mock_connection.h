@@ -227,9 +227,16 @@ private:
         ReadHandler h;
     };
 
+    // ── 双 context 职责契约（09-06 单元层全真 asio 化定稿）──
+    // exec_ctx_（真实 io_context）＝【调度语义层】：SessionBase 的发起/关闭
+    //   串行队列、watchdog 定时器。单元层测试用 pump_executor()（restart+poll）
+    //   驱动，与生产 IO 线程的 run() 走完全相同的 scheduler 语义。
+    // ctx_（MockIoContext）＝【完成投递层】：mock 的 async_read/write 把完成
+    //   回调投到这里，同步模式内联执行（测试即发起即生效）、线程模式由独立
+    //   线程投递（smtps_fsm_concurrency_test 依赖 wait_idle 的确定性排空）。
+    //   它不是 scheduler 仿真——不要用它测调度行为，那属于 exec_ctx_。
     mutable std::mutex mu_;
     test::MockIoContext ctx_;
-    // 仅由 get_executor() 暴露给框架（watchdog post 落这里，测试不驱动它）
     boost::asio::io_context exec_ctx_;
     std::string read_buf_;
     size_t read_pos_ = 0;
