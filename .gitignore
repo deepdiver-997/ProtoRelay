@@ -7,6 +7,7 @@ build/
 build-tsan/
 build-fuzz/
 build-asan/
+build-asan-diag/
 build-cov/
 
 # libFuzzer 运行时往语料目录写入的生成样本（纯十六进制文件名）；
@@ -235,4 +236,5 @@ test/sql_queries_test
 
 # Build artifacts
 artifacts/
+artifacts-g0/
 /build-release/
