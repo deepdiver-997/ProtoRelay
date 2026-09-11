@@ -66,7 +66,6 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             ob_cfg.static_routes = std::move(cfg->outbound_static_routes);
             ob_cfg.default_route = cfg->outbound_default_route;
             m_outboundServer->set_config(std::move(ob_cfg));
-            m_outboundServer->set_config(std::move(ob_cfg));
         }
         m_persistentQueue->set_outbound_server(m_outboundServer);
         LOG_SERVER_INFO("OutboundServer (new engine) wired into PersistentQueue");
