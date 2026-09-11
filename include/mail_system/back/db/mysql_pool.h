@@ -5,6 +5,7 @@
 #include "mail_system/back/db/db_service.h"
 #include <queue>
 #include <chrono>
+#include <condition_variable>
 #include <thread>
 #include <atomic>
 

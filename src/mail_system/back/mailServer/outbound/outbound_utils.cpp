@@ -315,8 +315,40 @@ bool ensure_mail_raw_payload_loaded(mail& mail_data) {
     return !mail_data.body.empty();
 }
 
-std::string build_outbound_message(const OutboxRecord& record,
-                                   const mail* hot_mail,
+// ================================================================
+// sign_payload_if_dkim — 对完整 RFC5322 报文按 identity_config 做 DKIM 签名，
+// 成功则在报文头前插入 DKIM-Signature；未启用/失败时原样返回并把原因写入
+// *error_out（供调用方记日志）。供出站会话 DATA 构造路径使用。
+// ================================================================
+std::string sign_payload_if_dkim(const std::string& raw_payload,
+                                 const OutboundConfig& identity_config,
+                                 std::string* error_out) {
+    if (error_out) error_out->clear();
+    if (!identity_config.dkim_enabled) return raw_payload;
+
+    std::string header_block;
+    std::string body_block;
+    if (!split_rfc5322_message(raw_payload, header_block, body_block)) {
+        if (error_out) *error_out = "cannot split RFC5322 message into header/body";
+        return raw_payload;
+    }
+    auto raw_headers = parse_headers_relaxed_map(header_block);
+    if (raw_headers.find("from") == raw_headers.end()) {
+        if (error_out) *error_out = "missing header for DKIM signing: from";
+        return raw_payload;
+    }
+    auto signed_headers = pick_present_headers_for_dkim(raw_headers);
+    std::string err;
+    const std::string dkim_header = build_dkim_header(
+        raw_headers, normalize_body_simple(body_block), identity_config, err, &signed_headers);
+    if (dkim_header.empty()) {
+        if (error_out) *error_out = err.empty() ? "dkim signing failed" : err;
+        return raw_payload;
+    }
+    return dkim_header + header_block + "\r\n\r\n" + body_block;
+}
+
+std::string build_outbound_message(const OutboxRecord& record,                                   const mail* hot_mail,
                                    const std::string& header_from,
                                    const OutboundConfig& identity_config,
                                    bool* dkim_applied,

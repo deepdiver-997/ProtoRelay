@@ -97,3 +97,30 @@ This document captures conventions inspired by large production-grade CLI/networ
 
 > 心理学捷径：读路径用 `set_paused` 让 worker 与 io 互斥，timer 这类没有 pause 可借的
 > 对象用 `post` 把操作挪到同线程——两条都是正确隔离，只是手段不同。
+
+### 11.3 ⚠️ 实参求值顺序 × move 进捕获 —— 本仓库最高频的段错误来源（已踩 4 次）
+
+**同一函数调用里，禁止既解引用/使用一个对象，又把它 `std::move` 进同调用的 lambda
+捕获。** 实参求值顺序不确定（不同编译器/优化等级/内联决策都不同），完全可能先执行
+捕获的 move，另一实参拿到的是已置空的对象 → 段错误（si_addr 常是很小的字段偏移，
+如 0x8）或静默功能失效。
+
+```cpp
+// ✗ 禁止
+async_connect(*sock, endpoints, [sock = std::move(sock)](...){...});
+// ✓ 正确：裸指针先行，再 move
+auto* sock_raw = sock.get();
+async_connect(*sock_raw, endpoints, [sock = std::move(sock)](...){...});
+// ✓ 或者：shared_ptr 拷贝捕获
+```
+
+**四次前科**（详见 `docs/bugfixes/2026-09-11-argument-eval-order-and-capture-move.md`）：
+96dbae6 accept_connection 段错误、5085ddb IMAP CPS 参数被回调 move 掉（5 处功能失效）、
+e435dd5 捕获 timer 而非 session（跨线程 UAF）、2026-09-11 outbound connect_to_mx
+（RackNerd 部署必现，排障花了一整轮才定位）。
+
+**必须内化的三句话**：
+1. "在别的构建/别的机器上能跑"不是证据——求值顺序是编译器属性，换工具链必翻车。
+2. 写最小复现必须**复刻写法模式**（含 move 进捕获），只复刻 API 组合会得出错误结论。
+3. 崩溃帧在 asio/库内部 ≠ 库的锅；si_addr 是小常量偏移 = "空对象+字段偏移"指纹，
+   先查调用点的捕获/生命周期，再怀疑库。

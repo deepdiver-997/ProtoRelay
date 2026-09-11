@@ -6,7 +6,9 @@
 #include "framework/metrics_server.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/mailServer/outbound/dns_resolver.h"
+#include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
+#include "mail_system/back/mailServer/outbound/outbound_utils.h"
 #include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
 #include "mail_system/back/common/logger.h"
 #include <queue>
@@ -38,11 +40,24 @@ public:
     OutboundSmtpSession(ServerBase* server, const std::string& mx_host, int mx_port = 25)
         : SessionBase<ConnectionType>(nullptr, server)
         , mx_host_(mx_host), mx_port_(mx_port)
-        , helo_domain_(server->m_domain)
+        , helo_domain_(resolve_helo(server))
         , fsm_(std::make_shared<OutboundSmtpFsm<ConnectionType>>())
     {
         register_handlers();
     }
+
+    static std::string resolve_helo(ServerBase* server) {
+        // EHLO 名必须与出站 PTR/EHLO 三元组一致：优先 outbound.helo_domain（如 mx2.scut.email），
+        // 未配置则回落 system_domain
+        if (auto cfg = std::atomic_load(&server->m_config);
+            cfg && !cfg->outbound_helo_domain.empty() &&
+            cfg->outbound_helo_domain != "outbound.local")
+            return cfg->outbound_helo_domain;
+        return server->m_domain;
+    }
+
+    // 注入出站配置（DKIM 签名等）；由 OutboundServer 创建会话时调用
+    void set_outbound_config(const OutboundConfig& cfg) { ob_cfg_ = cfg; }
 
     SessionState state() const { return state_; }
 
@@ -201,7 +216,12 @@ private:
                 auto& io_ctx2 = static_cast<IOThreadPool*>(
                     self->m_server->m_ioThreadPool.get())->get_io_context();
                 auto sock = std::make_unique<boost::asio::ip::tcp::socket>(io_ctx2);
-                boost::asio::async_connect(*sock, endpoints,
+                // 先取裸指针再 move：实参求值顺序不确定，`async_connect(*sock, ...,
+                // [sock = std::move(sock)]...)` 里若 handler 实参先求值，*sock 解引用的
+                // 是已置空的 unique_ptr → socket 对象落在 0 地址，process() 内 +8 偏移
+                // 处空指针崩（si_addr=0x8，2026-09-11 RackNerd 三个 core 均为此现场）。
+                auto* sock_raw = sock.get();
+                boost::asio::async_connect(*sock_raw, endpoints,
                     [self, sock = std::move(sock)](const boost::system::error_code& ec,
                                                    boost::asio::ip::tcp::endpoint) mutable {
                         if (ec) { self->handle_connect_failure(); return; }
@@ -312,11 +332,20 @@ private:
     std::string load_and_stuff_body() {
         if (!current_task_ || !current_task_->mail_ptr) return ".\r\n";
         const auto& m = *current_task_->mail_ptr;
-        if (!m.body.empty()) return dot_stuff(m.body) + "\r\n.\r\n";
-        std::ifstream file(m.body_path, std::ios::binary);
-        if (!file.is_open()) { LOG_SMTP_ERROR("Outbound: cannot open {}", m.body_path); return ".\r\n"; }
-        std::ostringstream ss; ss << file.rdbuf();
-        return dot_stuff(ss.str()) + "\r\n.\r\n";
+        std::string raw;
+        if (!m.body.empty()) {
+            raw = m.body;
+        } else {
+            std::ifstream file(m.body_path, std::ios::binary);
+            if (!file.is_open()) { LOG_SMTP_ERROR("Outbound: cannot open {}", m.body_path); return ".\r\n"; }
+            std::ostringstream ss; ss << file.rdbuf();
+            raw = ss.str();
+        }
+        std::string sign_err;
+        std::string payload = sign_payload_if_dkim(raw, ob_cfg_, &sign_err);
+        if (!sign_err.empty())
+            LOG_SMTP_WARN("Outbound: DKIM sign skipped for mail {}: {}", m.id, sign_err);
+        return dot_stuff(payload) + "\r\n.\r\n";
     }
 
     static std::string dot_stuff(const std::string& body) {
@@ -403,6 +432,7 @@ private:
     std::string mx_host_;
     int mx_port_;
     std::string helo_domain_;
+    OutboundConfig ob_cfg_;
     std::shared_ptr<OutboundSmtpFsm<ConnectionType>> fsm_;
     std::string response_buf_;
 

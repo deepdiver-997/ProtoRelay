@@ -361,6 +361,7 @@ OutboundServer::SessionPtr OutboundServer::acquire_session(const std::string& mx
 
 OutboundServer::SessionPtr OutboundServer::create_session(const std::string& mx, int port) {
     auto s = std::make_shared<OutboundSmtpSession<TcpConnection>>(server_, mx, port);
+    s->set_outbound_config(config_);
     if (completion_cb_) s->set_completion_cb(completion_cb_);
     return s;
 }
