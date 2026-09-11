@@ -124,3 +124,21 @@ e435dd5 捕获 timer 而非 session（跨线程 UAF）、2026-09-11 outbound con
 2. 写最小复现必须**复刻写法模式**（含 move 进捕获），只复刻 API 组合会得出错误结论。
 3. 崩溃帧在 asio/库内部 ≠ 库的锅；si_addr 是小常量偏移 = "空对象+字段偏移"指纹，
    先查调用点的捕获/生命周期，再怀疑库。
+
+### 11.4 ⚠️ std::move 后的结构体再次 move/set —— "moved-from 复用"静默抹空
+
+**`std::move(x)` 之后，`x` 成了 moved-from 状态（string/容器 member 为空、值为初值）。若同一作用域里
+再次把 `x`（或其成员）`std::move` / 赋值进目标，第二次拿到的是空值——不报错、静默覆盖目标。**
+
+```cpp
+// ✗ 禁止：同一 ob_cfg 连续两次 set_config(std::move(ob_cfg))
+ob_cfg.default_route = cfg->outbound_default_route;
+set_config(std::move(ob_cfg));   // 第一次: default_route 正确装入 config
+set_config(std::move(ob_cfg));   // 第二次: ob_cfg 已 move, default_route.host/static_routes 全空 → 覆盖 config_, 路由被抹空
+```
+**前科**：2026-09-11 `smtps_server.cpp` 组装 `OutboundConfig` 后误写两行 `set_config(std::move(ob_cfg))`，
+第二个 move 抹空了 `default_route`/`static_routes` → 运行期 resolve 退回裸域 A（叠加 11.3 的 MX 缺陷），
+阿里云 default_route 配了却派发给 `qq.com` 而非 RackNerd。修复：删重复行（a11f7f4）。
+
+**判断口诀**：同个对象的 `std::move` 出现 **≥2 次** = 红警。move 只应发生一次，之后对象视为"已移交，
+仅供析构"。若确实要复用同份值，用 **copy**（`= cfg->outbound_default_route`，或保留一份副本）。
