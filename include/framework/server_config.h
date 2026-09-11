@@ -202,6 +202,11 @@ struct ServerConfig : public pr::ServerConfig {
     // （内部投递不受影响；未认证 25 端口 MTA 入站本来就禁中继）
     bool external_delivery_enabled;
 
+    // 信任中继网段：命中来源 IP 的未认证 25 端口会话可中继任意收件人（跳过
+    // relay-denied 与本地用户校验）。条目为精确 IP 或 IPv4 CIDR（"120.24.169.213"、"10.0.0.0/8"）。
+    // 用于边缘中继拓扑：上游 MTA（阿里云）投递到中继（RackNerd）的信任跳。
+    std::vector<std::string> trusted_relay_networks;
+
     bool metrics_enabled;
     uint16_t metrics_port;
     std::string metrics_bind_address;
@@ -365,6 +370,12 @@ struct ServerConfig : public pr::ServerConfig {
             j.value("outbound_dkim_private_key_file", outbound_dkim_private_key_file));
         outbound_max_attempts  = j.value("outbound_max_attempts", outbound_max_attempts);
         external_delivery_enabled = j.value("external_delivery_enabled", external_delivery_enabled);
+        if (j.contains("trusted_relay_networks") && j["trusted_relay_networks"].is_array()) {
+            trusted_relay_networks.clear();
+            for (auto& n : j["trusted_relay_networks"])
+                if (n.is_string() && !n.get<std::string>().empty())
+                    trusted_relay_networks.push_back(n.get<std::string>());
+        }
         outbound_poll_busy_sleep_ms  = j.value("outbound_poll_busy_sleep_ms", outbound_poll_busy_sleep_ms);
         outbound_poll_backoff_base_ms= j.value("outbound_poll_backoff_base_ms", outbound_poll_backoff_base_ms);
         outbound_poll_backoff_max_ms = j.value("outbound_poll_backoff_max_ms", outbound_poll_backoff_max_ms);

@@ -60,6 +60,8 @@
   "intrusion_detection_enabled": true,
   "intrusion_ban_threshold": 5,
 
+  "trusted_relay_networks": ["127.0.0.1", "::1"],
+
   "outbound": {
     "helo_domain": "smtp.example.com",
     "mail_from_domain": "example.com",

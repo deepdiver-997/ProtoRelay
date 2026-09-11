@@ -10,10 +10,35 @@
 #include <openssl/md5.h>
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/mailServer/smtps_server.h"
+#include <arpa/inet.h>
 
 namespace mail_system {
 
 namespace {
+
+// trusted_relay_networks 匹配：条目为精确 IP（含 IPv6）或 IPv4 CIDR。
+// 精确条目走字符串比较；CIDR 用 inet_pton 转主机序后按前缀比较，解析失败则跳过该条目。
+inline bool ip_in_trusted_networks(const std::string& ip,
+                                   const std::vector<std::string>& networks) {
+    if (ip.empty() || networks.empty()) return false;
+    for (const auto& entry : networks) {
+        if (entry == ip) return true;
+        const auto slash = entry.find('/');
+        if (slash == std::string::npos) continue;
+
+        const auto prefix = std::stoi(entry.substr(slash + 1));
+        if (prefix < 0 || prefix > 32) continue;
+
+        struct in_addr base{}, addr{};
+        if (inet_pton(AF_INET, entry.substr(0, slash).c_str(), &base) != 1 ||
+            inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+            continue;  // 非 IPv4 CIDR/IPv4 客户端：只可能被上面的精确匹配命中
+        }
+        const uint32_t mask = prefix == 0 ? 0u : ~0u << (32 - prefix);
+        if ((ntohl(base.s_addr) & mask) == (ntohl(addr.s_addr) & mask)) return true;
+    }
+    return false;
+}
 
 // 密码验证：自动检测 bcrypt / MD5 / 明文
 inline bool verify_password(const std::string& input, const std::string& stored) {
@@ -667,6 +692,22 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         domain = recipient.substr(at + 1);
     }
     local = algorithm::trim(local);
+
+    // 信任中继网段（上游 MTA 信任跳）：接受任意收件人，跳过 relay-denied 与
+    // 本地用户校验（中继节点本地本就无用户体系）
+    if (ip_in_trusted_networks(session->get_client_ip(), cfg->trusted_relay_networks)) {
+        LOG_SMTP_INFO("RCPT trusted relay accepted: {} (from {})",
+                      recipient, session->get_client_ip());
+        ctx->recipient_addresses.push_back(recipient);
+        session->do_async_write("250 Ok\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                if (ec) return;
+                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                s->drain_buffered_commands();
+                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
+            });
+        return;
+    }
 
     // 外部域名（非本系统域名）→ 拒绝中继
     if (algorithm::to_lower(domain) != algorithm::to_lower(cfg->system_domain)) {
