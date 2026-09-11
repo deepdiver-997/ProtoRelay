@@ -10,6 +10,7 @@
 #include <memory>
 #include <netinet/in.h>
 #include <string>
+#include <sys/select.h>
 
 namespace mail_system {
 namespace outbound {
@@ -184,17 +185,68 @@ CaresDnsResolver::~CaresDnsResolver() {
 bool CaresDnsResolver::init_channel_locked() {
     if (!library_inited_ || channel_) return channel_ != nullptr;
     ares_options opts{};
+    int mask = 0;
+#ifdef ARES_OPT_EVENT_THREAD
+    // c-ares ≥1.22：内置事件线程驱动查询，回调在其线程执行。
     opts.evsys = ARES_EVSYS_DEFAULT;
-    int mask = ARES_OPT_EVENT_THREAD;
+    mask = ARES_OPT_EVENT_THREAD;
+#endif
     if (ares_init_options(&channel_, &opts, mask) != ARES_SUCCESS || !channel_) {
         channel_ = nullptr;
         return false;
     }
+#ifndef ARES_OPT_EVENT_THREAD
+    // c-ares <1.22：自驱线程轮询 socket，超时上限 200ms 保证析构可及时 join。
+    driver_run_ = true;
+    driver_ = std::thread([this] { driver_loop(); });
+#endif
     return true;
 }
 
+#ifndef ARES_OPT_EVENT_THREAD
+void CaresDnsResolver::driver_loop() {
+    while (driver_run_) {
+        ares_socket_t socks[ARES_GETSOCK_MAXNUM] = {};
+        int bits = 0;
+        int maxfd = -1;
+        fd_set rfds, wfds;
+        struct timeval cap {0, 200 * 1000}, tv_buf {}, *tv = &cap;
+        {
+            // channel 非线程安全：getsock/timeout 与提交线程的 ares_query 互斥
+            std::lock_guard<std::recursive_mutex> lk(mutex_);
+            bits = ares_getsock(channel_, socks, ARES_GETSOCK_MAXNUM);
+            tv = ares_timeout(channel_, &cap, &tv_buf);
+            FD_ZERO(&rfds);
+            FD_ZERO(&wfds);
+            for (int i = 0; i < ARES_GETSOCK_MAXNUM; ++i) {
+                if (ARES_GETSOCK_READABLE(bits, i)) {
+                    FD_SET(socks[i], &rfds);
+                    if (socks[i] > maxfd) maxfd = socks[i];
+                }
+                if (ARES_GETSOCK_WRITABLE(bits, i)) {
+                    FD_SET(socks[i], &wfds);
+                    if (socks[i] > maxfd) maxfd = socks[i];
+                }
+            }
+        }
+        // cap 200ms：无在途查询时 ares_timeout 返回 NULL（无限等），
+        // 限频唤醒保证 driver_run_ 能被观察到
+        const int rc = ::select(maxfd + 1, &rfds, &wfds, nullptr, tv);
+        if (!driver_run_) break;
+        std::lock_guard<std::recursive_mutex> lk(mutex_);
+        ares_process(channel_, rc > 0 ? &rfds : nullptr, rc > 0 ? &wfds : nullptr);
+    }
+}
+#endif
+
 void CaresDnsResolver::destroy_channel_locked() {
-    if (channel_) { ares_destroy(channel_); channel_ = nullptr; }
+    if (!channel_) return;
+#ifndef ARES_OPT_EVENT_THREAD
+    driver_run_ = false;
+    if (driver_.joinable()) driver_.join();
+#endif
+    ares_destroy(channel_);
+    channel_ = nullptr;
 }
 
 // ---- async 接口 ----

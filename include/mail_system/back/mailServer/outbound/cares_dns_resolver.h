@@ -4,10 +4,12 @@
 #include "framework/metrics_server.h"
 #include "mail_system/back/mailServer/outbound/dns_resolver.h"
 #include <ares.h>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace mail_system {
@@ -36,10 +38,18 @@ public:
 private:
     bool init_channel_locked();
     void destroy_channel_locked();
-
+#ifndef ARES_OPT_EVENT_THREAD
+    // c-ares <1.22（如 jammy 1.18）无内置事件线程：自驱 poll 线程驱动查询，
+    // 回调仍在驱动线程执行，与 1.22+ evsys 模式的线程语义一致（非 IO 线程）。
+    void driver_loop();
+    std::thread driver_;
+    std::atomic<bool> driver_run_{false};
+#endif
     ares_channel channel_{nullptr};
     bool library_inited_{false};
-    std::mutex mutex_;
+    // 递归锁：driver 线程在 ares_process 持锁期间回调用户代码，验证器会在回调内
+    // 再次提交后续查询（MX→A 链）→ 同线程重入；跨线程（提交 vs 驱动）互斥照旧。
+    std::recursive_mutex mutex_;
     std::weak_ptr<MetricsServer> m_metrics_;
 };
 

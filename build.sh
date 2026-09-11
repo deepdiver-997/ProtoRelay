@@ -114,6 +114,14 @@ if [ "$1" = "sync-sysroot" ]; then
     echo -e "${BLUE}[INFO]${NC} Target: ${SYSROOT}"
     mkdir -p "$SYSROOT"
     ssh "$SERVER" "tar czf - -C /usr/include spdlog fmt" | tar xzf - -C "$SYSROOT"
+    # SYSROOT_BOOST=1：同时同步 boost 头文件（与目标机发行版完全一致）。
+    # 背景：brew boost(1.90/asio 1.36) 头文件 + GCC13 交叉编译，resolve→async_connect
+    # 路径在 linux 上必崩（2026-09-11 RackNerd 实测，最小复现 30 行即崩）；docker e2e
+    # 用的是 Ubuntu 自带 1.74 头文件所以从没暴露。目标是 1.74 运行库时应同步。
+    if [[ "$SYSROOT_BOOST" == "1" ]]; then
+        echo -e "${BLUE}[INFO]${NC} Syncing boost headers (SYSROOT_BOOST=1)..."
+        ssh "$SERVER" "tar czf - -C /usr/include boost" | tar xzf - -C "$SYSROOT"
+    fi
     FILE_COUNT=$(find "$SYSROOT" -type f 2>/dev/null | wc -l | tr -d ' ')
     print_success "Sysroot synced: ${FILE_COUNT} files at ${SYSROOT}"
     exit 0
@@ -415,9 +423,12 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
     fi
 
     # cross-x64: override -march=native (invalid for cross-compiler on macOS)
+    # 默认 x86-64-v3（AVX2 一代，阿里云 CPU 支持）。目标机更老时用 CROSS_ARCH 覆盖，
+    # 如 RackNerd E5-2680 v2（Ivy Bridge）只到 v2：
+    #   CROSS_ARCH=x86-64-v2 bash build.sh Release clean cross-x64
     cmake_args+=(
-        -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v3"
-        -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v3"
+        -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=${CROSS_ARCH:-x86-64-v3}"
+        -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -march=${CROSS_ARCH:-x86-64-v3}"
     )
 fi
 
