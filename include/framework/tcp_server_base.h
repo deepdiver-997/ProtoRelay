@@ -207,6 +207,7 @@ void TcpServerBase<TcpSession, SslSession>::do_tcp_accept(
                     auto session = make_tcp_session(std::move(conn), lc);
                     if (session) {
                         increment_connection_count();
+                        session->set_tracks_connection_count(true);
                         TcpSession::start(session);
                     }
                 }
@@ -249,6 +250,7 @@ void TcpServerBase<TcpSession, SslSession>::do_ssl_accept(
                     auto session = make_ssl_session(std::move(conn), lc);
                     if (session) {
                         increment_connection_count();
+                        session->set_tracks_connection_count(true);
                         SslSession::start(session);
                     }
                 }
@@ -269,6 +271,7 @@ void TcpServerBase<TcpSession, SslSession>::handoff_starttls_socket(
     auto session = make_ssl_session(std::move(conn), ListenerConfig{});
     if (session) {
         increment_connection_count();
+        session->set_tracks_connection_count(true);
         if (!trace.empty()) session->set_trace_buffer(std::move(trace));  // 延续旧会话的对话记录
         SslSession::start_after_starttls(session);
     }

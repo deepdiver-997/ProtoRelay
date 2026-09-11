@@ -42,7 +42,10 @@ void SessionBase<ConnectionType>::close() {
         lbls["auth"] = session_authenticated_ ? "yes" : "no";
         m_server->push_metric_observe("protorelay_session_duration_seconds", lbls, elapsed);
         m_server->record_session_end(get_client_ip(), session_authenticated_);
-        m_server->decrement_connection_count();
+        // 仅入站计数过的会话 decrement：出站/自建会话未 increment，若也 decrement，
+        // 无符号 size_t 在 0 上 fetch_sub 下溢成 SIZE_MAX(≈18E18) → maxConnections 判满拒连
+        //（2026-09-11 RackNerd 中继全部拒连根因）。对称性由 accept 路径 set_tracks_connection_count(true) 保证。
+        if (tracks_connection_count_) m_server->decrement_connection_count();
     }
 
     // 拿 self：析构期安全网路径（~SessionBase → close）shared_from_this 不可用。

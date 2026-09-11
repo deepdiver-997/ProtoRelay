@@ -21,6 +21,8 @@
 #include "framework/net/dns_resolver.h"
 #include "framework/server_base.h"
 #include "framework/server_config.h"
+#include "framework/session_base.h"
+#include "framework/connection/tcp_connection.h"
 #include "framework/thread_pool/io_thread_pool.h"
 
 using namespace mail_system;
@@ -346,6 +348,43 @@ int main() {
     }
 
     std::filesystem::remove_all(dir);
+    // 15. 连接计数下溢守卫：出站/自建会话(tracks=false) close() 不得 decrement
+    //     未 increment 的计数——无符号 size_t 在 0 上 fetch_sub 下溢成 SIZE_MAX(≈18E18),
+    //     使 `active >= maxConnections` 恒真 → 整机拒绝所有连接（2026-09-11 RackNerd 事故）。
+    {
+        struct TestSession : SessionBase<TcpConnection> {
+            explicit TestSession(ServerBase* s) : SessionBase<TcpConnection>(nullptr, s) {}
+            std::chrono::milliseconds compute_reply_delay() const override { return std::chrono::milliseconds(0); }
+            void    handle_read(const std::string&) override {}
+            void    process_read() override {}
+            void    set_current_state(int) override {}
+            void    set_next_event(int) override {}
+            int     get_current_state() const override { return 0; }
+            int     get_next_event() const override { return 0; }
+            void*   get_fsm() const override { return nullptr; }
+            void*   get_context() override { return nullptr; }
+            std::string get_last_command_args() const override { return ""; }
+        };
+        TestServerBase server(make_cfg());
+        // 出站型：tracks_connection_count_ 默认 false → close() 不能 decrement
+        {
+            auto s = std::make_shared<TestSession>(&server);
+            expect_true(server.active_connections_.load() == 0, "before outbound close, count 0");
+            s->close();
+            expect_true(server.active_connections_.load() == 0,
+                        "outbound close does NOT underflow (was SIZE_MAX before fix)");
+        }
+        // 入站型：tracks=true（accept 路径置位）→ close() 恰 decrement 一次
+        {
+            auto s = std::make_shared<TestSession>(&server);
+            s->set_tracks_connection_count(true);
+            server.increment_connection_count();
+            expect_true(server.active_connections_.load() == 1, "accept-counted session: +1");
+            s->close();
+            expect_true(server.active_connections_.load() == 0, "accept-counted close decrements to 0");
+        }
+    }
+
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

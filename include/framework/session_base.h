@@ -73,6 +73,13 @@ public:
     const ConnectionType& get_connection() const;
     std::unique_ptr<ConnectionType> release_connection();
 
+    // 该会话是否计入 ServerBase 的 active_connections_（入站客户端连接计数 / maxConnections 限流）。
+    // 仅入站 accept 路径（TCP/SSL/STARTTLS handoff）在 increment_connection_count() 处置 true；
+    // 出站会话（OutboundSmtpSession：由 OutboundServer 自建、非 accept 计数）保持 false，
+    // close() 时便不会 decrement —— 否则无符号 size_t 在 0 上 fetch_sub 下溢成 SIZE_MAX(≈18E18),
+    // 使 `active >= maxConnections(200)` 恒真，整机拒绝所有新连接（2026-09-11 RackNerd 事故根因）。
+    void set_tracks_connection_count(bool v) { tracks_connection_count_ = v; }
+
     ServerBase* get_server() const;
     void        set_server(ServerBase* server);
     bool        is_closed() const;
@@ -213,6 +220,9 @@ protected:
     bool session_authenticated_ = false;
     int  auth_attempt_count_ = 0;
     SessionError last_error_ = SessionError::None;
+    // 入站客户端连接计数标志（见 set_tracks_connection_count 注释）：accept 路径置 true，
+    // 出站/内部自建会话默认 false。close() 仅对它为 true 时 decrement_connection_count()。
+    bool tracks_connection_count_ = false;
     std::string  last_error_detail_;
     ServerBase* m_server = nullptr;
     std::chrono::steady_clock::time_point session_start_{
