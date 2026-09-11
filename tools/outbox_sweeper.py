@@ -59,8 +59,8 @@ def build_query(limit_ts, cap):
       HAVING COUNT(*) = SUM(status IN ({sent},{dead}))
          AND MAX(COALESCE(sent_at, updated_at)) < %(limit)s
       ORDER BY last_t ASC
-      LIMIT %(cap)s
-    """.format(sent=STATUS_SENT, dead=STATUS_DEAD)
+      LIMIT {cap}
+    """.format(sent=STATUS_SENT, dead=STATUS_DEAD, cap=cap)
 
 
 def main():
@@ -89,7 +89,7 @@ def main():
     removed_mail_ids = []
     try:
         with conn.cursor() as cur:
-            cur.execute(build_query(limit_ts, args.per_run_max))
+            cur.execute(build_query(limit_ts, args.per_run_max), {"limit": limit_ts})
             rows = cur.fetchall()
             mail_ids = [r[0] for r in rows]
             if args.verbose:
@@ -139,10 +139,12 @@ def main():
             size = 0
     except Exception as e:
         sys.stderr.write(f"[error] 清理执行失败: {e}\n")
-        conn.close()
         return 2
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     print(f"outbox_sweeper: 删行={deleted_rows} 删正文={freed_bodies} mail_id={len(mail_ids)}")
     if removed_mail_ids and args.verbose:
