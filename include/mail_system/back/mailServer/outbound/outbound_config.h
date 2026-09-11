@@ -26,6 +26,10 @@ struct OutboundConfig {
     // === Static MX routes (跳过 DNS, domain → host:port) ===
     struct StaticRoute { std::string host; uint16_t port = 25; };
     std::unordered_map<std::string, StaticRoute> static_routes;
+    // === Catch-all 兜底路由：static_routes 无逐域命中时，外投发往该 host（跳过 DNS MX）。
+    //      默认空 = 原行为（对域名做 DNS MX）。作边缘中继跳（阿里云 → RackNerd）用；
+    //      不改核心投递语义，仅当配置此字段才生效。见 server_config 解析。 ===
+    StaticRoute default_route;
 
     // === Polling backoff ===
     int busy_sleep_ms     = 20;

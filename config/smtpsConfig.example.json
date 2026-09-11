@@ -73,6 +73,10 @@
       "selector": "example2024",
       "domain": "example.com",
       "private_key_file": "dkim/example2024.example.com.private.pem"
+    },
+    "default_route": {
+      "host": "",
+      "port": 25
     }
   }
 }

@@ -198,6 +198,10 @@ struct ServerConfig : public pr::ServerConfig {
     // 静态路由：domain → { host, port }，跳过 DNS 直接连
     std::unordered_map<std::string, outbound::OutboundConfig::StaticRoute> outbound_static_routes;
 
+    // catch-all 兜底路由：static_routes 无逐域命中时外投发往该 host（跳过 DNS MX）。
+    // 默认空 = 原行为（对域名做 DNS MX）。供边缘中继跳（阿里云 → RackNerd）用。
+    outbound::OutboundConfig::StaticRoute outbound_default_route;
+
     // 外部投递开关：false 时认证客户端（465/587 提交）对外部域收件人 RCPT 直接 550
     // （内部投递不受影响；未认证 25 端口 MTA 入站本来就禁中继）
     bool external_delivery_enabled;
@@ -414,6 +418,13 @@ struct ServerConfig : public pr::ServerConfig {
                     r.port = static_cast<uint16_t>(it.value().value("port", 25));
                     if (!r.host.empty()) outbound_static_routes[it.key()] = r;
                 }
+            }
+            // default_route: {"host": "...", "port": 25} — catch-all 兜底路由（跳过 DNS MX）
+            if (ob.contains("default_route") && ob["default_route"].is_object()) {
+                auto& dr = ob["default_route"];
+                outbound_default_route.host = dr.value("host", std::string());
+                outbound_default_route.port = static_cast<uint16_t>(
+                    dr.value("port", outbound_default_route.port));
             }
         }
 

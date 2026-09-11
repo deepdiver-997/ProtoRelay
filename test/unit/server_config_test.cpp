@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "framework/server_config_base.h"
+#include "framework/server_config.h"   // mail_system::ServerConfig（含 outbound_* 字段）
 
 namespace {
 
@@ -155,6 +156,33 @@ int main() {
         expect_true(c2.validate(), "ssl listener with certs accepted");
     }
 #endif
+
+    // 8. outbound.default_route (catch-all 兜底路由) + static_routes 解析
+    //    派生 mail_system::ServerConfig 的完整解析入口是 loadFromFile（基类 loadFromJson
+    //    只解析 framework 层字段）。用临时 JSON 文件走 loadFromFile 验证 outbound 块。
+    {
+        auto dir = std::filesystem::temp_directory_path() / "pr_cfg_default_route_test";
+        std::filesystem::create_directories(dir);
+        auto cfg = dir / "ob.json";
+        nlohmann::json j = {
+            {"outbound", {
+                {"helo_domain", "mx2.scut.email"},
+                {"static_routes", {{"b.local", {{"host", "127.0.0.1"}, {"port", 10026}}}}},
+                {"default_route", {{"host", "107.174.127.252"}, {"port", 25}}}
+            }}
+        };
+        { std::ofstream o(cfg); o << j.dump(); }
+        mail_system::ServerConfig c;
+        expect_true(c.loadFromFile(cfg.string()), "loadFromFile returns true (outbound config)");
+        expect_true(c.outbound_helo_domain == "mx2.scut.email", "helo_domain parsed");
+        expect_true(c.outbound_default_route.host == "107.174.127.252" &&
+                    c.outbound_default_route.port == 25, "default_route parsed");
+        auto it = c.outbound_static_routes.find("b.local");
+        expect_true(it != c.outbound_static_routes.end() &&
+                    it->second.host == "127.0.0.1" && it->second.port == 10026,
+                    "static_routes still parsed alongside default_route");
+        std::filesystem::remove_all(dir);
+    }
 
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

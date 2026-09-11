@@ -207,6 +207,9 @@ int OutboundServer::resolve_port(const std::string& domain) const {
     auto it = config_.static_routes.find(domain);
     if (it != config_.static_routes.end() && it->second.port > 0)
         return it->second.port;
+    // catch-all 兜底路由：无逐域 static_route 时用 default_route.port（若配置）
+    if (config_.default_route.port > 0)
+        return config_.default_route.port;
     if (!config_.ports.empty()) return config_.ports[0];
     return 25;
 }
@@ -215,6 +218,9 @@ std::string OutboundServer::resolve_target_host(const std::string& domain) const
     auto it = config_.static_routes.find(domain);
     if (it != config_.static_routes.end() && !it->second.host.empty())
         return it->second.host;
+    // catch-all 兜底路由：配了 default_route.host 则外投发往它（跳过 DNS MX）；默认空走 DNS
+    if (!config_.default_route.host.empty())
+        return config_.default_route.host;
     return domain;
 }
 
