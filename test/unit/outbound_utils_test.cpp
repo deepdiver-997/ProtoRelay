@@ -23,6 +23,7 @@
 #include "mail_system/back/mailServer/outbound/outbound_utils.h"
 #include "mail_system/back/mailServer/outbound/outbox_repository.h"
 #include "mail_system/back/mailServer/outbound/mx_routing_utils.h"
+#include "mock_dns_resolver.h"
 
 using namespace mail_system;
 
@@ -322,6 +323,51 @@ int main() {
     }
 
     std::filesystem::remove_all(dir);
+    // ============== Section 4: MX 路由 (build_target_hosts) ==============
+    // DNS 直投出站的核心: 解析 MX→A→IP 列表 + 静态路由优先 + implicit-A 兜底。
+    // 2026-09-11 修复前这是死代码,出站对着裸域名做 A 解析(QQ 拿到 Web IP)而连不上
+    // 真实邮件服务器;出站 resolve_mx_pool 复用同一 SyncDnsWrapper 路径。本段锁定该逻辑。
+    {
+        std::printf("  -- build_target_hosts (MX routing) --\n");
+        mail_system::test::MockDnsResolver mock;   // 默认 Sync 模式
+        mock.set_mx("qqtest.com", {{"mx1.qqtest.com", 10}, {"mx2.qqtest.com", 20}});
+        mock.set_host("mx1.qqtest.com", {"192.0.2.10"});
+        mock.set_host("mx2.qqtest.com", {"192.0.2.20"});
+
+        outbound::OutboxRecord rec;
+        rec.recipient = "u@qqtest.com";
+
+        // 4.1: MX → A → IP 列表（无静态路由）
+        {
+            auto hosts = outbound::build_target_hosts(rec, &mock, nullptr);
+            expect_true(hosts.size() == 2, "MX returns both mx A IPs");
+            expect_true(hosts.size() >= 2 && hosts[0] == "192.0.2.10" &&
+                        hosts[1] == "192.0.2.20", "MX order preserved (mx1 then mx2)");
+        }
+        // 4.2: 静态路由优先，跳过 DNS
+        {
+            std::unordered_map<std::string, outbound::OutboundConfig::StaticRoute> routes;
+            routes["qqtest.com"] = {"127.0.0.1", 2525};
+            auto hosts = outbound::build_target_hosts(rec, &mock, &routes);
+            expect_true(hosts.size() == 1 && hosts[0] == "127.0.0.1",
+                        "static route overrides DNS");
+        }
+        // 4.3: 无 MX → implicit-A 兜底（目标域名自身 A 记录）
+        {
+            mock.set_mx("nomx.com", {});
+            mock.set_host("nomx.com", {"203.0.113.5"});
+            outbound::OutboxRecord r2; r2.recipient = "u@nomx.com";
+            auto hosts = outbound::build_target_hosts(r2, &mock, nullptr);
+            expect_true(hosts.size() == 1 && hosts[0] == "203.0.113.5",
+                        "implicit-A fallback when no MX");
+        }
+        // 4.4: 无 resolver → 空（MX 解析不可用时不崩）
+        {
+            auto hosts = outbound::build_target_hosts(rec, nullptr, nullptr);
+            expect_true(hosts.empty(), "null resolver -> empty pool");
+        }
+    }
+
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
