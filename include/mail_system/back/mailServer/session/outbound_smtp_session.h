@@ -36,6 +36,11 @@ public:
     static constexpr int MAX_CONNECT_RETRIES = 3;
     static constexpr int CONNECT_BACKOFF_BASE_MS = 500;
     static constexpr int IDLE_TIMEOUT_SEC = 30;
+    // 出站 TCP 连接超时：黑洞/丢包 MX 端点 SYN 长期无应答，无超时则 async_connect
+    // 卡在 OS 连接等待(~130s)才失败 → 单跳投递拉长到数分钟（QQ MX 实测）。
+    // 定时器到期 cancel socket → async_connect 以 operation_aborted 完成 → 快速 failover
+    // 到下一 MX / 触发重试退避。15s 对正常连接绰绰有余，对黑洞端点显著提速跳转。
+    static constexpr int CONNECT_TIMEOUT_SEC = 15;
 
     OutboundSmtpSession(ServerBase* server, const std::string& mx_host, int mx_port = 25)
         : SessionBase<ConnectionType>(nullptr, server)
@@ -221,9 +226,19 @@ private:
                 // 是已置空的 unique_ptr → socket 对象落在 0 地址，process() 内 +8 偏移
                 // 处空指针崩（si_addr=0x8，2026-09-11 RackNerd 三个 core 均为此现场）。
                 auto* sock_raw = sock.get();
+                // 连接超时快手围栏：到点 cancel socket → 下面 async_connect 以 operation_aborted
+                // 完成 → 走同一 handle_connect_failure（不重复记账），不等 OS 的 ~130s 黑洞超时。
+                // raw 指针仅此段安全：timer 必先于 socket 迁入 connection_ 前被 cancel（见下），
+                // 超时路径执行时 socket 仍由 sock 独占持有。
+                auto ctm = std::make_shared<boost::asio::steady_timer>(
+                    io_ctx2, std::chrono::seconds(CONNECT_TIMEOUT_SEC));
+                ctm->async_wait([sock_raw](const boost::system::error_code& ec) {
+                    if (!ec) { boost::system::error_code ig; sock_raw->cancel(ig); }
+                });
                 boost::asio::async_connect(*sock_raw, endpoints,
-                    [self, sock = std::move(sock)](const boost::system::error_code& ec,
-                                                   boost::asio::ip::tcp::endpoint) mutable {
+                    [self, sock = std::move(sock), ctm](const boost::system::error_code& ec,
+                                                        boost::asio::ip::tcp::endpoint) mutable {
+                        ctm->cancel();  // 成功或失败都解除等待（asio steady_timer::cancel 无参）
                         if (ec) { self->handle_connect_failure(); return; }
                         // 2026-08-27: 推 connect_duration。失败路径推 connect_attempts_failed_total
                         // 留给后续 e2e 故事测试（需要 mock resolver 失败，难单测）。
