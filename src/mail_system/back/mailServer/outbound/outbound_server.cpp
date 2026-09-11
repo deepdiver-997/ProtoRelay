@@ -15,6 +15,8 @@
 #include "mail_system/back/mailServer/outbound_server.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/mailServer/outbound/dns_resolver.h"  // SyncDnsWrapper（MX 解析）
+#include <unordered_set>
 
 namespace mail_system {
 namespace outbound {
@@ -106,6 +108,12 @@ void OutboundServer::submit(std::unique_ptr<MailDeliveryTask> task, int port) {
     pending_count_.fetch_add(1);
     auto session = acquire_session(target_host, target_port);
     if (session) {
+        // DNS 直投（无 static/default 路由 → target_host == 裸域名）→ 同步解析 MX，
+        // 注入会话 failover 池，connect 逐个尝试真实邮件服务器 IP。
+        if (target_host == domain) {
+            auto pool = resolve_mx_pool(domain);
+            if (!pool.empty()) session->set_mx_pool(std::move(pool));
+        }
         session->submit(std::move(task));
         try_pull();  // 事件驱动：新任务到达后检查是否需要拉取
     } else {
@@ -224,6 +232,31 @@ std::string OutboundServer::resolve_target_host(const std::string& domain) const
     return domain;
 }
 
+std::vector<std::string> OutboundServer::resolve_mx_pool(const std::string& domain) const {
+    std::vector<std::string> out;
+    if (domain.empty()) return out;
+    auto resolver = server_ ? server_->get_dns_resolver() : nullptr;
+    if (!resolver) return out;
+    outbound::SyncDnsWrapper sync(*resolver);
+    std::unordered_set<std::string> seen;
+    auto mx_records = sync.resolve_mx(domain);
+    for (const auto& mx : mx_records) {
+        std::string h = mx.host;
+        while (!h.empty() && h.back() == '.') h.pop_back();   // 去尾点
+        if (h.empty()) continue;
+        for (const auto& addr : sync.resolve_host_addresses(h)) {
+            if (!addr.empty() && seen.insert(addr).second) out.push_back(addr);
+        }
+    }
+    // RFC 5321 implicit-MX 兜底：无 MX 时把目标域名自身当邮件主机（A 记录）
+    if (out.empty()) {
+        for (const auto& addr : sync.resolve_host_addresses(domain)) {
+            if (!addr.empty() && seen.insert(addr).second) out.push_back(addr);
+        }
+    }
+    return out;
+}
+
 // ── 私有：DB 拉取（发送到 worker 线程池） ────────────────────
 void OutboundServer::do_claim_batch() {
     auto db = server_->m_shardRouter->get_db_pool(0);
@@ -292,7 +325,14 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
         LOG_SMTP_INFO("Outbound: dispatching mail_id={} recipient={} target_host={} port={}",
                       rec.mail_id, rec.recipient, target_host, target_port);
         auto session = acquire_session(target_host, target_port);
-        if (session) session->submit(std::move(task));
+        if (session) {
+            // DNS 直投 → 解析 MX 注入会话 failover 池（同 public submit 路径）
+            if (target_host == domain) {
+                auto pool = resolve_mx_pool(domain);
+                if (!pool.empty()) session->set_mx_pool(std::move(pool));
+            }
+            session->submit(std::move(task));
+        }
     }
 
     // 水位仍低 → 链式续拉，不释放 is_pulling_

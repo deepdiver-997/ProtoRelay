@@ -64,6 +64,13 @@ public:
     // 注入出站配置（DKIM 签名等）；由 OutboundServer 创建会话时调用
     void set_outbound_config(const OutboundConfig& cfg) { ob_cfg_ = cfg; }
 
+    // 注入 MX failover 池（dispatch 对 DNS 直投目标同步解析 MX 得到的邮件服务器 IP 列表）。
+    // connect_to_mx 逐个尝试；空池 = 走静态/默认路由给出的具体 host（直接连 mx_host_）。
+    void set_mx_pool(std::vector<std::string> pool) {
+        mx_pool_ = std::move(pool);
+        mx_pool_idx_ = 0;
+    }
+
     SessionState state() const { return state_; }
 
     // ── 公开接口 ──────────────────────────────────────────────
@@ -207,17 +214,20 @@ private:
         // 用 steady_clock 不受墙钟跳变影响；不存 start_ 会有 dns_resolve 时间算进去，
         // 这里仅测 TCP 三次握手 + 立即 connect 完成时间。
         connect_start_ = std::chrono::steady_clock::now();
+        // 选择当前候选：MX failover 池逐个尝试（每 IP 一次 CONNECT_TIMEOUT_SEC 超时）；
+        // 池空（静态/默认路由给出的具体 host）→ 用 mx_host_。
+        const std::string host = pick_connect_host();
         auto& io_ctx = static_cast<IOThreadPool*>(this->m_server->m_ioThreadPool.get())->get_io_context();
         // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时，mx_host_.local
         // 直接替换为 127.0.0.1，跳过 boost resolver 和系统 mDNS。
         // 让 A→B（b.local）在 e2e 测试里无需配置 mDNS responder。
-        const std::string resolve_host = local_shortcut_if_enabled(mx_host_);
+        const std::string resolve_host = local_shortcut_if_enabled(host);
         auto resolver = std::make_shared<boost::asio::ip::tcp::resolver>(io_ctx);
         auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
         resolver->async_resolve(resolve_host, std::to_string(mx_port_),
             [self, resolver](const boost::system::error_code& ec,
                              boost::asio::ip::tcp::resolver::results_type endpoints) mutable {
-                if (ec || endpoints.empty()) { self->handle_connect_failure(); return; }
+                if (ec || endpoints.empty()) { self->handle_connect_failure_or_next(); return; }
                 auto& io_ctx2 = static_cast<IOThreadPool*>(
                     self->m_server->m_ioThreadPool.get())->get_io_context();
                 auto sock = std::make_unique<boost::asio::ip::tcp::socket>(io_ctx2);
@@ -239,7 +249,7 @@ private:
                     [self, sock = std::move(sock), ctm](const boost::system::error_code& ec,
                                                         boost::asio::ip::tcp::endpoint) mutable {
                         ctm->cancel();  // 成功或失败都解除等待（asio steady_timer::cancel 无参）
-                        if (ec) { self->handle_connect_failure(); return; }
+                        if (ec) { self->handle_connect_failure_or_next(); return; }
                         // 2026-08-27: 推 connect_duration。失败路径推 connect_attempts_failed_total
                         // 留给后续 e2e 故事测试（需要 mock resolver 失败，难单测）。
                         if (auto m = self->m_server->get_metrics().lock()) {
@@ -261,8 +271,30 @@ private:
             });
     }
 
+    // ── MX 池：取当前候选，推进索引 ──────────────────────────────────
+    std::string pick_connect_host() {
+        if (!mx_pool_.empty() && mx_pool_idx_ < mx_pool_.size())
+            return mx_pool_[mx_pool_idx_++];
+        return mx_host_;
+    }
+    // 失败分流：池里还有候选 → 立即试下一个（IO post 链式，不深递归）；
+    // 池耗尽（或本就走静态/默认路由）→ 落回 handle_connect_failure（退避重试，idx 重置）。
+    void handle_connect_failure_or_next() {
+        if (!mx_pool_.empty() && mx_pool_idx_ < mx_pool_.size()) {
+            auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
+            auto& io_ctx = static_cast<IOThreadPool*>(
+                self->m_server->m_ioThreadPool.get())->get_io_context();
+            boost::asio::post(io_ctx, [self]() {
+                if (self) self->connect_to_mx();
+            });
+            return;
+        }
+        handle_connect_failure();
+    }
+
     void handle_connect_failure() {
         connect_retries_++;
+        mx_pool_idx_ = 0;  // 退避重试从头重试 MX 池（下一轮可能命中可达端点）
         {
             std::lock_guard<std::mutex> lk(queue_mu_);
             if (current_task_) { queue_.push(std::move(current_task_)); }
@@ -446,6 +478,12 @@ private:
     // ── 成员 ──────────────────────────────────────────────────
     std::string mx_host_;
     int mx_port_;
+    // MX failover 池：dispatch 对 DNS 直投目标同步解析 MX 得到的一组邮件服务器 IP。
+    // connect_to_mx 按 mx_pool_idx_ 逐个尝试（每 IP 一个 CONNECT_TIMEOUT_SEC 超时），
+    // 失败推进下一个；池耗尽走 handle_connect_failure（退避重试时 idx 重置再试）。
+    // 空池 = 静态/默认路由给出的具体 host，直接连 mx_host_。
+    std::vector<std::string> mx_pool_;
+    size_t mx_pool_idx_ = 0;
     std::string helo_domain_;
     OutboundConfig ob_cfg_;
     std::shared_ptr<OutboundSmtpFsm<ConnectionType>> fsm_;

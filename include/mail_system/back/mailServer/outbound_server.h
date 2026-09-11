@@ -84,6 +84,9 @@ private:
     // 路由目标 host 解析：static_routes[domain] 命中则用静态 host（跳过 DNS）；
     // 未命中返 domain 字符串（让 OutboundSmtpSession 走 DNS 解析）
     std::string resolve_target_host(const std::string& domain) const;
+    // DNS 直投目标：同步解析 MX（cares）→ 邮件服务器 IP 列表（含 RFC5321 implicit-A 兜底）。
+    // 存到会话的 MX failover 池，connect 逐个尝试。静态/默认路由命中时返回空（不走 MX）。
+    std::vector<std::string> resolve_mx_pool(const std::string& domain) const;
 
     using SessionPtr = std::shared_ptr<OutboundSmtpSession<TcpConnection>>;
     using SessionList = std::vector<SessionPtr>;
