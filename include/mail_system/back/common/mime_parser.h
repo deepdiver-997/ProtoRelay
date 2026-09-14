@@ -125,11 +125,56 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
                     }
                 }
                 // name (Content-Type name 或 Content-Disposition filename)
-                auto np = params.find("name=\"");
-                if (np != std::string::npos) {
-                    np += 6;
-                    auto ne = params.find('"', np);
-                    if (ne != std::string::npos) root.name = params.substr(np, ne - np);
+                // 必须回原始 hdrs 提取（保留大小写）：文件名常是 RFC2047 encoded-word，
+                // 其 Base64 payload 大小写敏感，lowercase 后解码即损坏（实测 QQ 邮箱
+                // PDF 附件名在 sidecar 全小写，客户端解析失败）。与 boundary 同款做法：
+                // 小写副本定位，原始文本切片。
+                {
+                    std::string orig_hdrs{raw.substr(pos, sep - pos)};
+                    std::string orig_lower{orig_hdrs};
+                    std::transform(orig_lower.begin(), orig_lower.end(),
+                                   orig_lower.begin(), ::tolower);
+                    // 与 hdr_lower 相同的行首 content-type 定位语义
+                    size_t ocp = std::string::npos;
+                    for (size_t p = 0; p < orig_lower.size(); ) {
+                        size_t f = orig_lower.find("\ncontent-type:", p);
+                        if (f == std::string::npos) {
+                            if (p == 0 && orig_lower.compare(0, 13, "content-type:") == 0) ocp = 0;
+                            break;
+                        }
+                        ocp = f + 1;
+                        break;
+                    }
+                    if (ocp == std::string::npos && orig_lower.compare(0, 13, "content-type:") == 0)
+                        ocp = 0;
+                    if (ocp != std::string::npos) {
+                        size_t oct_end = orig_lower.find("\r\n", ocp);
+                        while (oct_end != std::string::npos && oct_end + 2 < orig_lower.size() &&
+                               (orig_lower[oct_end + 2] == ' ' || orig_lower[oct_end + 2] == '\t'))
+                            oct_end = orig_lower.find("\r\n", oct_end + 2);
+                        std::string o_line = (oct_end != std::string::npos)
+                            ? orig_hdrs.substr(ocp + 13, oct_end - ocp - 13)
+                            : orig_hdrs.substr(ocp + 13);
+                        // unfold（与小写侧同一规则：\r\n\t / \r\n 续行折为单空格）
+                        std::string o_unfolded;
+                        for (size_t i = 0; i < o_line.size(); ++i) {
+                            if (o_line[i] == '\r' && i + 2 < o_line.size() &&
+                                o_line[i+1] == '\n' && o_line[i+2] == '\t') { o_unfolded += ' '; i += 2; continue; }
+                            if (o_line[i] == '\r' && i + 1 < o_line.size() &&
+                                o_line[i+1] == '\n') { o_unfolded += ' '; i += 1; continue; }
+                            o_unfolded += o_line[i];
+                        }
+                        std::string o_lower_line{o_unfolded};
+                        std::transform(o_lower_line.begin(), o_lower_line.end(),
+                                       o_lower_line.begin(), ::tolower);
+                        auto np = o_lower_line.find("name=\"");
+                        if (np != std::string::npos) {
+                            np += 6;
+                            auto ne = o_unfolded.find('"', np);
+                            if (ne != std::string::npos)
+                                root.name = o_unfolded.substr(np, ne - np);
+                        }
+                    }
                 }
             } else {
                 auto slash = ct_line.find('/');

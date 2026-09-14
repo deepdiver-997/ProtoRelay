@@ -319,6 +319,31 @@ static void test_content_disposition_name() {
     expect_str(root.name, "pic.png", "filename from Content-Disposition");
 }
 
+// encoded-word 附件名必须保留大小写：Base64 大小写敏感，lowercase 后解码即损坏。
+// 真实案例：QQ 邮箱 PDF 附件名在 sidecar 全小写，客户端解析失败（2026-09-14）。
+static void test_encoded_word_name_case_preserved() {
+    const std::string pdf_name_enc = "=?UTF-8?B?SW52b2ljZS1JTlYtQUktMjAyNi0wMDAwMDAwMDQ2RjkucGRm?=";
+    const std::string raw =
+        "Content-Type: multipart/mixed; boundary=\"----=_M_1\"\r\n"
+        "\r\n"
+        "------=_M_1\r\n"
+        "Content-Type: text/plain; charset=UTF-8\r\n"
+        "\r\n"
+        "body\r\n"
+        "------=_M_1\r\n"
+        "Content-Type: application/pdf; name=\"" + pdf_name_enc + "\"\r\n"
+        "Content-Transfer-Encoding: base64\r\n"
+        "Content-Disposition: attachment; filename=\"" + pdf_name_enc + "\"\r\n"
+        "\r\n"
+        "JVBERi0xLjQK\r\n"
+        "------=_M_1--\r\n";
+    MimePart root;
+    parse_mime_tree(raw, root);
+    expect_num(root.subs.size(), 2, "two parts");
+    expect_str(root.subs[1].name, pdf_name_enc,
+               "encoded-word attachment name preserves case");
+}
+
 // ========== sidecar 往返 / 回写 ==========
 
 // 临时目录下造一个正文文件，返回其路径
@@ -541,6 +566,7 @@ int main() {
     test_malformed_headers_after_body();
     test_quoted_charset();
     test_content_disposition_name();
+    test_encoded_word_name_case_preserved();
     test_unquoted_boundary_with_quoted_to();
     test_sidecar_round_trip();
     test_ensure_writes_back_sidecar();
