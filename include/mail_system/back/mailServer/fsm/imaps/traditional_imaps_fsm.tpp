@@ -391,7 +391,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
                     } else {
                         LOG_IMAP_WARN("IMAP login failed: {}", username);
                         if (self->record_auth_failure_and_check()) {
-                            self->close();
+                            self->close_after_flush();   // 阈值关闭走 io 线程,且不与在途写竞争
                             return;
                         }
                         send_tagged(self, tag, "NO", "LOGIN failed");

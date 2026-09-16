@@ -177,6 +177,7 @@ struct ConcurrencyTestFixture {
     // context 线程已退出 session（与生产时序一致：io 线程已暂停，回调独占）。
     void run_on_io(const std::shared_ptr<SessionHandle>& h) {
         h->conn->start();                    // 线程模式：异步完成由独立线程投递
+        h->conn->start_executor();           // exec_ctx_ 发起队列也要有人跑
         h->conn->context().post([h]() { h->session->process_read(); });
         assert(h->conn->wait_idle(3000));    // 命令链暂停后 context 空闲
     }
@@ -215,7 +216,8 @@ TEST(spf_hard_fail_async) {
     // 主线程手动触发 DNS 回调（模拟 c-ares 线程）→ 应在本线程恢复 session
     fx.dns->fire_txt("attacker.com");
 
-    assert(HAS(h->captured, "550 5.7.1 SPF verification failed"));
+    // 550 响应写经 exec_ctx_ 串行化,轮询等它上 wire
+    assert(wait_until([&] { return HAS(h->captured, "550 5.7.1 SPF verification failed"); }));
     std::cout << "  [PASS] spf_hard_fail_async (cross-thread DNS callback)" << std::endl;
 }
 
@@ -234,7 +236,7 @@ TEST(spf_pass_async) {
     fx.dns->fire_txt("sender.com");
 
     // SPF pass → 250 Ok → drain 缓冲的 RCPT TO（缓存命中）→ 250
-    assert(HAS(h->captured, "250 Ok"));
+    assert(wait_until([&] { return HAS(h->captured, "250 Ok"); }));
     std::cout << "  [PASS] spf_pass_async (SPF 250 + 流水线续传)" << std::endl;
 }
 
@@ -262,7 +264,7 @@ TEST(user_exists_db_async_exists) {
     db->fire_query(std::make_shared<test::MockDbResult>(
         std::vector<std::map<std::string, std::string>>{{{"status", "1"}}}));
 
-    assert(HAS(h->captured, "250 Ok"));
+    assert(wait_until([&] { return HAS(h->captured, "250 Ok"); }));
     std::cout << "  [PASS] user_exists_db_async_exists (DB 回调触发 → 250)" << std::endl;
 }
 
@@ -286,7 +288,7 @@ TEST(user_exists_db_async_not_found) {
     // 空结果 → 不存在 → 550 User unknown（负缓存）
     db->fire_query(std::make_shared<test::MockDbResult>());
 
-    assert(HAS(h->captured, "550 5.1.1 User unknown"));
+    assert(wait_until([&] { return HAS(h->captured, "550 5.1.1 User unknown"); }));
     std::cout << "  [PASS] user_exists_db_async_not_found (DB 回调触发 → 550)" << std::endl;
 }
 
@@ -327,7 +329,7 @@ TEST(auth_user_db_async) {
     assert(wait_until([&] { return db->has_pending_execute(); }));
     db->fire_execute(true);
 
-    assert(HAS(h->captured, "235 Authentication successful"));
+    assert(wait_until([&] { return HAS(h->captured, "235 Authentication successful"); }));
     std::cout << "  [PASS] auth_user_db_async (auth_user_async DB 查询+登录记录 回调 → 235)" << std::endl;
 }
 
@@ -362,7 +364,7 @@ TEST(verify_all_from_file_async) {
     fx.dns->fire_txt("_dmarc.dmarcdom.com");
 
     // DMARC none → 校验完成 → 入队 + AFTER_ENQUEUE 响应 "250 OK"
-    assert(HAS(h->captured, "250 OK"));
+    assert(wait_until([&] { return HAS(h->captured, "250 OK"); }));
     // 等待持久化 worker 处理完入队邮件，避免其后台查询干扰后续测试的 DB mock 状态
     assert(wait_until([&] { return fx.persist_q->inflight_count() == 0; }, 5000));
     std::cout << "  [PASS] verify_all_from_file_async (DMARC DNS 回调 → 入队 + 250 OK)" << std::endl;
@@ -434,7 +436,7 @@ TEST(verify_all_from_file_dkim_async) {
     fx.dns->fire_txt("s201512._domainkey.qq.com");
 
     // DKIM 校验完成 → 入队 + AFTER_ENQUEUE 响应 "250 OK"
-    assert(HAS(h->captured, "250 OK"));
+    assert(wait_until([&] { return HAS(h->captured, "250 OK"); }));
     assert(wait_until([&] { return fx.persist_q->inflight_count() == 0; }, 5000));
     std::cout << "  [PASS] verify_all_from_file_dkim_async (DKIM 异步 DNS 回调 → 入队 + 250 OK)" << std::endl;
 }
@@ -463,7 +465,7 @@ TEST(boundary_callback_after_session_release) {
 
     // 回调完成后所有 shared_ptr 释放 → session 干净析构
     assert(wait_until([&] { return weak.expired(); }));
-    assert(HAS(h->captured, "550 5.7.1 SPF verification failed"));   // 回调期间完成写响应
+    assert(wait_until([&] { return HAS(h->captured, "550 5.7.1 SPF verification failed"); }));   // 回调期间完成写响应
     std::cout << "  [PASS] boundary_callback_after_session_release (shared_ptr 保活，无悬垂)" << std::endl;
 }
 

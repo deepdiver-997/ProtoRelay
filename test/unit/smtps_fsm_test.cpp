@@ -56,7 +56,7 @@ struct FsmTestFixture {
     ServerConfig cfg;
 
     FsmTestFixture() {
-        Logger::get_instance().init("smtps_fsm_test.log", 0, 1, spdlog::level::off, false, false);
+        Logger::get_instance().init("smtps_fsm_test.log", 0, 1, spdlog::level::debug, false, true);
         io_pool     = std::make_shared<IOThreadPool>(1);
         worker_pool = std::make_shared<BoostThreadPool>(2);
         io_pool->start();
@@ -166,6 +166,7 @@ struct FsmTestFixture {
     // 调用 process_read 启动 FSM（需预加载数据确保不会因 EOF 而提前关闭）
     void start(Handle& h) {
         h.session->process_read();
+        h.conn->pump_executor();   // 响应写经 exec_ctx_ 串行化(09-06),需排空才可见
     }
 };
 
@@ -175,9 +176,11 @@ struct FsmTestFixture {
 template <typename Handle>
 static bool wait_for_response(Handle& h, const std::string& needle, int timeout_ms = 2000) {
     for (int waited = 0; waited < timeout_ms; waited += 5) {
+        h.conn->pump_executor();   // 异步回复落在 exec_ctx_ 队列,轮询需排空
         if (h.conn->written().find(needle) != std::string::npos) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    h.conn->pump_executor();
     return h.conn->written().find(needle) != std::string::npos;
 }
 
@@ -192,6 +195,7 @@ static bool wait_for_response(Handle& h, const std::string& needle, int timeout_
 TEST(greeting_220) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::CONNECT);
+    h.conn->pump_executor();   // 同上:发起串行化后 greeting 在 exec_ctx_ 队列里
     auto w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
     std::cout << "  [PASS] greeting_220: " << w.substr(0, w.find('\r')) << std::endl;
@@ -321,6 +325,9 @@ TEST(long_header_line_folded_on_ingest) {
     const std::string want_subject = "Subject: " + long_subject;
     bool subject_verified = false;
     bool checked_raw_file = false;
+    // 落盘在 enqueue 后由 worker 异步完成，单次扫描会撞上空窗 → 轮询至多 1s
+    for (int pass = 0; pass < 200 && !subject_verified; ++pass) {
+    h.conn->pump_executor();   // 落盘链路同样经 exec_ctx_,排空才推进
     for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail")) {
         if (!e.is_regular_file()) continue;
         if (e.path().extension() == ".mime") continue;   // 结构 JSON，非原始报文
@@ -360,6 +367,14 @@ TEST(long_header_line_folded_on_ingest) {
             }
         }
         verify_folded();                                   // 文件结束时仍处于折叠块内
+    }
+    if (!subject_verified) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!checked_raw_file) {
+        for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail"))
+            std::cerr << "  DIAG maildir entry: " << e.path().string() << std::endl;
+        std::cerr << "  DIAG written tail: [" << h.conn->written().substr(
+            h.conn->written().size() > 300 ? h.conn->written().size() - 300 : 0) << "]" << std::endl;
     }
     assert(checked_raw_file);
     assert(subject_verified);
@@ -570,8 +585,10 @@ TEST(auth_failures_exceed_close) {
         cnt = 0;
         for (size_t pos = 0; (pos = w.find("535 Authentication failed", pos)) != std::string::npos; ++pos) ++cnt;
         if (!h.conn->is_open() || cnt >= 1) break;
+        h.conn->pump_executor();   // 535/关闭均经 exec_ctx_,排空后再判
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    h.conn->pump_executor();
     // 多次认证失败后连接应关闭
     assert(!h.conn->is_open() || cnt >= 1);
 
@@ -769,6 +786,12 @@ TEST(data_without_rcpt) {
 TEST(timeout_handler) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::TIMEOUT);
+    // 关闭经 exec_ctx_ 串行化(09-06),轮询排空后再断言
+    for (int waited = 0; waited < 2000 && h.conn->is_open(); waited += 5) {
+        h.conn->pump_executor();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    h.conn->pump_executor();
     assert(!h.conn->is_open());
     std::cout << "  [PASS] timeout_handler" << std::endl;
 }
@@ -776,6 +799,11 @@ TEST(timeout_handler) {
 TEST(error_handler) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::ERROR);
+    for (int waited = 0; waited < 2000 && h.conn->is_open(); waited += 5) {
+        h.conn->pump_executor();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    h.conn->pump_executor();
     assert(!h.conn->is_open());
     std::cout << "  [PASS] error_handler" << std::endl;
 }

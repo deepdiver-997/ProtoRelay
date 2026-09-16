@@ -118,6 +118,7 @@ TEST(capability_response) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::CAPABILITY, "A001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "CAPABILITY IMAP4rev1"));
     std::cout << "  [PASS] capability_response" << std::endl;
@@ -130,6 +131,7 @@ TEST(noop_reply) {
     ctx->is_authenticated = true;
     ctx->current_tag = "C001";
     fx.fsm->process_event(h.session, ImapEvent::NOOP, "C001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "C001 OK NOOP completed"));
     std::cout << "  [PASS] noop_reply" << std::endl;
@@ -140,10 +142,12 @@ TEST(noop_reply) {
 template <typename Handle>
 static std::string wait_for_reply(Handle& h, int timeout_ms = 2000) {
     for (int waited = 0; waited < timeout_ms; waited += 5) {
+        h.conn->pump_executor();   // 异步回复落在 exec_ctx_ 队列,轮询需排空
         auto w = h.conn->written();
         if (!w.empty()) return w;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    h.conn->pump_executor();
     return h.conn->written();
 }
 
@@ -152,6 +156,7 @@ TEST(login_response) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A001");
+    h.conn->pump_executor();
     auto w = wait_for_reply(h);
     // handler 会尝试从 last_command_args 解析凭据，可能 OK 或 NO
     assert(!w.empty());
@@ -175,6 +180,7 @@ TEST(login_wrong_password) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A002");
+    h.conn->pump_executor();
     auto w = wait_for_reply(h);
     assert(!w.empty());
     std::cout << "  [PASS] login_wrong_password" << std::endl;
@@ -195,6 +201,7 @@ TEST(login_many_failures_close) {
     for (const char* tag : {"A001", "A002", "A003"}) {
         h.conn->clear_written();   // 只统计本次回复，避免匹配到上次的过期 NO
         fx.fsm->process_event(h.session, ImapEvent::LOGIN, tag);
+        h.conn->pump_executor();
         for (int waited = 0; waited < 2000; waited += 5) {
             auto w = h.conn->written();
             if (HAS(w, "NO LOGIN failed")) { ++total_no; break; }   // 该次失败已回复
@@ -214,6 +221,7 @@ TEST(logout_bye) {
     ctx->is_authenticated = true;
     ctx->current_tag = "B001";
     fx.fsm->process_event(h.session, ImapEvent::LOGOUT, "B001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "BYE IMAP4rev1 Server logging out"));
     assert(HAS(w, "B001 OK LOGOUT completed"));
@@ -226,6 +234,7 @@ TEST(select_without_login) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::SELECT, "D001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "D001 NO") || HAS(w, "BAD"));
     std::cout << "  [PASS] select_without_login" << std::endl;
@@ -235,6 +244,7 @@ TEST(fetch_without_login) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::FETCH, "E001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "E001 NO") || HAS(w, "BAD"));
     std::cout << "  [PASS] fetch_without_login" << std::endl;
@@ -254,6 +264,7 @@ TEST(uid_fetch_no_db) {
 
     // 直接调用 UID → FETCH handler（模拟客户端发 UID FETCH 1:* (FLAGS)）
     fx.fsm->process_event(h.session, ImapEvent::UID, "A001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     std::cout << "  [PASS] uid_fetch_no_db response=[" << w.substr(0, 80) << "]" << std::endl;
 }
@@ -312,6 +323,13 @@ TEST(fetch_full_path_with_storage) {
     session->handle_read("A001 FETCH 1 (FLAGS RFC822.SIZE BODY[])\r\n");
     session->process_read();
 
+    // FETCH 链含 DB/存储异步段，响应还经 exec_ctx_ 串行化 → 轮询等完成标记
+    for (int waited = 0; waited < 2000 && conn_ptr->written().find(
+            "A001 OK FETCH completed") == std::string::npos; waited += 5) {
+        conn_ptr->pump_executor();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    conn_ptr->pump_executor();
     auto w = conn_ptr->written();
     assert(w.find("RFC822.SIZE " + std::to_string(body.size())) != std::string::npos);
     assert(w.find("BODY[] {" + std::to_string(body.size()) + "}") != std::string::npos);
@@ -373,6 +391,13 @@ TEST(fetch_many_mails_no_stack_overflow) {
     session->handle_read("A001 FETCH 1:" + std::to_string(N) + " (FLAGS RFC822.SIZE)\r\n");
     session->process_read();
 
+    // 迭代链 + 响应串行化:轮询等完成标记(400 封,预算 5s)
+    for (int waited = 0; waited < 5000 && conn_ptr->written().find(
+            "A001 OK FETCH completed") == std::string::npos; waited += 5) {
+        conn_ptr->pump_executor();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    conn_ptr->pump_executor();
     auto w = conn_ptr->written();
     assert(w.find("A001 OK FETCH completed") != std::string::npos);
     assert(w.find("RFC822.SIZE") != std::string::npos);
@@ -385,6 +410,11 @@ TEST(fetch_many_mails_no_stack_overflow) {
 TEST(literal_too_large_rejected) {
     auto h = fx.make_session();
     h.session->handle_read("A001 APPEND INBOX (\\Flags) {4294967295+}\r\n");
+    for (int waited = 0; waited < 2000 && h.conn->written().find("BAD") == std::string::npos; waited += 5) {
+        h.conn->pump_executor();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(w.find("BAD") != std::string::npos);
     assert(w.find("Literal too large") != std::string::npos);
@@ -398,6 +428,7 @@ TEST(invalid_command_in_state) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::STORE, "H001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "H001 BAD") || HAS(w, "H001 NO"));
     std::cout << "  [PASS] invalid_command_in_state" << std::endl;
@@ -411,6 +442,7 @@ TEST(logout_without_login) {
     ctx->current_tag = "A001";
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LOGOUT, "A001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     // LOGOUT 总是允许的
     assert(HAS(w, "BYE"));
@@ -425,6 +457,7 @@ TEST(check_in_authenticated) {
     ctx->current_tag = "C001";
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::CHECK, "C001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "C001 OK CHECK") || HAS(w, "C001 BAD") || HAS(w, "C001 NO"));
     std::cout << "  [PASS] check_in_authenticated" << std::endl;
@@ -438,6 +471,7 @@ TEST(noop_in_selected) {
     ctx->current_tag = "B002";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::NOOP, "B002");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "B002 OK NOOP"));
     std::cout << "  [PASS] noop_in_selected" << std::endl;
@@ -449,6 +483,7 @@ TEST(capability_in_authenticated) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::CAPABILITY, "C002");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "CAPABILITY IMAP4rev1"));
     std::cout << "  [PASS] capability_in_authenticated" << std::endl;
@@ -463,6 +498,7 @@ TEST(select_no_db) {
     ctx->current_tag = "S001";
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::SELECT, "S001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     // 无 DB 时返回 NO 或 BAD，不应崩溃
     assert(!w.empty());
@@ -475,6 +511,7 @@ TEST(examine_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::EXAMINE, "E001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] examine_no_db" << std::endl;
@@ -486,6 +523,7 @@ TEST(create_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::CREATE, "CR001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] create_no_db" << std::endl;
@@ -497,6 +535,7 @@ TEST(delete_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::DELETE, "D001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] delete_no_db" << std::endl;
@@ -508,6 +547,7 @@ TEST(rename_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::RENAME, "R001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] rename_no_db" << std::endl;
@@ -519,6 +559,7 @@ TEST(subscribe_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::SUBSCRIBE, "SUB001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] subscribe_no_db" << std::endl;
@@ -530,6 +571,7 @@ TEST(unsubscribe_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::UNSUBSCRIBE, "UNS001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] unsubscribe_no_db" << std::endl;
@@ -541,6 +583,7 @@ TEST(list_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LIST, "L001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] list_no_db" << std::endl;
@@ -552,6 +595,7 @@ TEST(lsub_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LSUB, "LS001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] lsub_no_db" << std::endl;
@@ -563,6 +607,7 @@ TEST(status_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::IMAP_STATUS, "ST001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] status_no_db" << std::endl;
@@ -574,6 +619,7 @@ TEST(append_no_db) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::APPEND, "AP001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] append_no_db" << std::endl;
@@ -587,6 +633,7 @@ TEST(search_no_db) {
     ctx->current_tag = "SE001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::SEARCH, "SE001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] search_no_db" << std::endl;
@@ -600,6 +647,7 @@ TEST(fetch_no_db) {
     ctx->current_tag = "F001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::FETCH, "F001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] fetch_no_db" << std::endl;
@@ -613,6 +661,7 @@ TEST(store_no_db) {
     ctx->current_tag = "ST001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::STORE, "ST001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] store_no_db" << std::endl;
@@ -626,6 +675,7 @@ TEST(copy_no_db) {
     ctx->current_tag = "CP001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::COPY, "CP001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] copy_no_db" << std::endl;
@@ -639,6 +689,7 @@ TEST(move_no_db) {
     ctx->current_tag = "MV001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::MOVE, "MV001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] move_no_db" << std::endl;
@@ -652,6 +703,7 @@ TEST(expunge_no_db) {
     ctx->current_tag = "EX001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::EXPUNGE, "EX001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] expunge_no_db" << std::endl;
@@ -665,6 +717,7 @@ TEST(close_no_db) {
     ctx->current_tag = "CL001";
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
     fx.fsm->process_event(h.session, ImapEvent::CLOSE, "CL001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] close_no_db" << std::endl;
@@ -676,6 +729,7 @@ TEST(idle_initiated) {
     ctx->is_authenticated = true;
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     // IDLE 初始化应返回 continuation 或 tagged 响应
     assert(!w.empty());
@@ -688,6 +742,7 @@ TEST(connect_greeting) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::INIT));
     fx.fsm->process_event(h.session, ImapEvent::CONNECT, "");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "* OK"));
     std::cout << "  [PASS] connect_greeting" << std::endl;
@@ -699,6 +754,7 @@ TEST(authenticate_not_supported) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::AUTHENTICATE, "C001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "NO") || HAS(w, "BAD"));
     std::cout << "  [PASS] authenticate_unsupported" << std::endl;
@@ -710,6 +766,7 @@ TEST(error_event) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::ERROR, "");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] error_event" << std::endl;
@@ -719,6 +776,7 @@ TEST(timeout_event) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::TIMEOUT, "");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(!w.empty());
     std::cout << "  [PASS] timeout_event" << std::endl;
@@ -735,12 +793,14 @@ TEST(idle_with_done) {
     h.conn->set_deferred_read(true);
 
     fx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+    h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "+ idling"));
 
     // DONE 命令到达 (模拟客户端在 IDLE 中发送)
     h.conn->clear_written();
     fx.fsm->process_event(h.session, ImapEvent::DONE, "I001");
+    h.conn->pump_executor();
     // handle_done 写入 "I001 OK IDLE terminated"
     assert(!w.empty());
     // 测试结束：关闭连接，释放 deferred read handler（否则其捕获 shared_from_this

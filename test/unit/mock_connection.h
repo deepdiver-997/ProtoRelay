@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,12 +27,38 @@ namespace mail_system {
 class MockConnection : public IConnection {
 public:
     MockConnection() = default;
+    ~MockConnection() { stop_executor(); }
 
     // ---- MockIoContext 生命周期 ----
     void start() { ctx_.start(); }
     void stop() { ctx_.stop(); }
     test::MockIoContext& context() { return ctx_; }
     bool wait_idle(int timeout_ms = 3000) { return ctx_.wait_idle(timeout_ms); }
+
+    // ---- exec_ctx_(真实 io_context)后台运行 ----
+    // SessionBase 09-06 起 do_async_write/close 等发起都 post 到 get_executor()
+    // (= exec_ctx_)。不跑它,发起队列饿死:响应永远上不了 wire。线程模式测试
+    // (start() 后)调用此方法让 executor 有人跑;析构自动停。
+    void start_executor() {
+        if (exec_thread_.joinable()) return;
+        exec_thread_ = std::thread([ctx = exec_ctx_]() {
+            // guard 放线程栈:run() 无任务不返回;stop() 后随栈帧销毁
+            auto guard = boost::asio::make_work_guard(*ctx);
+            ctx->run();
+        });
+    }
+    void stop_executor() {
+        if (!exec_thread_.joinable()) return;
+        if (exec_thread_.get_id() == std::this_thread::get_id()) {
+            // 在 exec 线程内析构(回调持 session 最后引用):不能 join 自己。
+            // ctx 由线程 lambda 的 shared_ptr 持有,detach 后 run() 排空自然释放。
+            exec_thread_.detach();
+            return;
+        }
+        exec_ctx_->stop();
+        exec_thread_.join();
+        exec_ctx_->restart();
+    }
 
     // --- data injection ---
     void set_read_data(const std::string& data) {
@@ -155,7 +182,7 @@ public:
         // socket 发起都 post 到这里。返回真实 io_context executor（自定义内联
         // executor 不满足 any_io_executor 的属性要求）——post 进队但测试不
         // run()，需要观察发起效果的用例调用 pump_executor() 手动排空。
-        return boost::asio::any_io_executor{exec_ctx_.get_executor()};
+        return boost::asio::any_io_executor{exec_ctx_->get_executor()};
     }
 
     // 排空发起队列：SessionBase 09-06 起 socket 发起经 post 串行化，单测
@@ -163,8 +190,8 @@ public:
     void pump_executor() {
         // poll 发现无任务时 io_context 会自动进入 stopped 态，之后的 post
         // 全部静默空转——restart 后才能继续驱动后续发起。
-        if (exec_ctx_.stopped()) exec_ctx_.restart();
-        exec_ctx_.poll();
+        if (exec_ctx_->stopped()) exec_ctx_->restart();
+        exec_ctx_->poll();
     }
 
     void async_write(boost::asio::const_buffer buf, WriteHandler h) override {
@@ -210,7 +237,7 @@ public:
         // 驱动 watchdog executor 队列：rearm 的 post 捕获 session shared_ptr，
         // 若不排空，session 关闭后仍被队列钉住 → weak 永不过期/泄漏。
         // closed_ 已置位，排空只是让 rearm lambda 进去短路返回，不会武装定时器。
-        exec_ctx_.poll();
+        exec_ctx_->poll();
     }
     bool is_open() const override {
         std::lock_guard<std::mutex> lk(mu_);
@@ -237,7 +264,11 @@ private:
     //   它不是 scheduler 仿真——不要用它测调度行为，那属于 exec_ctx_。
     mutable std::mutex mu_;
     test::MockIoContext ctx_;
-    boost::asio::io_context exec_ctx_;
+    // 堆持有:允许 MockConnection 在 exec 线程内析构(close_after_flush 的 post
+    // 持有 session 最后引用)时,ctx 由分离线程的 shared_ptr 续命,避免悬垂
+    std::shared_ptr<boost::asio::io_context> exec_ctx_ =
+        std::make_shared<boost::asio::io_context>();
+    std::thread exec_thread_;   // 跑 exec_ctx_(guard 在线程栈上,见 start_executor)
     std::string read_buf_;
     size_t read_pos_ = 0;
     std::string write_buf_;

@@ -146,6 +146,7 @@ struct FsmTestFixture {
             server.get(), std::move(conn_u), fsm);
         // 发 +OK banner → AUTHORIZATION
         fsm->process_event(session, Pop3Event::CONNECT);
+        conn_ptr->pump_executor();   // greeting 写经 exec_ctx_ 串行化(09-06),需排空才可见
         return {conn_ptr, session};
     }
 
@@ -153,6 +154,7 @@ struct FsmTestFixture {
     void cmd(Handle& h, const std::string& line) {
         h.session->handle_read(line + "\r\n");
         h.session->process_read();
+        h.conn->pump_executor();   // 响应写经 exec_ctx_ 串行化(09-06),需排空才可见
     }
 
     // 播种 DB：成功 PASS 依次消费 3 个查询结果（inbox_id → lock verify → mails）
@@ -181,9 +183,11 @@ struct FsmTestFixture {
     template <typename H>
     static bool wait_for(H& h, const std::string& needle, int timeout_ms = 2000) {
         for (int waited = 0; waited < timeout_ms; waited += 5) {
+            h.conn->pump_executor();   // 异步回复落在 exec_ctx_ 队列,轮询需排空
             if (h.conn->written().find(needle) != std::string::npos) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+        h.conn->pump_executor();
         return h.conn->written().find(needle) != std::string::npos;
     }
 
@@ -191,6 +195,7 @@ struct FsmTestFixture {
     static bool wait_closed(H& h, int timeout_ms = 3000) {
         for (int waited = 0; waited < timeout_ms; waited += 5) {
             if (h.session->is_closed()) return true;
+            h.conn->pump_executor();   // 关闭经 exec_ctx_ 串行化,排空后再判
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         return h.session->is_closed();
@@ -260,6 +265,11 @@ TEST(pass_three_failures_close) {
     fx.cmd(h, "PASS bad2");
     FsmTestFixture::wait_for(h, "-ERR Authentication failed");
     fx.cmd(h, "PASS bad3");
+    if (!FsmTestFixture::wait_for(h, "Too many auth failures", 10000)) {
+        auto w = h.conn->written();
+        std::cerr << "  DIAG written tail: [" << w.substr(w.size() > 400 ? w.size() - 400 : 0)
+                  << "] closed=" << h.session->is_closed() << std::endl;
+    }
     assert(FsmTestFixture::wait_for(h, "Too many auth failures"));
     assert(h.session->is_closed());
     std::cout << "  [PASS] pass_three_failures_close" << std::endl;
