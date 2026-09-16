@@ -1,9 +1,11 @@
 #ifndef MOCK_CONNECTION_H
 #define MOCK_CONNECTION_H
 #include "framework/connection/i_connection.h"
+#include "framework/session_base.h"   // finish_session 需要 SessionBase 完整类型
 #include "mock_io_context.h"
 
 #include <boost/asio/io_context.hpp>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -187,6 +189,17 @@ public:
 
     // 排空发起队列：SessionBase 09-06 起 socket 发起经 post 串行化，单测
     // 无常驻 IO 线程，用例在 do_async_read/write 之后调用本方法驱动发起。
+    //
+    // 【会话收尾契约 — 违反即 LSan 报 indirect leak（CI asan-unit 全红）】
+    // 排空必须发生在最后一个 session 引用被释放之前。队列里那些捕获 self 的
+    // 发起 lambda（close / rearm / do_async_* 的 post）自己就是引用：没人执行
+    // 它们时，session → connection_ → exec_ctx_ → 队列 lambda → session 构成
+    // 不可达环，整棵对象图（含 FSM 转移表、handler 表、缓冲区）都归 LSan 的
+    // indirect leak 名下，且看不到任何 direct leak —— 这就是"纯环"的特征。
+    // 收尾姿势：close() 之后调一次本方法；fixture 统一放在 Handle 析构里。
+    // poll() 会连续执行到无可就绪任务，故一次调用即排空当前队列及其链式投递；
+    // 但已武装的 watchdog async_wait（handler 强持 self）只有 close() 能断，
+    // 所以收尾必须是"close + 排空"，缺一不可。
     void pump_executor() {
         // poll 发现无任务时 io_context 会自动进入 stopped 态，之后的 post
         // 全部静默空转——restart 后才能继续驱动后续发起。
@@ -279,6 +292,40 @@ private:
     PendingRead pending_read_;
     WriteHandler pending_write_handler_;
 };
+
+// ================================================================
+// finish_session — 单测会话收尾（会话收尾契约的落地，见 pump_executor 注释）
+//
+//   关闭会话 → 排空发起队列 → 等引用计数收敛到"只剩调用方这一份"。
+//
+//   为什么不能只排空一次：close() 常由 worker 线程的异步续作触发（DB 查询
+//   回调、POP3 心跳续约失败回调等），这些续作的后续 post 会晚于本次排空
+//   几十微秒到达 —— 单次排空必漏，表现为 LSan 偶发报 indirect leak
+//   （pop3_fsm_test 心跳用例：6 次跑 2 次红，且每次泄漏字节数完全相同）。
+//
+//   use_count() 是"还有谁持有会话"的直接观测量：exec_ctx_ 队列里的发起
+//   lambda、watchdog 的 async_wait handler、worker 回调各自持一份 self。
+//   计数收敛到 1 即意味着除调用方外再无持有者，此时释放调用方那一份，
+//   session → connection_ → exec_ctx_ 整图归零。
+//
+//   约定：调用点应是该会话的最后一个持有者（fixture 的 Handle 成员、或
+//   测试块里的局部 shared_ptr）；若测试另存了引用，本函数会白等到上限
+//   （不致命，只是慢）。不可用于已 release_connection() 的会话
+//   （get_connection() 解引用空指针）。
+// ================================================================
+template <typename SessionPtr>
+inline void finish_session(SessionPtr& session, int timeout_ms = 400) {
+    if (!session) return;
+    if (!session->is_closed()) {
+        session->set_trace_clean_close();   // 单测无需落 trace 文件
+        session->close();
+    }
+    for (int waited = 0; waited < timeout_ms && session.use_count() > 1; waited += 2) {
+        session->get_connection().pump_executor();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    session->get_connection().pump_executor();
+}
 
 } // namespace mail_system
 #endif

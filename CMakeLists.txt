@@ -98,7 +98,9 @@ if(ENABLE_COVERAGE)
         set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} -fprofile-instr-generate -fcoverage-mapping -g -O0")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-instr-generate")
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} --coverage -g -O0")
+        # -fprofile-update=atomic：单测多线程（线程池/mock executor）并发更新
+        # gcov 计数器，非原子读改写会竞态出负计数，geninfo 直接报错（CI coverage job）
+        set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} --coverage -fprofile-update=atomic -g -O0")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
     else()
         message(WARNING "ENABLE_COVERAGE unsupported for compiler ${CMAKE_CXX_COMPILER_ID}")

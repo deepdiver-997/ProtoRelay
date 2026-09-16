@@ -55,6 +55,16 @@ struct SessionHandle {
     MockConnection* conn = nullptr;
     std::shared_ptr<SmtpsSession<MockConnection>> session;
     std::string captured;
+
+    // 收尾（见 mock_connection.h 会话收尾契约）：close + 排空 + 等引用收敛。
+    // 本套件必须收尾，原因是 ASan 抓到过的 heap-use-after-free：在途读完成的
+    // 回调持着 session 存活，句柄不复位就一路活到 main 结束 —— 那时 fixture 的
+    // server 已析构，回调里的 close() 摸 m_server->push_metric_observe 即为 UAF。
+    // （无 ASan 时这次野写会砸坏 libgcov 的写盘缓冲，表现为 coverage 构建退出
+    //   阶段 "Merge mismatch / Error writing" + SIGSEGV，见 2026-09-16 复盘。）
+    // boundary_callback_after_session_release 用例已自行 reset() 并等待
+    // weak 过期，此处对空 session 是 no-op。
+    ~SessionHandle() { finish_session(session); }
 };
 
 struct ConcurrencyTestFixture {

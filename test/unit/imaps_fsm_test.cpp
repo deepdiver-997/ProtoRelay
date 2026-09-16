@@ -93,6 +93,12 @@ struct FsmTestFixture {
     struct Handle {
         MockConnection* conn;
         std::shared_ptr<ImapsSession<MockConnection>> session;
+
+        // 收尾用 finish_session（close + 排空 + 等引用收敛）。IMAP 侧有两类
+        // 强引用必须在这里断掉，否则一律 LSan indirect leak：
+        //   1) do_async_*/close 的发起 post 捕获 self，留在 exec_ctx_ 队列即成环；
+        //   2) watchdog 的 async_wait handler 强持 self，只有 close() 会 disarm。
+        ~Handle() { finish_session(session); }
     };
 
     Handle make_session(const std::string& preload_data = "") {
@@ -338,6 +344,10 @@ TEST(fetch_full_path_with_storage) {
 
     std::filesystem::remove_all("/tmp/imaps_fetch_test");
     io->stop(); wk->stop();
+    // 收尾：本用例不走 Handle。FETCH 链在会话里武装了 watchdog 定时器
+    // （async_wait handler 强持 self），不 close+drain 就是一笔 LSan 泄漏。
+    // 先把线程池停掉（不再有新续作投递），再收尾。
+    finish_session(session);
     std::cout << "  [PASS] fetch_full_path_with_storage" << std::endl;
 }
 
@@ -403,6 +413,8 @@ TEST(fetch_many_mails_no_stack_overflow) {
     assert(w.find("RFC822.SIZE") != std::string::npos);
     std::filesystem::remove_all("/tmp/imaps_fetch_many");
     io->stop(); wk->stop();
+    // 收尾：同 fetch_full_path_with_storage —— 手工 session 无 Handle 兜底。
+    finish_session(session);
     std::cout << "  [PASS] fetch_many_mails_no_stack_overflow (" << N << " mails, iterative chain)" << std::endl;
 }
 

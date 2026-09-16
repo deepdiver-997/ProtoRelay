@@ -128,12 +128,9 @@ struct FsmTestFixture {
         std::shared_ptr<Pop3Session<MockConnection>> session;
         // deferred read 会让 greeting 之后的 do_async_read 挂起一个 pending handler
         // （捕获 shared_from_this），若不关闭会形成引用环 → LSan 泄漏。析构幂等关闭。
-        ~Handle() {
-            if (session && !session->is_closed()) {
-                session->set_trace_clean_close();   // 单测无需落 trace
-                session->close();
-            }
-        }
+        // 收尾用 finish_session（close + 排空 + 等引用收敛）：POP3 的会话常由
+        // worker 线程的 DB/心跳续作关闭，其后续 post 会晚于单次排空到达。
+        ~Handle() { finish_session(session); }
     };
 
     Handle make_session() {

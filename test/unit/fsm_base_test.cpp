@@ -80,6 +80,9 @@ int main() {
         fsm.run(s, St::DONE, Ev::HELO);
         expect_true(s->is_closed(), "terminal state closes session");
         expect_true(fsm.handler_calls == 0 && fsm.pre_calls == 0, "terminal closes before any dispatch");
+        // 收尾：terminal 走的是"会话还活着时 close()"，其关闭发起 post 捕获
+        // self；不排空则它成为最后一个引用 → 对象图成环 LSan 报 indirect leak。
+        finish_session(s);
     }
 
     // 3. 未注册转换 → on_invalid_transition

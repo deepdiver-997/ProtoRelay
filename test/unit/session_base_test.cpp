@@ -218,6 +218,7 @@ int main() {
         conn.trigger_deferred_write();       // 模拟在途 op 的迟到完成：不得崩溃/重复写
         expect_true(cb == 0, "late completion after close must be dropped");
         expect_true(s->is_closed(), "session stays closed");
+        finish_session(s);   // 收尾：close 发起留在队列会钉住 session（见 mock_connection.h 契约）
     }
 
     // ── 09-06 回归：close 后发起必须被拦截（initiate 与 close 串行化）──
@@ -257,6 +258,7 @@ int main() {
         s->set_trace_clean_close();
         s->close();
         expect_true(s->take_trace_buffer().empty(), "clean close discards trace");
+        finish_session(s);   // 收尾：close 发起须在 session 释放前执行
     }
 
     // ── 错误码 / 错误消息映射 ────────────────────────────────
@@ -301,6 +303,7 @@ int main() {
         auto s = make_session();
         s->handle_error(boost::asio::error::eof);
         expect_true(s->is_closed(), "handle_error closes session");
+        finish_session(s);   // 收尾：close 发起须在 session 释放前执行
     }
 
     // ── pop_buffered_line / take_buffered_input ──────────────

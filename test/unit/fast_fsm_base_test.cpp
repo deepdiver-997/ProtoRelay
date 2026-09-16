@@ -93,6 +93,8 @@ int main() {
         fsm.run(s, St::DONE, Ev::HELO);
         expect_true(s->is_closed(), "terminal state closes session");
         expect_true(fsm.spec_calls == 0 && fsm.fallback_calls == 0, "terminal skips handlers");
+        // 收尾：见 mock_connection.h 会话收尾契约（close 发起 post 持 self）
+        finish_session(s);
     }
 
     // 5. fallback 后写入不影响已注册的专用 handler（表独立）
