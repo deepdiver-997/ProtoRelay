@@ -98,6 +98,19 @@ void SessionBase<ConnectionType>::close() {
     }
 }
 
+// close_after_flush:见 session_base.h 注释。post 到连接 executor 排队,
+// 与 do_async_write 的发起 post 同队列 FIFO —— 末条响应先上 wire,close 后行。
+// 注意此处不能提前置 closed_(否则排在队列里的写 post 会被 closed_ 检查丢弃);
+// 幂等去重由 post 内 close() 的 exchange 保证,与并发直呼 close() 竞态亦安全。
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::close_after_flush() {
+    if (closed_.load(std::memory_order_acquire)) return;   // 已关:快速返回
+    if (!connection_) { close(); return; }                 // 析构期安全网路径
+    auto self = this->shared_from_this();
+    auto ex = connection_->get_executor();
+    boost::asio::post(std::move(ex), [self]() mutable { self->close(); });
+}
+
 template <typename ConnectionType>
 std::string SessionBase<ConnectionType>::get_client_ip() const {
     if (client_address_.empty() && connection_) {

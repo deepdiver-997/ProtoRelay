@@ -335,7 +335,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                                 if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                             });
                     } else {
-                        if (session->record_auth_failure_and_check()) { session->close(); return; }
+                        if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
                         session->do_async_write("535 Authentication failed\r\n",
                             [session](auto s, auto& ec) {
                                 if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
@@ -386,7 +386,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                                 if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                             });
                     } else {
-                        if (session->record_auth_failure_and_check()) { session->close(); return; }
+                        if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
                         session->do_async_write("535 Authentication failed\r\n",
                             [session](auto s, auto& ec) {
                                 if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
@@ -452,7 +452,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                         if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
             } else {
-                if (session->record_auth_failure_and_check()) { session->close(); return; }
+                if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
                 session->do_async_write("535 Authentication failed\r\n",
                     [session](auto s, auto& ec) {
                         if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));

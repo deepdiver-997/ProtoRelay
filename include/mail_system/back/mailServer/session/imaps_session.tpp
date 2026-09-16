@@ -166,7 +166,7 @@ void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
                 auto* fsm_ptr = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
                 std::string rtag = line.substr(0, line.find(' '));
                 fsm_ptr->send_tagged(self_sp, rtag, "BAD", "Literal too large");
-                self_sp->close();
+                self_sp->close_after_flush();   // 让 BAD 先上 wire,close 随后
                 return;
             }
 

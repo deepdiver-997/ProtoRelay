@@ -585,7 +585,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
                                                {{"result", "fail_too_many"}}, 1);
                             }
                         }
-                        self->close();
+                        self->close_after_flush();
                         return;
                     }
                     finish_fail("-ERR Authentication failed", "wrong_pass");
@@ -905,7 +905,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(
         // AUTHORIZATION 阶段 QUIT：直接 bye
         send_line(session, "+OK Bye");
         session->set_current_state(static_cast<int>(Pop3State::UPDATE));
-        session->close();
+        session->close_after_flush();   // Bye 先上 wire,close 随后
         return;
     }
 
@@ -922,7 +922,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(
     if (!worker) {
         send_line(session, "+OK Bye");
         session->set_current_state(static_cast<int>(Pop3State::UPDATE));
-        session->close();
+        session->close_after_flush();   // Bye 先上 wire,close 随后
         return;
     }
     worker->post([self, router, user_id, mailbox_id, shard, sid, del]() {
@@ -943,7 +943,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(
                                     self->set_paused(false);
                                     send_line(self, "+OK Bye");
                                     self->set_current_state(static_cast<int>(Pop3State::UPDATE));
-                                    self->close();
+                                    self->close_after_flush();   // Bye 先上 wire
                                 });
                         });
                     return;

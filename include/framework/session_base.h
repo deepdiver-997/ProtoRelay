@@ -68,6 +68,13 @@ public:
     // ── 2. 连接管理 ────────────────────────────────────────────
     virtual void close();
 
+    // 关闭但让已入队的末条响应先上 wire。worker 回调里 "send_line + close" 组合
+    // 若同步 close,会立刻置 closed_,随后在 exec_ctx_ 队列里执行的写 post 被
+    // do_async_write 的 closed_ 检查丢弃 → 客户端只见断连,收不到解释行
+    // (如 "-ERR Too many auth failures")。把 close post 到连接 executor,
+    // 排在写 post 之后 FIFO 执行;同时满足 11.1(io 对象操作须在 io 线程)。
+    void close_after_flush();
+
     std::string        get_client_ip() const;
     ConnectionType&    get_connection();
     const ConnectionType& get_connection() const;
