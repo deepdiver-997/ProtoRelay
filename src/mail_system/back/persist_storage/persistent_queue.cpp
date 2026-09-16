@@ -689,7 +689,17 @@ void PersistentQueue::persist_mail_transactional_async(mail* mail_data,
     if (!mail_data) { cb(false, "Mail data is null"); return; }
 
     int shard = shard_from_mail(mail_data);
-    auto scoped_raw = m_shardRouter->get_db_pool(shard)->acquire_connection();
+    auto db_pool = m_shardRouter ? m_shardRouter->get_db_pool(shard) : nullptr;
+    // 无 DB 池(use_database=false/纯文件部署):正文已落盘,元数据无处可写。
+    // 视为持久化成功(文件即事实)——否则按入库失败走 cleanup,把已 250 接受的
+    // 邮件正文删掉。注意:此模式无 outbox 行,出站 hot-handoff 不可用。
+    if (!db_pool) {
+        LOG_PERSISTENT_QUEUE_INFO(
+            "No DB pool for shard {} — file-only persistence for mail ID {}", shard, mail_data->id);
+        cb(true, {});
+        return;
+    }
+    auto scoped_raw = db_pool->acquire_connection();
     if (!scoped_raw->is_valid()) {
         cb(false, "Failed to get database connection");
         return;
