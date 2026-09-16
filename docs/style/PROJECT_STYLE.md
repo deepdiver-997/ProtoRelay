@@ -142,3 +142,30 @@ set_config(std::move(ob_cfg));   // 第二次: ob_cfg 已 move, default_route.ho
 
 **判断口诀**：同个对象的 `std::move` 出现 **≥2 次** = 红警。move 只应发生一次，之后对象视为"已移交，
 仅供析构"。若确实要复用同份值，用 **copy**（`= cfg->outbound_default_route`，或保留一份副本）。
+
+### 11.5 ⚠️ io_context::run() 不装 work_guard —— 发起队列静默饿死
+
+**`io_context::run()` 在没有未完成任务时立即返回。** 若给 io_context 起了线程跑 `run()`
+但没装 work_guard,线程启动瞬间就退出;之后一切 `post` 到该 context 的任务只入队、
+永不执行——无错误、无日志,表现为"响应永远上不了 wire / 发起调用全部失效"。
+
+```cpp
+// ✗ 禁止:run() 无任务立即返回,线程空转退出,后续 post 全部饿死
+exec_thread_ = std::thread([this]() { exec_ctx_.run(); });
+
+// ✓ 正确:guard 持活,stop 时 reset → stop → join → restart
+exec_thread_ = std::thread([ctx = exec_ctx_]() {
+    auto guard = boost::asio::make_work_guard(*ctx);   // guard 放线程栈
+    ctx->run();
+});
+// stop: guard_.reset() 或 ctx->stop() → join → ctx->restart()
+```
+
+**前科**：2026-09-16 `mock_connection.h::start_executor()`——CI 的 unit-test/coverage/
+asan-unit 三 job 连红 18 天的最后一块拼图。09-06 起 `SessionBase::do_async_write/close`
+的发起都 post 到连接 executor(mock 里=真实 io_context),fixture 没跑它 → greeting/
+CAPABILITY 等首响应全部发不出来,4 个 FSM 测试全挂在第一个断言。
+
+**判断口诀**：凡是"post 进去了但回调永远不执行、且无任何报错",第一反应查跑该
+context 的线程是否还活着——run() 没装 guard = 线程早已退出。guard 放线程栈上
+（make_work_guard 后立刻 run）,stop 顺序 = reset guard → stop → join → restart。
