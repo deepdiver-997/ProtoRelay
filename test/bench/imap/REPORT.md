@@ -117,3 +117,95 @@ size/body 两个异步读共用；完成本封的最后一步走 `fetch_continue
 轮次被 200 行结果 + storage 读主导；**对远程 DB（部署目标）才是大头**。
 `mysql_ping()` 保活替代 SELECT 1（不污染缓存 stmt 状态）；功能回归
 （LOGIN/SELECT/FETCH 经缓存 stmt 数据正确）、ctest 全绿、TSan 无 race。
+
+## 异步路径 9 月修复后复测（2026-09-22，HEAD `177c1da`，Release 构建）
+
+> **背景**：Phase 2/3 复测在 8/29 当天（Debug 构建）。此后异步路径又落了多个修复
+> （stmt 截断重取 UAF、结果列 256 字节缓冲、IOThreadPool 每线程独立 io_context 等），
+> 本文是修复后的首次复测。Release 构建 + `log_level=warn`（与 8/29 Debug+info 不可直比，
+> 本次内部对照自洽）。4 io + 4 worker，200 封邮箱，每轮 = SELECT + FETCH 1:200 (FLAGS RFC822.SIZE)，
+> 经 `SHOW GLOBAL STATUS` 验证每轮真实打 1 次 DB 查询。
+
+### 1. 本地 DB（localhost socket，查询即达）
+
+| 并发 | mysql sync (rps) | mariadb async (rps) | P50 async (ms) |
+|------|-----------------|--------------------|----------------|
+| 1    | 491             | 398                | 2.60           |
+| 4    | 1682            | 1695               | 2.22           |
+| 16   | 1676            | 1665               | 8.92           |
+| 64   | 1709            | 1663               | 7.88           |
+| 64 SELECT-only | 119,928 | 125,321          | 0.11           |
+
+- 两引擎形态一致：c=4 起封顶 ~1700 rps，并发再高只涨延迟不涨吞吐。
+- c=1 三次采样：sync 435–491 rps（P50 1.79–1.96ms），async 361–370 rps（P50 2.68–2.77ms）——
+  **DB 即达时 async 单查询反而慢 ~20%**（异步机制固定开销）。
+- 16 io 线程复跑 c=16/64：1815/1688 (sync)、1826/1705 (async)——**吞吐封顶不随 io 线程数变**，
+  说明瓶颈不在 io 线程算力。
+
+### 2. 慢 DB 实验（TCP 代理加 5ms/chunk 双向延迟 ≈ 每查询 10–15ms RTT，模拟远程 DB）
+
+| 配置 | mysql sync | mariadb async |
+|------|-----------|---------------|
+| c=4, 4 io 线程   | 81 rps | 82 rps |
+| c=16, 4 io 线程  | 80 rps | 83 rps |
+| c=64, 4 io 线程  | 80 rps | 83 rps |
+| c=16/64, 16 io 线程 | 68 rps | 67 rps |
+
+- **两引擎、任何并发、任何 io 线程数都钉死在 ~67–83 rps**；线程版代理 + `Threads_running`
+  采样（中位 2）排除代理与 MySQL 本身串行。
+- Little 定律对账：67 rps × ~15ms ≈ 1.0 —— **任何时刻只有 ~1 个 DB 操作在飞**。
+  本地封顶同样对账：1700 rps × ~0.58ms ≈ 1.0。同一个串行点，只是被本地 DB 的快
+  掩盖成了"非 DB 瓶颈"的假象。
+- 延迟随并发线性涨（c=4 P50 58ms → c=16 P50 210ms）、吞吐不涨 = 单队列排队，实锤。
+
+### 3. 结论
+
+1. **异步化改造没有引入性能回归**（本地 DB 各并发点与 sync 持平），9 月的异步路径修复未劣化。
+2. **DB 访问路径存在一个两引擎共用的全局串行点**（单飞）：吞吐 = 1/单次 DB 操作耗时。
+   async 的理论收益（等待期间让出 io 线程 → 查询并发，直连连接池 128）**尚未兑现**——
+   慢 DB 下本应抬到连接池上限，实测仍与 sync 同值。
+3. 下一步：root-cause 该串行点（嫌疑：stmt 缓存锁 / 池级锁在查询执行期间持锁；
+   或 async op 链的串行化），目标是慢 DB 下吞吐随并发抬升到 min(并发, 池大小)。
+
+> ⚠ 复测过程中的坑（他人复现时注意）：`db_config_file` 的 `initialize_script` 按**配置文件
+> 所在目录**解析，配置放 /tmp 时池初始化失败、静默变为全失败错误路径（吞吐虚高 10 倍+、
+> 客户端无感知）。压测前必须核对服务端日志无 `Failed to get database connection`，
+> 并用 Questions 计数器验证查询真实落库。
+
+### 4. 串行点根因定位（2026-09-22 当日，代码排查 + 计数器实证）
+
+**根因：`MySQLPool::get_connection()`（`mysql_pool.cpp:232`）在池级全局锁 `m_mutex`
+内做 checkout 校验**——第 289 行 `validate_connection()` → `connection->ping()` 是一次
+**同步网络往返（COM_PING / SELECT 1）**，且 `release_connection` 也要同一把锁。
+于是全池所有线程的借/还连接串成单队列，每个 DB 操作都被强加"前一个人的 ping 往返"。
+两个引擎共用此处：`mariadb_pool.cpp:18` 注释明言"池是引擎无关的，直接复用 MySQLPool"。
+
+**实证**：
+
+- `performance_schema.events_statements_summary_global_by_event_name`
+  （`statement/com/ping`）：2000 轮压测 COM_PING **+2002**、Questions +2016——
+  每轮恰好 1 ping + 1 查询，ping 在每轮关键路径上。
+- Little 定律两头闭合：慢 DB（ping≈15ms）→ 理论 67 rps，实测 67–83；
+  本地（ping≈0.58ms）→ 理论 ~1700 rps，实测 ~1700。第 2 节的"非 DB 工作瓶颈"假象
+  实为锁内 ping（本地 DB 快，把它伪装成计算瓶颈）。
+- 不变性吻合：吞吐与并发（4→64）、io 线程数（4→16）全无关（全局锁性质），
+  延迟线性涨（单队列排队）。SELECT-only 120k rps——stats 缓存命中不 checkout，无 ping。
+
+**排除项**：mariadb 异步 op 机制本身是真异步 + 真多路复用（每 op 独立
+`posix::stream_descriptor` + `async_wait`，事件驱动续作，fd 所有权 release 归还正确），
+查询可以并发——只是每个查询进门都要先过这道串行 checkout 关卡。
+c=1 时 async 比 sync 慢 ~20%（P50 2.6 vs 1.9ms）与 ping 无关，是异步路径每步在堆上
+新建 descriptor/timer/atomic 的固定开销（~0.5–1ms/查询）。
+
+**修复方向（按投入排序）**：
+
+1. 最小改动：ping 移出锁（锁内只 pop，锁外校验），或去掉 checkout ping 改为
+   "查询失败标记连接失效 + 重试一次"（标准池模式；`maintenance_thread` 已有保活）。
+   预期慢 DB 吞吐抬到 min(并发, 池大小)。
+2. 中期：checkout 异步化（acquire CPS 化），池耗尽时 io 线程不再同步死等 5s。
+3. 顺带：per-connection 复用 stream_descriptor，削减异步固定开销。
+
+**评估过并否决的方向**：无锁池（瓶颈是锁内网络往返而非锁本身，出锁后临界区 µs 级，
+无锁的 ABA/内存回收复杂度不成比例；若真现锁竞争，按 io 线程分片池更简单有效）；
+多查询合并单连接提交（MySQL 协议一连接不允许多请求在途，合并需引入结果归位/
+部分失败/头阻塞等拆分复杂度，且与 Phase 3 的 prepared stmt 缓存互斥，见下）。
