@@ -5,6 +5,23 @@
 
 namespace mail_system {
 
+// 连接级致命错误码（errmsg.h 的 CR_*，两套客户端库同名同值，用字面值避免头文件纠缠）：
+// 命中即把 m_connected 置 false，池 checkout 的本地标志检查就能直接换新连接——
+// 这是热连接免 ping 校验能安全工作的前提（bench/imap REPORT 2026-09-22 串行点修复配套）。
+static bool is_connection_fatal(unsigned int err) {
+    switch (err) {
+        case 2002:  // CR_CONNECTION_ERROR（unix socket 连不上）
+        case 2003:  // CR_CONN_HOST_ERROR（TCP 连不上）
+        case 2005:  // CR_UNKNOWN_HOST
+        case 2006:  // CR_SERVER_GONE_ERROR
+        case 2013:  // CR_SERVER_LOST（查询期间连接丢失）
+        case 2055:  // CR_SERVER_LOST_EXTENDED
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 静态成员初始化
 std::unique_ptr<MySQLService> MySQLService::s_instance = nullptr;
 std::mutex MySQLService::s_mutex;
@@ -271,11 +288,13 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql) {
             } else {
                 LOG_DB_QUERY_ERROR("MySQL query error: {} (errno: {})",
                                    mysql_error(m_mysql), mysql_errno(m_mysql));
+                if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
                 return nullptr;
             }
         } else {
         LOG_DB_QUERY_ERROR("MySQL query error: {} (errno: {})",
                          mysql_error(m_mysql), mysql_errno(m_mysql));
+        if (is_connection_fatal(err)) m_connected = false;
         return nullptr;
         }
     }
@@ -329,6 +348,7 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
 
     if (mysql_stmt_prepare(stmt, sql.c_str(), sql.length()) != 0) {
         LOG_DB_QUERY_ERROR("MySQL stmt prepare error: {}", mysql_stmt_error(stmt));
+        if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
         return nullptr;
     }
 
@@ -369,6 +389,7 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
     }
     if (mysql_stmt_execute(stmt) != 0) {
         LOG_DB_QUERY_ERROR("MySQL stmt execute error: {}", mysql_stmt_error(stmt));
+        if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
         return nullptr;
     }
 
@@ -394,6 +415,7 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
         // 存储结果并获取行数
         if (mysql_stmt_store_result(stmt) != 0) {
             LOG_DB_QUERY_ERROR("MySQL stmt store result error: {}", mysql_stmt_error(stmt));
+            if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
             mysql_free_result(meta);
             return nullptr;
         }
@@ -519,6 +541,7 @@ bool MySQLConnection::execute(const std::string& sql) {
         }
         LOG_DB_QUERY_ERROR("MySQL execute error: {} (errno: {})",
                          mysql_error(m_mysql), mysql_errno(m_mysql));
+        if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
         return false;
     }
 
@@ -563,6 +586,7 @@ bool MySQLConnection::execute(const std::string& sql, const std::vector<std::str
     LOG_DB_QUERY_DEBUG("Preparing statement: {}", sql);
     if (mysql_stmt_prepare(stmt, sql.c_str(), sql.length()) != 0) {
         LOG_DB_QUERY_ERROR("MySQL stmt prepare error: {}", mysql_stmt_error(stmt));
+        if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
         return false;
     }
     LOG_DB_QUERY_DEBUG("Statement prepared successfully");
@@ -622,6 +646,7 @@ bool MySQLConnection::execute(const std::string& sql, const std::vector<std::str
     }
     if (mysql_stmt_execute(stmt) != 0) {
         LOG_DB_QUERY_ERROR("MySQL stmt execute error: {}", mysql_stmt_error(stmt));
+        if (is_connection_fatal(mysql_errno(m_mysql))) m_connected = false;
         return false;
     }
 

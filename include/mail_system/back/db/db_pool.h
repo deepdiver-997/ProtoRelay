@@ -35,16 +35,23 @@ struct DBPoolConfig {
     unsigned int port = 3306;
     size_t initial_pool_size = 5, max_pool_size = 10;
     unsigned int connection_timeout = 5, idle_timeout = 60;
+    // checkout 校验阈值（秒）：连接闲置超过该值才在 checkout 时 ping 一次活性；
+    // 闲置内的热连接免 ping——checkout ping 曾在池锁内执行，把全池借还串成单队列
+    // （bench/imap REPORT 2026-09-22）。0 = 每次 checkout 都 ping（旧行为）。
+    // 配套：连接级致命错误会把连接自标记断开，checkout 的本地标志检查即可换新，
+    // 死连接不必等下一次 ping 才被发现。
+    unsigned int validation_interval = 60;
     unsigned int distributed_node_retry_interval = 5;
     std::vector<NodeConfig> nodes;
 
     void show() const {
         LOG_DATABASE_INFO("DBPoolConfig: achieve={} host={} user={} db={} port={}"
                           " initial_pool={} max_pool={} conn_timeout={} idle_timeout={}"
-                          " distributed_retry={} node_count={}",
+                          " validation_interval={} distributed_retry={} node_count={}",
                           achieve, host, user, database, port,
                           initial_pool_size, max_pool_size, connection_timeout,
-                          idle_timeout, distributed_node_retry_interval, nodes.size());
+                          idle_timeout, validation_interval,
+                          distributed_node_retry_interval, nodes.size());
         for (size_t i = 0; i < nodes.size(); ++i) {
             auto& node = nodes[i];
             LOG_DATABASE_INFO("  node[{}] name={} host={} port={} db={} weight={} enabled={}",
@@ -69,6 +76,7 @@ struct DBPoolConfig {
         max_pool_size    = j.value("max_pool_size", max_pool_size);
         connection_timeout=j.value("connection_timeout", connection_timeout);
         idle_timeout     = j.value("idle_timeout", idle_timeout);
+        validation_interval = j.value("validation_interval", validation_interval);
         distributed_node_retry_interval = j.value("distributed_node_retry_interval", distributed_node_retry_interval);
 
         auto resolve = [&](const std::string& rel) {

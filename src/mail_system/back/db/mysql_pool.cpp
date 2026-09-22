@@ -1,5 +1,6 @@
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/common/logger.h"
+#include <algorithm>
 #include <iostream>
 
 namespace mail_system {
@@ -230,86 +231,119 @@ std::shared_ptr<IDBConnection> MySQLPool::create_connection() {
 }
 
 std::shared_ptr<IDBConnection> MySQLPool::get_connection() {
-    std::unique_lock<std::mutex> lock(m_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    std::shared_ptr<ConnectionWrapper> wrapper;
+    bool need_ping = false;
+    bool expanding = false;   // 池耗尽超时后的扩容名额：建连挪到锁外
+    size_t pool_total = 0;
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
 
-    LOG_DATABASE_DEBUG("MySQLPool::get_connection() called");
-    LOG_DATABASE_DEBUG("  Available connections: {}", m_availableConnections.size());
-    LOG_DATABASE_DEBUG("  Total connections: {}", m_connections.size());
-    LOG_DATABASE_DEBUG("  Connection timeout: {} seconds", m_config.connection_timeout);
+        LOG_DATABASE_DEBUG("MySQLPool::get_connection() called");
+        LOG_DATABASE_DEBUG("  Available connections: {}", m_availableConnections.size());
+        LOG_DATABASE_DEBUG("  Total connections: {}", m_connections.size());
+        LOG_DATABASE_DEBUG("  Connection timeout: {} seconds", m_config.connection_timeout);
 
-    // 等待可用连接，最多等待连接超时时间
-    auto timeout = std::chrono::seconds(m_config.connection_timeout);
-    LOG_DATABASE_DEBUG("  Waiting for available connection (timeout: {}s)...", m_config.connection_timeout);
-    bool hasConnection = m_cv.wait_for(lock, timeout, [this] {
-        return !m_availableConnections.empty() || !m_running;
-    });
+        // 等待可用连接，最多等待连接超时时间
+        auto timeout = std::chrono::seconds(m_config.connection_timeout);
+        LOG_DATABASE_DEBUG("  Waiting for available connection (timeout: {}s)...", m_config.connection_timeout);
+        bool hasConnection = m_cv.wait_for(lock, timeout, [this] {
+            return !m_availableConnections.empty() || !m_running;
+        });
 
-    if (!m_running) {
-        LOG_DATABASE_DEBUG("MySQLPool::get_connection() - pool is not running");
-        return nullptr;
+        if (!m_running) {
+            LOG_DATABASE_DEBUG("MySQLPool::get_connection() - pool is not running");
+            return nullptr;
+        }
+
+        if (!hasConnection) {
+            if (m_connections.size() >= m_config.max_pool_size) {
+                LOG_DATABASE_DEBUG("MySQLPool::get_connection() - timeout waiting for connection (pool at max)");
+                return nullptr;
+            }
+            // 扩容：先在锁内占住名额（防多线程超发），建连这一网络往返在锁外做。
+            // 临界区里只允许内存操作——历史上 checkout 校验/建连都在锁内做网络 I/O，
+            // 把全池借还串成了单队列（bench/imap REPORT 2026-09-22 串行点根因）。
+            wrapper = std::make_shared<ConnectionWrapper>(nullptr);
+            wrapper->in_use = true;
+            m_connections.push_back(wrapper);
+            expanding = true;
+            pool_total = m_connections.size();
+        } else {
+            // 获取可用连接
+            LOG_DATABASE_DEBUG("  Got available connection from pool");
+            wrapper = m_availableConnections.front();
+            m_availableConnections.pop();
+            // 闲置超过 validation_interval 才值得花一趟 ping 往返确认活性；
+            // 热连接免校验——checkout ping 曾是全局串行点（每次 DB 操作一次 RTT）。
+            need_ping = m_config.validation_interval > 0 &&
+                now - wrapper->last_used >= std::chrono::seconds(m_config.validation_interval);
+            wrapper->in_use = true;
+            wrapper->last_used = now;
+        }
     }
 
-    if (!hasConnection) {
-        LOG_DATABASE_DEBUG("MySQLPool::get_connection() - timeout waiting for connection");
-        // 超时，检查是否可以创建新连接
-        if (m_connections.size() < m_config.max_pool_size) {
-        LOG_DATABASE_DEBUG("  Creating new connection (current: {}, max: {})", m_connections.size(), m_config.max_pool_size);
-            auto connection = create_connection();
-            if (connection) {
-                LOG_DATABASE_DEBUG("  New connection object created, now connecting to database...");
-
-                // 立即连接到数据库
-                if (!connection->connect()) {
-                    LOG_DATABASE_ERROR("  Failed to connect to database");
-                    LOG_DATABASE_ERROR("  Error: {}", connection->get_last_error());
-                    return nullptr;
-                }
-
-                auto wrapper = std::make_shared<ConnectionWrapper>(connection);
-                wrapper->in_use = true;
-                m_connections.push_back(wrapper);
-                LOG_DATABASE_DEBUG("  New connection created and connected successfully");
-                return wrapper->connection;
+    if (expanding) {
+        LOG_DATABASE_DEBUG("  Creating new connection (current: {}, max: {})",
+                           pool_total, m_config.max_pool_size);
+        auto fresh = create_connection();
+        bool ok = static_cast<bool>(fresh) && fresh->connect();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (ok) {
+                wrapper->connection = fresh;
             } else {
-                LOG_DATABASE_ERROR("  Failed to create new connection");
+                // 建连失败：释放名额（占位 wrapper 连接为空，不入可用队列）
+                wrapper->in_use = false;
+                auto it = std::find(m_connections.begin(), m_connections.end(), wrapper);
+                if (it != m_connections.end()) m_connections.erase(it);
             }
         }
-        return nullptr;
+        if (!ok) {
+            LOG_DATABASE_ERROR("  Failed to create new connection");
+            if (fresh) LOG_DATABASE_ERROR("  Error: {}", fresh->get_last_error());
+            return nullptr;
+        }
+        LOG_DATABASE_DEBUG("  New connection created and connected successfully");
+        return fresh;
     }
 
-    // 获取可用连接
-    LOG_DATABASE_DEBUG("  Got available connection from pool");
-    auto wrapper = m_availableConnections.front();
-    m_availableConnections.pop();
-    wrapper->in_use = true;
-    wrapper->last_used = std::chrono::steady_clock::now();
-
-    // 验证连接是否有效
-    LOG_DATABASE_DEBUG("  Validating connection...");
-    if (!validate_connection(wrapper->connection)) {
+    // —— 以下校验与失效重建都在锁外：wrapper 已标记 in_use，其他线程不会碰它 ——
+    auto conn = wrapper->connection;
+    // is_connected() 是本地标志（免费）：被致命错误自标记断开的连接直接换新
+    bool healthy = static_cast<bool>(conn) && conn->is_connected();
+    if (healthy && need_ping) {
+        LOG_DATABASE_DEBUG("  Validating connection (idle > {}s)...", m_config.validation_interval);
+        healthy = validate_connection(conn);
+    }
+    if (!healthy) {
         LOG_DATABASE_DEBUG("  Connection is invalid, creating new connection...");
-        // 连接无效，创建新连接
-        wrapper->connection = create_connection();
-        if (!wrapper->connection) {
-            // 无法创建新连接
+        auto fresh = create_connection();
+        bool ok = static_cast<bool>(fresh) && fresh->connect();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (ok) {
+                wrapper->connection = fresh;
+                wrapper->last_used = now;
+                conn = fresh;
+            } else {
+                // 名额保留（wrapper 留在 m_connections），死连接置空不入可用队列；
+                // 之后 get_connection 的 wait 谓词看到空队列会走扩容路径补位
+                wrapper->in_use = false;
+                wrapper->connection = nullptr;
+                wrapper->last_used = now;
+                conn = nullptr;
+            }
+        }
+        if (!conn) {
             LOG_DATABASE_ERROR("  Failed to create new connection");
-            wrapper->in_use = false;
             return nullptr;
         }
-        LOG_DATABASE_DEBUG("  New connection object created, now connecting to database...");
-        // 立即连接到数据库
-        if (!wrapper->connection->connect()) {
-            LOG_DATABASE_ERROR("  Failed to connect to database");
-            LOG_DATABASE_ERROR("  Error: {}", wrapper->connection->get_last_error());
-            wrapper->in_use = false;
-            return nullptr;
-        }
-
         LOG_DATABASE_DEBUG("  New connection created and connected successfully");
     }
 
     LOG_DATABASE_DEBUG("MySQLPool::get_connection() - returning connection");
-    return wrapper->connection;
+    return conn;
 }
 
 void MySQLPool::release_connection(std::shared_ptr<IDBConnection> connection) {
@@ -405,8 +439,10 @@ void MySQLPool::cleanup_idle_connections() {
     // 检查并关闭空闲连接
     for (auto it = m_connections.begin(); it != m_connections.end();) {
         auto& wrapper = *it;
-        if (!wrapper->in_use && 
-            (now - wrapper->last_used) > idleTimeout && 
+        // connection 可能为空：失效重建失败的 wrapper 名额保留但连接置空（见 get_connection）
+        if (wrapper->connection &&
+            !wrapper->in_use &&
+            (now - wrapper->last_used) > idleTimeout &&
             m_connections.size() > m_config.initial_pool_size) {
             
             // 从可用连接队列中移除

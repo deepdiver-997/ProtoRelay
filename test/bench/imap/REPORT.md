@@ -209,3 +209,47 @@ c=1 时 async 比 sync 慢 ~20%（P50 2.6 vs 1.9ms）与 ping 无关，是异步
 无锁的 ABA/内存回收复杂度不成比例；若真现锁竞争，按 io 线程分片池更简单有效）；
 多查询合并单连接提交（MySQL 协议一连接不允许多请求在途，合并需引入结果归位/
 部分失败/头阻塞等拆分复杂度，且与 Phase 3 的 prepared stmt 缓存互斥，见下）。
+
+### 5. 修复与复测（2026-09-22，同日落地）
+
+**改动**（`fix(db)` 提交）：
+
+1. `MySQLPool::get_connection()` 重写：checkout 的 ping 校验与扩容建连全部移出池锁，
+   临界区只剩内存操作（wait + pop + 置位）。ping 改在锁外对已 checkout 的连接执行。
+2. 热连接免校验：新增 `validation_interval`（秒，默认 60，`db_config.json` 可配，0=旧行为）。
+   闲置超过阈值才 ping 一次；热连接 checkout 零网络往返。
+3. 致命错误自标记：两引擎（`mysql_service` / `mariadb_service`，含 mariadb 异步 step 的
+   prepare/execute/store 失败点）在连接级致命错误码（2002/2003/2005/2006/2013/2055）
+   上置 `m_connected=false`——checkout 的本地标志检查（免费）即可换新连接，
+   死连接不必等下一次 ping。代价：DB 重启后每条热连接的首个查询仍会失败一次
+   （标记发生在该次失败里），之后一次 checkout 自动重建；比全量 ping 每操作一次 RTT 划算。
+4. 失效重建/扩容失败的路径正确保留名额（wrapper 连接置空不入可用队列），
+   `cleanup_idle_connections` 对空连接加守卫。
+
+**验证**：
+
+- ctest 24/24 全绿（含 `mariadb_async_test` 池 32→32 无泄漏、stmt 截断回归）。
+- **COM_PING 归零**：2000 轮压测 `performance_schema` COM_PING 增量 **+0**（修复前 +2002）。
+- 本地 DB：各并发点与修复前持平（封顶 ~1700 rps，无回归）。注意这推翻了第 4 节对
+  本地封顶的归因——ping 移除后封顶不动，说明本地封顶由每轮非 DB 工作主导
+  （200 行响应组装等），0.58ms 的 Little 定律对账是巧合而非因果。
+- **慢 DB（5ms/chunk 代理 ≈ 每查询 10–24ms）**：
+
+  | 配置 | 修复前 | 修复后 |
+  |------|-------|-------|
+  | mysql sync, 4 io 线程, c=4..128   | 80 rps（平坦） | 101 rps |
+  | mariadb async, 4 io 线程, c=4..128 | 83 rps（平坦） | **155–170 rps** |
+  | mariadb async, **16 io 线程**, c=16 | （未测） | **500 rps** |
+
+  async 相对 sync 的差距（169 vs 101）来自 sync 引擎无 stmt 缓存（prepare+execute
+  两次往返 vs 缓存后一次）。
+
+**新发现的第二层瓶颈（未修，下一步）**：慢 DB 下吞吐仍不随客户端并发增长
+（c=4→128 平坦），Little 定律反推在飞查询数 ≈ **io 线程数**（每线程 ~1 条）。
+判别实验：io 线程 4→16 吞吐 169→500（×3），worker 线程 4→16 无变化——
+瓶颈跟 io 线程走，不在 worker/池/代理（线程版代理 + 计数器已排除）。
+即异步 op 虽走 async_wait 路径，但每个 io 线程仍近似被一条查询独占。
+候选嫌疑（待查）：op 调度在 per-thread io_context 上的串行化、
+SELECT stats 缓存过期后的 single-flight 回源链（count/unseen/uidnext 三连查 +
+uidnext 写）把同邮箱会话串成队列、或 FETCH 续作链的内联 storage 读占比。
+把 io 线程数与 DB 池当作同一个扩容维度来规划是近期的实际缓解手段。

@@ -13,6 +13,23 @@
 
 namespace mail_system {
 
+// 连接级致命错误码（errmsg.h 的 CR_*，libmysql/libmariadb 同名同值，用字面值避免头文件
+// 纠缠）：命中即把 m_connected 置 false，池 checkout 的本地标志检查就能直接换新连接——
+// 这是热连接免 ping 校验能安全工作的前提（bench/imap REPORT 2026-09-22 串行点修复配套）。
+static bool is_connection_fatal(unsigned int err) {
+    switch (err) {
+        case 2002:  // CR_CONNECTION_ERROR（unix socket 连不上）
+        case 2003:  // CR_CONN_HOST_ERROR（TCP 连不上）
+        case 2005:  // CR_UNKNOWN_HOST
+        case 2006:  // CR_SERVER_GONE_ERROR
+        case 2013:  // CR_SERVER_LOST（查询期间连接丢失）
+        case 2055:  // CR_SERVER_LOST_EXTENDED
+            return true;
+        default:
+            return false;
+    }
+}
+
 // ====================================================================
 // MariaDbDriver —— dlopen/dlsym 绑定层
 // ====================================================================
@@ -323,11 +340,13 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(const std::string& sql) {
             } else {
                 LOG_DB_QUERY_ERROR("MariaDB query error: {} (errno: {})",
                                    D.mysql_error(m_mysql), D.mysql_errno(m_mysql));
+                if (is_connection_fatal(D.mysql_errno(m_mysql))) m_connected = false;
                 return nullptr;
             }
         } else {
             LOG_DB_QUERY_ERROR("MariaDB query error: {} (errno: {})",
                                D.mysql_error(m_mysql), D.mysql_errno(m_mysql));
+            if (is_connection_fatal(err)) m_connected = false;
             return nullptr;
         }
     }
@@ -520,6 +539,7 @@ bool MariaDBConnection::execute(const std::string& sql) {
         }
         LOG_DB_QUERY_ERROR("MariaDB execute error: {} (errno: {})",
                            D.mysql_error(m_mysql), D.mysql_errno(m_mysql));
+        if (is_connection_fatal(D.mysql_errno(m_mysql))) m_connected = false;
         return false;
     }
     return true;
@@ -871,6 +891,7 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
         if (ret != 0) {
             LOG_DB_QUERY_ERROR("MariaDB async: prepare error: {} (sql={})",
                                D.mysql_stmt_error(stmt), sql);
+            if (is_connection_fatal(D.mysql_errno(conn->m_mysql))) conn->m_connected = false;
             if (stmt && !stmt_is_cached) { D.mysql_stmt_close(stmt); stmt = nullptr; }
             return {Step::Fail, 0};
         }
@@ -922,6 +943,7 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
         if (rc) { last_wait = rc; return {Step::Wait, rc}; }
         if (ret != 0) {
             LOG_DB_QUERY_ERROR("MariaDB async: execute error: {}", D.mysql_stmt_error(stmt));
+            if (is_connection_fatal(D.mysql_errno(conn->m_mysql))) conn->m_connected = false;
             invalidate_cached();
             return {Step::Fail, 0};
         }
@@ -948,6 +970,7 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
         if (ret != 0) {
             LOG_DB_QUERY_ERROR("MariaDB async: store result error: {}",
                                D.mysql_stmt_error(stmt));
+            if (is_connection_fatal(D.mysql_errno(conn->m_mysql))) conn->m_connected = false;
             invalidate_cached();
             return {Step::Fail, 0};
         }
