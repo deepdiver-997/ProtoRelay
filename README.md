@@ -138,7 +138,7 @@ Operational note:
 2. **Connection reuse**: Benchmark script reuses connections by default. `--per-conn` for realistic per-message connections.
 3. **Auth cache**: `LruCache` in SmtpsFsm (TTL 5min, cap 10000) avoids DB queries for repeat auth.
 4. **Lock-free queue**: `boost::lockfree::queue` replaced `deque + mutex + cv` in PersistentQueue, with exponential backoff for the worker.
-5. **Log level**: INFO-level spdlog synchronous stdout writes become the bottleneck under concurrency; use `warn` for benchmarks.
+5. **Log level**: INFO-level spdlog synchronous stdout writes do cost under high concurrency (5+ lines per message contending on one stdout mutex); benchmark with `warn`. But it is not the throughput ceiling — the real hotspots on the DB path were TLS+blocking-fd degenerating the "async" DB engine into synchronous io-thread execution, and CPS callbacks dropping the pooled connection mid-flight. Both fixed 2026-09-24; see `test/bench/imap/REPORT.md` §6.
 6. **SMTP pipelining**: `do_async_read` checks the command buffer first — complete lines are processed immediately (one FSM round-trip each), only falling back to network read when exhausted. Incomplete commands wait for the next TCP chunk.
 7. **Per-thread io_context is load-bearing**: if `IOThreadPool` ever makes every thread share one `io_context` (a `vector<shared_ptr>(N, make_shared)` footgun), one connection's read & write completions get scheduled by N threads → H2's continuous multi-frame pumping races shared outbound state (ASan UAF). H1/SMTP/IMAP/POP3 hide it because they write once per request. Each io thread must own a distinct context. See [`docs/web-server/bugfixes/2026-09-02-shared-io-context.md`](docs/web-server/bugfixes/2026-09-02-shared-io-context.md).
 

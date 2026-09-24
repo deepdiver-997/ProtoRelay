@@ -253,3 +253,55 @@ c=1 时 async 比 sync 慢 ~20%（P50 2.6 vs 1.9ms）与 ping 无关，是异步
 SELECT stats 缓存过期后的 single-flight 回源链（count/unseen/uidnext 三连查 +
 uidnext 写）把同邮箱会话串成队列、或 FETCH 续作链的内联 storage 读占比。
 把 io 线程数与 DB 池当作同一个扩容维度来规划是近期的实际缓解手段。
+
+### 6. 第二层瓶颈根因与修复（2026-09-24，O_NONBLOCK + 回调持链）
+
+> 5ms/chunk 代理复现：4 io / c=16 → **169.5 rps**（与 9/22 完全一致）。
+> macOS `sample` 采样 8s 定位。两个叠加根因，一个延迟激活另一个。
+
+**根因 A：TLS + 阻塞 fd —— "非阻塞"状态机从未异步过。**
+池连接与本地 MySQL 握手 **TLS**（libmariadb 默认；`performance_schema.threads
+.connection_type` = SSL/TLS 实证），连接随后落回**阻塞模式**。采样显示 io 线程
+70% 停在 `mysql_stmt_execute_start` 内部 `ma_tls_read_async → SSL_read →
+read()` 阻塞系统调用上：fd 阻塞 ⇒ SSL_read 等不满整段就睡着 ⇒ 永不产生 EAGAIN
+⇒ `my_context` 协程无从挂起 ⇒ `*_start/*_cont` 从不返回 WAIT_READ ⇒
+`schedule_async_wait`（async_wait/事件驱动续作）**一行都执行不到**。整个
+"非阻塞状态机"退化为同步执行、且跑在调用线程（io 线程）上——在飞查询 = io
+线程数、吞吐随 io 线程数缩放、async 与 sync 引擎表现一致，全部现象一次解释。
+本地 DB（RTT ~0.5ms）把退化掩盖成"非 DB 工作瓶颈"假象。
+
+**修复 A**（`mariadb_service.cpp`）：异步 op 窗口持有 O_NONBLOCK——
+`start_async_op` 开、`done` 里关。不能常驻：**同步 API 在常驻非阻塞 + TLS fd 上
+直接报 "TLS/SSL error"**（实测：初始化脚本第 15 条起全挂）。
+
+**根因 B（被 A 掩盖的潜伏雷）：20 处 CPS 回调漏捕 ScopedConnection。**
+A 修复后 op 真正挂起，立刻暴露：uidnext_read 等 20 处回调只捕 `cb` 不捕
+`conn`，issuing lambda 返回瞬间 ScopedConnection 引用计数归零 → **op 在飞时
+连接提前归还池** → 被下一个使用者借走 → 同连接两条 op 并发 →
+"Commands out of sync"/"Buffer type not supported" → `mysql_stmt_bind_param`
+SIGSEGV（c=64 压测实录，崩溃报告 faulting stack 精确指向）。阻塞时代所有 op
+在 `async_query` 返回前同步跑完，此窗口从不存在。
+
+**修复 B**：imaps 13 处 / pop3 5 处 / smtps 2 处回调补 `conn` 捕获；
+PersistentQueue 全链持 `scoped` 无需改。新增防线：`IDBConnection::
+async_in_flight()` + `MySQLPool::release_connection` tripwire——归还在飞
+连接立即 ERROR（把未来的漏捕钉在案发现场，而不是延迟成串号崩溃）。
+
+**结果（5ms/chunk 代理，4 io）**：
+
+| 配置 | 修复前 | 修复后 |
+|------|-------|-------|
+| c=4 | ~169（=c=16，平坦） | 175 rps |
+| c=16 | 169.5 rps | **704 rps** |
+| c=64（池 32） | 169.5 rps | **1333 rps** ≈ 32 连接 / 22ms RTT 理论上限 |
+
+吞吐终于随客户端并发抬升到 **min(并发, 池大小)**，Phase 2 的理论收益兑现。
+Questions 计数器核对：每轮恰 1 次真实查询。
+
+**回归**：本地 DB c=16 4io 1736 rps（修复前 1794，噪声内，封顶由每轮 200 次
+storage stat + 响应组装主导）；ctest 24/24（含 mariadb_async_test 池 32→32）；
+ASan 构建 4 轮混合压测 0 报告、tripwire 0 触发。
+
+**复现环境**：`/tmp/imapbench/`（imapsConfig + db_config + 5ms/chunk 线程版
+延迟代理 `delay_proxy.py 3307 127.0.0.1 3306 5`）。压测前先看
+`performance_schema.threads` 的 connection_type——TLS 是本问题的前提条件。

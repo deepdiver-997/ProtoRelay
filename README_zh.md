@@ -115,7 +115,7 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 2. **连接复用 vs 每封独立连接**：压测脚本默认复用连接（100 连接发 10000 封），更符合 benchmark 惯例。`--per-conn` 切换为每封新连接。
 3. **认证缓存**：SmtpsFsm 内置 `LruCache`（TTL 5min，容量 10000），同一用户重复认证不查 DB。
 4. **持久化队列无锁化**：`boost::lockfree::queue` 替代 `deque + mutex + cv`，worker 指数退让避免空转。
-5. **日志级别**：INFO 级别下 spdlog 同步写 stdout 成为瓶颈（每封 5+ 条日志抢 mutex），压测时用 `warn`。
+5. **日志级别**：INFO 级下 spdlog 同步写 stdout 在高并发确有开销（每封 5+ 条日志抢同一把锁），压测仍建议 `warn`。但它不是吞吐天花板——DB 路径真正的热点是"TLS+阻塞 fd 使异步 DB 引擎退化成 io 线程同步执行"和"CPS 回调漏持连接导致 op 在飞归池"，均已于 2026-09-24 修复，详见 `test/bench/imap/REPORT.md` 第 6 节。
 6. **SMTP 命令流水线**：`do_async_read` 入口检查命令缓冲区，如有完整行优先解析（每轮 FSM 一个命令），全部处理完后再发起网络读。不完整命令自动等待下次 TCP 到达拼接。
 
 ## 当前出站热投递语义
