@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdexcept>
 #include <unistd.h>
@@ -1145,6 +1146,14 @@ void MariaDBConnection::AsyncStmtOp::run() {
 // 统一入口：构造 op（捕获 conn + sql + params + 完成回调），设 m_asyncInFlight
 // 守卫，然后 op->run() 驱动。finish 回调先清 in-flight 再跑用户回调——用户回调会
 // 继续 FSM 链，可能立刻在同一条连接上发起下一条查询（链式 CPS）。
+//
+// ⚠ 异步窗口必须持有 O_NONBLOCK：libmariadb 对支持 TLS 的服务端默认握手 TLS，
+// 连接随后落回阻塞模式，SSL_read 会在 *_start/*_cont 内部直接阻塞在 read() 上——
+// my_context 协程等不到 EAGAIN 无法挂起返回 WAIT_READ，async 整条链退化成同步
+// 执行且跑在调用线程上（慢 DB 下吞吐 = io 线程数 / 单查询 RTT，io 线程全被 DB
+// 等待钉死；bench/imap REPORT 2026-09-24 采样实锤）。 Conversely 同步 API
+// （pool 初始化脚本 / ping / 同步 query）在本构建 + TLS 下要求阻塞 fd，直接置
+// O_NONBLOCK 会报 "TLS/SSL error"——所以只在异步 op 期间开，done 里恢复。
 void MariaDBConnection::start_async_op(const std::shared_ptr<AsyncStmtOp>& op) {
     bool expected = false;
     if (!m_asyncInFlight.compare_exchange_strong(expected, true)) {
@@ -1154,7 +1163,27 @@ void MariaDBConnection::start_async_op(const std::shared_ptr<AsyncStmtOp>& op) {
         op->complete_fail();
         return;
     }
+    set_socket_nonblocking(true);
     op->run();
+}
+
+// 只在标志变化时发 fcntl，避免每次查询两笔无谓系统调用。
+bool MariaDBConnection::set_socket_nonblocking(bool on) {
+    auto& D = MariaDbDriver::instance();
+    if (!m_mysql || !D.mysql_get_socket) return false;
+    int fd = static_cast<int>(D.mysql_get_socket(m_mysql));
+    if (fd < 0) return false;
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return false;
+    bool is_on = (flags & O_NONBLOCK) != 0;
+    if (is_on == on) return true;
+    int want = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    if (::fcntl(fd, F_SETFL, want) != 0) {
+        LOG_DATABASE_WARN("MariaDB: fcntl O_NONBLOCK={} failed (fd={}): {}",
+                          on, fd, strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 void MariaDBConnection::async_query(const std::string& sql, QueryCallback cb) {
@@ -1176,9 +1205,12 @@ void MariaDBConnection::async_query(const std::string& sql,
     op->sql = sql;
     op->params = params;
     // done 只捕获 self（连接）和用户 cb，绝不捕获 op：op 持有 done，捕获 op 即循环。
+    // 恢复阻塞 fd 必须在用户 cb 之前——cb 可能链式发起下一条 async 查询，
+    // 那条 op 会在 start_async_op 里重新开非阻塞，先开后关会互相覆盖。
     op->done = [self = shared_from_this(), cb = std::move(cb)](
         std::shared_ptr<IDBResult> result, bool /*ok*/) {
         self->m_asyncInFlight.store(false, std::memory_order_release);
+        self->set_socket_nonblocking(false);
         if (cb) cb(result);
     };
     start_async_op(op);
@@ -1204,6 +1236,7 @@ void MariaDBConnection::async_execute(const std::string& sql,
     op->done = [self = shared_from_this(), cb = std::move(cb)](
         std::shared_ptr<IDBResult> /*result*/, bool ok) {
         self->m_asyncInFlight.store(false, std::memory_order_release);
+        self->set_socket_nonblocking(false);
         if (cb) cb(ok);
     };
     start_async_op(op);

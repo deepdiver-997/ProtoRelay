@@ -189,6 +189,9 @@ public:
     // 池 checkout 校验走它（替代 SELECT 1）——缓存 stmt 后 SELECT 1 不再干净。
     bool ping() override;
 
+    // 异步 op 在飞标志（池归还 tripwire 用，见 db_pool.h）。
+    bool async_in_flight() const override { return m_asyncInFlight.load(std::memory_order_acquire); }
+
 private:
     MYSQL* m_mysql;
     std::string m_host;
@@ -221,6 +224,11 @@ private:
     // 非阻塞状态机：op 结构体 + 驱动逻辑定义在 .cpp（不暴露到头文件）。
     struct AsyncStmtOp;
     void start_async_op(const std::shared_ptr<AsyncStmtOp>& op);
+
+    // 异步窗口的 fd 模式开关（仅在异步 op 期间 O_NONBLOCK，结束恢复阻塞）：
+    // TLS + 阻塞 fd 会让 *_start/*_cont 内部 SSL_read 直接阻塞（async 退化同步），
+    // 而 TLS + 常驻非阻塞 fd 又会让同步 API 报 "TLS/SSL error"——两头都要顾。
+    bool set_socket_nonblocking(bool on);
 };
 
 // ====================================================================
