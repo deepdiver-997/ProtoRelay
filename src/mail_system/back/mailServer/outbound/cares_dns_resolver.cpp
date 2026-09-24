@@ -113,15 +113,23 @@ void txt_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
     push_dns_metrics(ctx, status, "TXT");
     std::vector<std::string> records;
     if (status == ARES_SUCCESS && abuf && alen > 0) {
-        struct ares_txt_reply* reply = nullptr;
+        struct ares_txt_ext* reply = nullptr;
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-        if (ares_parse_txt_reply(abuf, alen, &reply) == ARES_SUCCESS && reply) {
-            for (auto* it = reply; it; it = it->next)
-                if (it->txt && it->length > 0)
+        // 必须用 ext 版本按 record_start 把同一 TXT 记录的多段 character-string
+        // 拼回一条：DKIM 2048 位公钥超 255 字节必然分多段存储，普通版逐段返回
+        // 会让 extract_dkim_pubkey 拿到截断的 p=，d2i_PUBKEY 静默失败
+        // （2026-09-25 入站 DKIM 对多段 key 全部 "no valid DKIM signature" 根因）。
+        if (ares_parse_txt_reply_ext(abuf, alen, &reply) == ARES_SUCCESS && reply) {
+            for (auto* it = reply; it; it = it->next) {
+                if (!it->txt || it->length == 0) continue;
+                if (it->record_start || records.empty())
                     records.emplace_back(reinterpret_cast<const char*>(it->txt), it->length);
+                else
+                    records.back().append(reinterpret_cast<const char*>(it->txt), it->length);
+            }
             ares_free_data(reply);
         }
 #if defined(__clang__)

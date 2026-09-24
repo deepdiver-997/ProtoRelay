@@ -1295,6 +1295,8 @@ void InboundVerifier::check_dkim_async(const std::string& raw_headers,
              cb, try_sig](std::vector<std::string> txt_records) mutable {
                 std::string pubkey_b64 = extract_dkim_pubkey(txt_records);
                 if (pubkey_b64.empty()) {
+                    LOG_INBOUND_WARN("DKIM: no public key in DNS for {} (records={})",
+                                     key_domain, txt_records.size());
                     if (result.reason.empty()) result.reason = "no DKIM public key found in DNS for " + key_domain;
                     (*try_sig)(idx + 1);
                     return;
@@ -1322,7 +1324,13 @@ void InboundVerifier::check_dkim_from_file_async(const std::string& raw_headers,
     DkimResult result;
     result.result = "none";
     auto sigs = parse_dkim_signatures(raw_headers);
-    if (sigs.empty()) { result.reason = "no DKIM-Signature header found"; cb(result); return; }
+    if (sigs.empty()) {
+        result.reason = "no DKIM-Signature header found";
+        LOG_INBOUND_WARN("DKIM verify skipped: {} (header_buffer={} bytes)",
+                         result.reason, raw_headers.size());
+        cb(result);
+        return;
+    }
 
     auto try_sig = std::make_shared<std::function<void(size_t)>>();
     *try_sig = [this, sigs, raw_headers, body_path, result,
@@ -1330,11 +1338,15 @@ void InboundVerifier::check_dkim_from_file_async(const std::string& raw_headers,
         if (idx >= sigs.size()) {
             if (result.result == "none") result.result = "fail";
             if (result.reason.empty()) result.reason = "no valid DKIM signature";
+            LOG_INBOUND_WARN("DKIM verify failed: {}", result.reason);
             cb(std::move(result));
             *try_sig = nullptr;
             return;
         }
         const auto& sig = sigs[idx];
+        LOG_INBOUND_DEBUG("DKIM sig#{}: alg='{}' d='{}' s='{}' h_count={} bh={}..",
+                          idx, sig.algorithm, sig.domain, sig.selector,
+                          sig.signed_headers.size(), sig.body_hash.substr(0, 8));
         if (sig.algorithm != "rsa-sha256") { (*try_sig)(idx + 1); return; }
 
         std::string computed_bh;
@@ -1358,6 +1370,8 @@ void InboundVerifier::check_dkim_from_file_async(const std::string& raw_headers,
              cb, try_sig](std::vector<std::string> txt_records) mutable {
                 std::string pubkey_b64 = extract_dkim_pubkey(txt_records);
                 if (pubkey_b64.empty()) {
+                    LOG_INBOUND_WARN("DKIM: no public key in DNS for {} (records={})",
+                                     key_domain, txt_records.size());
                     if (result.reason.empty()) result.reason = "no DKIM public key found in DNS for " + key_domain;
                     (*try_sig)(idx + 1);
                     return;
