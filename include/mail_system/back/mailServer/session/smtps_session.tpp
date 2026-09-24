@@ -529,8 +529,8 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
     }
 
     if (static_cast<SmtpsState>(state_.load(std::memory_order_acquire)) == SmtpsState::IN_MESSAGE) {
-        process_message_data(data);
-
+        // DATA 终结符检测/剥离先行：之后所有处理（multipart 引擎、正文落盘）
+        // 一律基于剥离后的 write_chunk，终结符行与流水线残余命令不再进引擎。
         bool data_end_seen = (trimmed == ".") || (data.find("\r\n.\r\n") != std::string::npos);
         std::string write_chunk = data;
         if (data_end_seen) {
@@ -547,31 +547,14 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
             }
         }
 
+        // multipart/附件引擎：喂终结符剥离后的数据（RFC 5321 §4.5.2 去点填充
+        // 在其行循环内做，覆盖流式附件与缓冲正文两条路）。
+        process_message_data(write_chunk);
+
         if (!write_chunk.empty()) {
-            // RFC 5321 dot-stuffing: strip one leading dot from each line
-            if (!context_.streaming_enabled) {
-                std::string unstuffed;
-                unstuffed.reserve(write_chunk.size());
-                size_t pos = 0;
-                while (pos < write_chunk.size()) {
-                    size_t nl = write_chunk.find("\r\n", pos);
-                    size_t line_end = (nl != std::string::npos) ? nl : write_chunk.size();
-                    size_t content = pos;
-                    if (content < line_end && write_chunk[content] == '.')
-                        content++;
-                    unstuffed.append(write_chunk, content, line_end - content);
-                    if (nl != std::string::npos) {
-                        unstuffed += "\r\n";
-                        pos = nl + 2;
-                    } else {
-                        break;
-                    }
-                }
-                write_chunk = std::move(unstuffed);
-            }
-            // 落盘前折叠超长行：给存储的原始报文单行长度设上界（≤2048 字节），
-            // 防止 BODY[HEADER]/POP3 RETR 等原始内容路径对弱缓冲客户端断连。
-            // 折叠器跨块携带半行，数据结束时须 flush()（见下方 data_end_seen）。
+            // 去点填充 + 落盘前折叠超长行（≤2048 字节，防止 BODY[HEADER]/POP3
+            // RETR 等原始内容路径对弱缓冲客户端断连）。两者都在折叠器内完成，
+            // 折叠器跨块携带半行，行级安全；数据结束时须 flush()（见下 data_end_seen）。
             write_chunk = body_line_folder_.feed(write_chunk);
             append_body_data(write_chunk.data(), write_chunk.size());
         }

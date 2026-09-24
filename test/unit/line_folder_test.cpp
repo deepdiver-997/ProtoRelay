@@ -1,8 +1,10 @@
-// LineFolder 单元测试 —— 入站正文超长行折叠（纯函数，零 I/O）
+// LineFolder 单元测试 —— 入站正文清洗：RFC 5321 §4.5.2 去点填充 + 超长行
+// RFC 5322 折叠（纯函数，零 I/O）
 //
-// 剧情：SMTP 入站正文落盘前，单行超过 2048 字节的行被 RFC 5322 折叠
-// （CRLF + 空格），防止 BODY[HEADER]/POP3 RETR 原始内容路径噎死弱缓冲
-// 客户端；其余字节流逐字直通。守卫 2026-09-05 之后加入的防御层。
+// 剧情：SMTP 入站正文落盘前，'.' 起始的行剥掉一个前导点（还原发件方
+// stuffing 前的字节——2026-09-25 入站 DKIM bh mismatch 事故根因）；
+// 单行超过 2048 字节的行被折叠（CRLF + 空格），防止 BODY[HEADER]/POP3
+// RETR 原始内容路径噎死弱缓冲客户端；无点行、非超长行逐字直通。
 
 #undef NDEBUG
 #include <cassert>
@@ -118,17 +120,17 @@ int main() {
         std::cout << "  [PASS] flush_carried_partial\n";
     }
 
-    // 6. 多行混合：一封"邮件"只有超长头被折叠，其余逐字不变
+    // 6. 多行混合：一封"邮件"只有超长头被折叠 + stuffed 行被还原
     {
         LineFolder f;
         std::string long_subject = "Subject: " + repeat("x", 5000);
-        std::string in = "From: a@b.c\r\n" + long_subject + "\r\nTo: t@x.y\r\n\r\n" + repeat("z", 100) + "\r\n.\r\n";
+        std::string in = "From: a@b.c\r\n" + long_subject + "\r\nTo: t@x.y\r\n\r\n" + repeat("z", 100) + "\r\n..stuffed\r\n";
         std::string out = f.feed(in) + f.flush();
         assert(out.substr(0, 13) == "From: a@b.c\r\n");
         assert(out.find("\r\n ") != std::string::npos);
-        assert(unfold(out) == in);
+        assert(out.find("\r\n.stuffed\r\n") != std::string::npos);  // "..stuffed" 还原为 ".stuffed"
         check_line_lengths("mixed_mail", out);
-        std::cout << "  [PASS] mixed_mail_only_long_lines_folded\n";
+        std::cout << "  [PASS] mixed_mail_fold_and_unstuff\n";
     }
 
     // 7. reset：丢弃携带的半行（对应 reset_mail_state 丢弃半途邮件）
@@ -138,6 +140,41 @@ int main() {
         f.reset();
         assert(f.flush().empty());
         std::cout << "  [PASS] reset_discards_carry\n";
+    }
+
+    // 8. 去点填充基础：'.' 起始行剥一个前导点，普通行不动
+    {
+        LineFolder f;
+        std::string out = f.feed("a\r\n..b\r\n.c\r\nd\r\n") + f.flush();
+        assert(out == "a\r\n.b\r\nc\r\nd\r\n");
+        std::cout << "  [PASS] unstuff_basic\n";
+    }
+
+    // 9. 去点填充跨块安全：stuffed 行 "..y" 恰好被 TCP 分块切成 ".." + "y\r\n"
+    //    （这是 2026-09-25 旧非流式实现的跨块 bug 场景）
+    {
+        LineFolder f;
+        std::string out = f.feed("x\r\n..") + f.feed("y\r\nz\r\n") + f.flush();
+        assert(out == "x\r\n.y\r\nz\r\n");
+        std::cout << "  [PASS] unstuff_chunk_boundary\n";
+    }
+
+    // 10. flush 路径同样去填充：结尾半行以 '.' 起始
+    {
+        LineFolder f;
+        std::string out = f.feed("...tail");   // 无 CRLF，半行被携带
+        assert(out.empty());
+        out += f.flush();
+        assert(out == "..tail");
+        std::cout << "  [PASS] unstuff_flush_partial\n";
+    }
+
+    // 11. 单点行（stuffed 空行）还原为空行
+    {
+        LineFolder f;
+        std::string out = f.feed("a\r\n.\r\nb\r\n") + f.flush();
+        assert(out == "a\r\n\r\nb\r\n");
+        std::cout << "  [PASS] unstuff_single_dot_line\n";
     }
 
     std::cout << "All LineFolder tests passed!\n";

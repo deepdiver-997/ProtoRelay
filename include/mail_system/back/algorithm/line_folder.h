@@ -7,8 +7,9 @@
 namespace mail_system {
 namespace algorithm {
 
-// 入站正文行折叠器 —— 落盘前对超长行做 RFC 5322 折叠，给存储的原始报文
-// 单行长度设上界（Postfix line_length_limit 同款防御）。
+// 入站正文行清洗器 —— 落盘前做两件事：RFC 5321 §4.5.2 接收侧去点填充、
+// 超长行按 RFC 5322 折叠（给存储的原始报文单行长度设上界，Postfix
+// line_length_limit 同款防御）。
 //
 // 为什么在 SMTP 入站做：IMAP BODY[]/BODY[HEADER.FIELDS]、POP3 RETR 返回的都是
 // 原始文件内容，DB 元数据的 subject 截断管不到这条路径；RFC 5322 的 998 字节
@@ -17,13 +18,17 @@ namespace algorithm {
 // 客户端/下游解析器）。
 //
 // 语义：
-//   - 仅折叠超过 kMaxStorageLineBytes 的行，其余字节逐字直通 —— 正常邮件零改动。
+//   - 去点填充：剥掉 '.' 起始行的一个前导点（还原发件方 stuffing 前的字节）。
+//     不做这步，入站 DKIM 的 bh 对 multipart 邮件（含 '.' 行）必然失配 ——
+//     2026-09-25 ollama.com/amazonses.com bh mismatch 事故根因。
+//   - 仅折叠超过 kMaxStorageLineBytes 的行，其余字节逐字直通 —— 无点行邮件零改动。
 //   - 折叠 = 在限内 UTF-8 字符边界处插入 CRLF + 单空格（RFC 5322 头折叠格式）。
 //     按协议 unfold（删 CRLF 保留 WSP）后值里会多一个空格，仅出现在原本就
 //     超长的行里；对 base64 正文解码无影响（解码器忽略空白）。
 //     已知取舍：折叠点若落在 MIME encoded-word 中间可能破坏该头解码 ——
 //     但不折叠的后果是整个邮件无法解析，两害取其轻。
 //   - feed() 可跨块携带尾部半行（TCP 分块不保证行对齐）；数据结束必须 flush()。
+//     去点填充在行重组完成后进行，跨块 stuffed 行（如块边界落在 ".." 中间）安全。
 class LineFolder {
 public:
     static constexpr std::size_t kMaxStorageLineBytes = 2048;
@@ -38,7 +43,9 @@ public:
         while (true) {
             const std::size_t nl = carry_.find("\r\n", pos);
             if (nl == std::string::npos) break;
-            append_folded(out, std::string_view(carry_).substr(pos, nl - pos));
+            std::string_view line = std::string_view(carry_).substr(pos, nl - pos);
+            unstuff_dot(line);
+            append_folded(out, line);
             out += "\r\n";
             pos = nl + 2;
         }
@@ -48,16 +55,24 @@ public:
 
     std::string feed(const std::string& s) { return feed(s.data(), s.size()); }
 
-    // 数据结束：冲出携带的半行（同样按限折叠，无结尾 CRLF）。
+    // 数据结束：冲出携带的半行（同样去点填充、按限折叠，无结尾 CRLF）。
     std::string flush() {
         if (carry_.empty()) return {};
         std::string out;
-        append_folded(out, carry_);
+        std::string_view line = carry_;
+        unstuff_dot(line);
+        append_folded(out, line);
         carry_.clear();
         return out;
     }
 
     void reset() { carry_.clear(); }
+
+private:
+    // RFC 5321 §4.5.2 接收侧：'.' 起始的行剥掉一个前导点。
+    static void unstuff_dot(std::string_view& line) {
+        if (!line.empty() && line.front() == '.') line.remove_prefix(1);
+    }
 
 private:
     // 单行内容超限时逐段折叠；首段预算 kMax，后续段含前导折叠空格预算 kMax-1，

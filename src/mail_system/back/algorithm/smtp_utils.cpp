@@ -293,6 +293,12 @@ void process_message_data(SmtpsContext& ctx, const std::string& data) {
             continue;
         }
 
+        // RFC 5321 §4.5.2 接收侧去点填充：正文行以 '.' 起始是发件方 stuffing 的
+        // 结果，multipart 分发（流式附件/text buffer）与缓冲正文都必须还原。
+        // 此前只覆盖非流式落盘路径，multipart 邮件整条流带着 stuffed 字节 ——
+        // 2026-09-25 入站 DKIM bh mismatch（ollama.com/amazonses.com）根因。
+        if (!line.empty() && line[0] == '.') line.erase(0, 1);
+
         if (ctx.streaming_enabled) {
             LOG_SESSION_DEBUG("Processing body line (streaming): [{}]", line.substr(0, 60));
             handle_multipart_line(ctx, line);
