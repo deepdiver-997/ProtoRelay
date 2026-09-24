@@ -265,10 +265,22 @@ void TcpServerBase<TcpSession, SslSession>::handoff_starttls_socket(
     std::unique_ptr<boost::asio::ip::tcp::socket>&& socket, std::string trace)
 {
     if (!socket) return;
+    // STARTTLS 升级出的 TLS 会话必须继承监听器真实配置。此前传 ListenerConfig{}
+    // 默认值：587 这类提交端口升级后 auth_policy 退化成 OFF，EHLO 不再通告
+    // AUTH（465 原生 TLS 会话不受影响），MAIL FROM 的 require_auth 判定同样失真。
+    ListenerConfig lc;
+    {
+        boost::system::error_code ec;
+        auto local = socket->local_endpoint(ec);
+        if (!ec) {
+            if (auto it = m_listener_configs.find(local.port()); it != m_listener_configs.end())
+                lc = it->second;
+        }
+    }
     auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
         std::move(*socket), get_ssl_context());
     auto conn = std::make_unique<SslConnection>(std::move(ssl_stream));
-    auto session = make_ssl_session(std::move(conn), ListenerConfig{});
+    auto session = make_ssl_session(std::move(conn), lc);
     if (session) {
         increment_connection_count();
         session->set_tracks_connection_count(true);
