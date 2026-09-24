@@ -1195,7 +1195,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
                     const bool ok = verify_password(password, stored);
                     if (ok) {
                         (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                                               [cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
+                                               [conn, cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
                     } else {
                         cb(false, 0);
                     }
@@ -1289,7 +1289,7 @@ void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
             }
             // 同一连接读 ROW_COUNT()：1 = 占用成功，0 = 配额已超
             (*conn)->async_query(db::sql::build_select_row_count(),
-                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
                     size_t affected = 0;
                     if (r && r->get_row_count() > 0) {
                         try { affected = static_cast<size_t>(std::stoull(r->get_value(0, "affected"))); }

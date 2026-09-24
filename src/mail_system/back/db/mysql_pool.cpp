@@ -356,6 +356,15 @@ void MySQLPool::release_connection(std::shared_ptr<IDBConnection> connection) {
     // 查找连接包装器
     for (auto& wrapper : m_connections) {
         if (wrapper->connection == connection) {
+            // tripwire：op 还在飞就归池 = 某条链的回调漏捕了 ScopedConnection，
+            // 这条连接马上会被借给下一个使用者（协议串号/UAF）。
+            // 正常链的 done 会先清 in-flight 再跑回调，不该走到这里。
+            if (connection->async_in_flight()) {
+                LOG_DATABASE_ERROR(
+                    "MySQLPool::release_connection: async op still in flight on connection {} "
+                    "—— 回调漏捕 ScopedConnection（连接在飞归池）",
+                    (void*)connection.get());
+            }
             wrapper->in_use = false;
             wrapper->last_used = std::chrono::steady_clock::now();
             m_availableConnections.push(wrapper);

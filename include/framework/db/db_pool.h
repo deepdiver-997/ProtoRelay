@@ -55,6 +55,11 @@ public:
         return query("SELECT 1") != nullptr;
     }
 
+    // 异步 op 是否仍在飞（CPS 链未跑完）。连接池归还被用作 tripwire：
+    // 归还时若仍 in-flight，说明某条链的回调漏捕了 ScopedConnection
+    // （op 在飞时连接被提前还池再借出 = 两链同抢一条连接，协议必然串号）。
+    virtual bool async_in_flight() const { return false; }
+
     // Async wrappers with default sync impl
     virtual void async_query(const std::string& sql, QueryCallback cb) {
         if (cb) cb(query(sql));

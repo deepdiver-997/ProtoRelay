@@ -145,7 +145,7 @@ void TraditionalPop3Fsm<ConnectionType>::auth_user_async(
             }
             if (ok) {
                 (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                    [cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
+                    [conn, cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
             } else {
                 cb(false, 0, shard);
             }
@@ -208,7 +208,8 @@ void TraditionalPop3Fsm<ConnectionType>::acquire_lock_async(
                 "SELECT COUNT(*) as cnt FROM pop3_session_lock "
                 "WHERE user_id = ? AND session_id = ?",
                 {std::to_string(user_id), session_id},
-                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                // ⚠ 持 conn：漏捕 = op 在飞时连接提前归池（bench/imap REPORT 2026-09-24）
+                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
                     cb(r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0);
                 });
         });
@@ -223,7 +224,7 @@ void TraditionalPop3Fsm<ConnectionType>::release_lock_async(
     (*conn)->async_execute(
         "DELETE FROM pop3_session_lock WHERE user_id = ? AND session_id = ?",
         {std::to_string(user_id), session_id},
-        [cb = std::move(cb)](bool) mutable { if (cb) cb(); });
+        [conn, cb = std::move(cb)](bool) mutable { if (cb) cb(); });
 }
 
 template <typename ConnectionType>
@@ -251,7 +252,7 @@ void TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat_async(
                 "SELECT COUNT(*) as cnt FROM pop3_session_lock "
                 "WHERE user_id = ? AND session_id = ?",
                 {std::to_string(user_id), session_id},
-                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
                     cb(r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0);
                 });
         });
@@ -374,7 +375,7 @@ void TraditionalPop3Fsm<ConnectionType>::apply_deletions_async(
         [conn, mailbox_id, user_id, cb = std::move(cb)](bool) mutable {
             (*conn)->async_execute(db::sql::build_imap_expunge_delete_mailbox(),
                 {std::to_string(mailbox_id), std::to_string(user_id)},
-                [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+                [conn, cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
         });
 }
 

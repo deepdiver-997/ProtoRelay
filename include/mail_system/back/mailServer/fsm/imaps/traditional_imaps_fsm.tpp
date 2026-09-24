@@ -1634,7 +1634,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
     session->set_paused(true);
     (*conn)->async_execute(db::sql::build_imap_create_mailbox(),
                         {std::to_string(ctx->user_id), mailbox_name},
-                        [session, tag](bool ok) {
+                        // ⚠ 回调必须持 conn：不持则 handle_* 返回即 ScopedConnection
+                        // 析构归池，op 在飞时连接被他人借走（协议串号/UAF，见
+                        // bench/imap REPORT 2026-09-24）。下同，全文件同规约。
+                        [session, tag, conn](bool ok) {
                             if (ok) send_tagged(session, tag, "OK", "CREATE completed");
                             else send_tagged(session, tag, "NO", "CREATE failed (maybe already exists)");
                             session->drain_buffered_commands();
@@ -1701,7 +1704,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
                                                                 (*conn)->async_execute(
                                                                     db::sql::build_imap_delete_mailbox(),
                                                                     {std::to_string(mailbox_id)},
-                                                                    [self, tag = std::move(tag), ok1](bool ok2) {
+                                                                    [self, conn, tag = std::move(tag), ok1](bool ok2) {
                                                                         if (ok1 && ok2)
                                                                             send_tagged(self, tag, "OK", "DELETE completed");
                                                                         else
@@ -1774,7 +1777,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
             }
             (*conn)->async_execute(db::sql::build_imap_rename_mailbox(),
                                    {new_name, std::to_string(mailbox_id)},
-                                   [self, tag = std::move(tag)](bool ok) {
+                                   [self, conn, tag = std::move(tag)](bool ok) {
                                        if (ok) send_tagged(self, tag, "OK", "RENAME completed");
                                        else send_tagged(self, tag, "NO", "RENAME failed");
                                        self->drain_buffered_commands();
@@ -2506,7 +2509,7 @@ void TraditionalImapsFsm<ConnectionType>::auth_user_async(
             }
             if (ok) {
                 (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                    [cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
+                    [conn, cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
             } else {
                 cb(false, 0, shard);
             }
@@ -2557,7 +2560,7 @@ void TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
             if (upper != "INBOX") { cb(0); return; }
             (*conn)->async_query(db::sql::build_imap_get_inbox_id(),
                 {std::to_string(user_id)},
-                [cb = std::move(cb)](std::shared_ptr<IDBResult> r2) mutable {
+                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r2) mutable {
                     if (r2 && r2->get_row_count() > 0) cb(safe_stoull(r2->get_value(0, "id")));
                     else cb(0);
                 });
@@ -2727,7 +2730,7 @@ void TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox_async(
                 "INSERT INTO mail_mailbox (mail_id, mailbox_id, user_id, is_starred, "
                 "is_important, is_deleted, add_time) VALUES (?, ?, ?, 0, 0, 0, NOW())",
                 {std::to_string(mail_id), std::to_string(mailbox_id), std::to_string(user_id)},
-                [cb = std::move(cb)](bool ok2) mutable { cb(ok2); });
+                [conn, cb = std::move(cb)](bool ok2) mutable { cb(ok2); });
         });
 }
 
@@ -2863,7 +2866,9 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_uidnext_async(
         [conn, mailbox_id, cb = std::move(cb)](bool) mutable {
             (*conn)->async_query(db::sql::build_imap_uidnext_read(),
                 {std::to_string(mailbox_id)},
-                [cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+                // ⚠ 持 conn：外层回调返回后链上只剩此捕获撑住 ScopedConnection，
+                // 漏捕 = advance 查询完成瞬间连接带飞归池（2026-09-24 crash 根因）
+                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
                     if (result && result->get_row_count() > 0)
                         cb(safe_stoull(result->get_value(0, "uidnext")));
                     else cb(1);
@@ -2883,7 +2888,7 @@ void TraditionalImapsFsm<ConnectionType>::batch_mark_seen_async(
     std::string sql = "UPDATE mail_recipients SET status = " + std::to_string(status)
         + " WHERE mail_id IN (" + join_mail_ids(mail_ids) + ")"
         + " AND recipient = '" + (*conn)->escape_string(recipient) + "'";
-    (*conn)->async_execute(sql, [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+    (*conn)->async_execute(sql, [conn, cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
 }
 
 template <typename ConnectionType>
@@ -2897,7 +2902,7 @@ void TraditionalImapsFsm<ConnectionType>::batch_mark_deleted_async(
         + " WHERE mail_id IN (" + join_mail_ids(mail_ids) + ")"
         + " AND user_id = " + std::to_string(user_id)
         + " AND mailbox_id = " + std::to_string(mailbox_id);
-    (*conn)->async_execute(sql, [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+    (*conn)->async_execute(sql, [conn, cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
 }
 
 template <typename ConnectionType>
@@ -2911,7 +2916,7 @@ void TraditionalImapsFsm<ConnectionType>::batch_mark_flagged_async(
         + " WHERE mail_id IN (" + join_mail_ids(mail_ids) + ")"
         + " AND user_id = " + std::to_string(user_id)
         + " AND mailbox_id = " + std::to_string(mailbox_id);
-    (*conn)->async_execute(sql, [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+    (*conn)->async_execute(sql, [conn, cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
 }
 
 template <typename ConnectionType>
@@ -2922,7 +2927,7 @@ void TraditionalImapsFsm<ConnectionType>::expunge_mailbox_async(
     if (!conn || !conn->is_valid()) { if (cb) cb(false); return; }
     (*conn)->async_execute(db::sql::build_imap_expunge_delete_mailbox(),
         {std::to_string(mailbox_id), std::to_string(user_id)},
-        [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+        [conn, cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
 }
 
 // ---------- COPY/MOVE 批量 ----------
@@ -2952,7 +2957,7 @@ void TraditionalImapsFsm<ConnectionType>::batch_insert_mailbox_async(
         [conn, cb = std::move(cb)](bool ok) mutable {
             if (!ok) { if (cb) cb(0); return; }
             (*conn)->async_query(db::sql::build_select_row_count(),
-                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
                     size_t copied = (r && r->get_row_count() > 0)
                         ? static_cast<size_t>(safe_stoull(r->get_value(0, "affected"))) : 0;
                     cb(copied);
@@ -2971,7 +2976,7 @@ void TraditionalImapsFsm<ConnectionType>::batch_mark_move_deleted_async(
         " WHERE mail_id IN (" + join_mail_ids(mail_ids) + ")"
         + " AND user_id = " + std::to_string(user_id)
         + " AND mailbox_id = " + std::to_string(source_mailbox_id);
-    (*conn)->async_execute(sql, [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+    (*conn)->async_execute(sql, [conn, cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
 }
 
 } // namespace mail_system
