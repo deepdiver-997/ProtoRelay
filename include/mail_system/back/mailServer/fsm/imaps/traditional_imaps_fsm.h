@@ -37,10 +37,30 @@
 
 namespace mail_system {
 
+// FETCH 邮箱列表缓存条目。⚠ 必须在命名空间级（不能嵌在 FSM 模板里）：
+// TCP/SSL 两个模板实例的 MailboxListCache 得是同一个类型，imaps_server 才能
+// 共享一份实例——否则一边的写命令失效不了另一边的缓存。
+// 失效语义（三层）：
+//   1. 写命令显式失效——STORE/EXPUNGE/COPY/MOVE/APPEND/DELETE 完成时按
+//      (user, mailbox) 精确失效（flags 变化与删信不推进 uidnext，必须显式）；
+//   2. TTL 兜底——跨节点/跨协议（SMTP 投递、POP3 DELE）改库本进程看不到，
+//      靠 TTL 过期回源，新邮件可见性延迟 ≤ TTL；
+//   3. 大列表跳过——超上限的邮箱不缓存（单条可到 MB 级，防 LRU 被撑爆）。
+struct MailboxListEntry {
+    std::vector<MailboxMailInfo> mails;
+};
+
 template <typename ConnectionType>
 class TraditionalImapsFsm : public FsmBase<ConnectionType, ImapState, ImapEvent> {
 public:
     using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
+    using MailboxListCache = LruCache<std::string, MailboxListEntry>;
+
+    // 列表缓存的容量/单列表邮件数上限/TTL（imaps_server 按此配置注入）
+    static constexpr size_t kMailboxListCacheCapacity = 2048;
+    static constexpr size_t kMailboxListCacheMaxMails = 1000;
+    static constexpr std::chrono::seconds kMailboxListCacheTtl{2};
+
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
 
 protected:
@@ -48,6 +68,7 @@ protected:
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
+    std::shared_ptr<MailboxListCache> m_mailboxListCache;
     // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
     // 在途，其余并发 SELECT 挂到等待列表上（owner 完成后统一通知），防缓存
     // miss/stale 时 N 个连接各自查库打爆数据库。
@@ -73,6 +94,12 @@ public:
 
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
+
+    void set_mailbox_list_cache(std::shared_ptr<MailboxListCache> cache) { m_mailboxListCache = cache; }
+    std::shared_ptr<MailboxListCache> get_mailbox_list_cache() const { return m_mailboxListCache; }
+
+    // 写命令完成后调用：精确失效 (user, mailbox) 的列表缓存（未注入缓存时空操作）
+    void invalidate_mailbox_list(uint64_t user_id, uint64_t mailbox_id);
 
     std::shared_ptr<ScopedConnection> acquire_connection(int shard) {
         auto pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
@@ -294,6 +321,12 @@ private:
     void handle_status(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_fetch(std::shared_ptr<SessionBase<ConnectionType>> session,
                       bool is_uid = false);
+    // 拿到邮件列表后的 FETCH 组装/驱动（DB 慢路径回调与列表缓存快路径共用）。
+    // 原为 handle_fetch 回调体内联代码，提取成函数让缓存命中路径零改动复用。
+    void fetch_from_mails(std::shared_ptr<SessionBase<ConnectionType>> session,
+                          std::string tag, bool is_uid,
+                          std::string seq_set, std::string attrs,
+                          std::vector<MailboxMailInfo> mails);
 
     // FETCH 的续作链状态与驱动器（定义在 .tpp）。读取走 provider 的
     // async 接口：本地内联，远程后端由装饰器投递到 worker —— 逐封

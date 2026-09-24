@@ -305,3 +305,43 @@ ASan 构建 4 轮混合压测 0 报告、tripwire 0 触发。
 **复现环境**：`/tmp/imapbench/`（imapsConfig + db_config + 5ms/chunk 线程版
 延迟代理 `delay_proxy.py 3307 127.0.0.1 3306 5`）。压测前先看
 `performance_schema.threads` 的 connection_type——TLS 是本问题的前提条件。
+
+### 7. 邮箱列表内存索引——读路径甩掉最后一条查询（2026-09-24）
+
+> §6 兑现真异步后，每轮热路径只剩一条 DB 查询：FETCH 的 `get_mailbox_mails`
+> （200 行列表）。给它加 LRU 内存索引后，读路径在缓存命中时**零查询**。
+
+**设计**（`MailboxListCache`，`traditional_imaps_fsm.h`）：
+
+- 键 `(user_id, mailbox_id)`，值 = 完整邮件列表；TTL 2s、容量 2048、
+  单列表 >1000 封不缓存（防大邮箱撑爆 LRU）。
+- **失效三层**：① 写命令显式失效——STORE/EXPUNGE/COPY/MOVE/APPEND/DELETE
+  完成回调里按 (user, mailbox) 精确失效（flags 变化与删信不推进 uidnext，
+  必须显式）；② TTL 兜底跨节点/跨协议改库（SMTP 投递、POP3 DELE）——
+  新邮件可见性延迟 ≤ TTL；③ TCP/SSL 两个 FSM 共享同一实例（imaps_server
+  注入），否则一边失效另一边看不见。Entry 必须放命名空间级——嵌进模板则
+  两个实例的缓存类型不同，无法共享。
+- FETCH 快路径无 DB 段，不 pause（fetch_finalize 自带 drain + 续读）；
+  慢路径查完回填。缓存未注入时自动退化为每次查库（旧行为）。
+
+**顺带修掉 APPEND 的预存 bug**：`build_imap_append_mail_metadata` 把 epoch
+整数裸绑给 DATETIME 列，STRICT_TRANS_TABLES 下必报 `Incorrect datetime
+value`（SMTP 路径的 build_insert_mail 一直用 FROM_UNIXTIME，唯独这条漏了）。
+改 `FROM_UNIXTIME(?)`。
+
+**结果**：
+
+| 场景 | §6 修复后 | + 列表缓存 |
+|------|----------|-----------|
+| 本地 DB，4 io，c=16 | 1736 rps / P50 8.7ms | **5559 rps / P50 2.4ms** |
+| 慢 DB，4 io，c=16 | 704 rps / P50 21ms | **4560 rps / P50 2.5ms** |
+| 慢 DB，4 io，c=64（池 32） | 1333 rps | **5294 rps** |
+| 慢 DB Queries/3200 轮 | ~3240 | **36**（登录 + TTL 刷新） |
+
+慢 DB 与本地 DB 的读路径差距消失——DB 不再出现在 IMAP 读路径的瓶颈名单里，
+上限回到 200 次 storage stat + 响应组装。
+
+**一致性验证**（`/tmp/imapbench/test_cache_coherence.py`，ASan 构建同跑）：
+外部直插 DB（模拟 SMTP 投递）TTL 后自愈可见 ✓；进程内 APPEND 立即可见 ✓；
+STORE \Deleted FLAGS 立即可见 ✓；EXPUNGE 立即摘除 ✓。
+ctest 24/24；ASan 压测 0 报告、tripwire 0 触发。

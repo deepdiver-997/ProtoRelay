@@ -851,7 +851,23 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         }
     }
 
-    // 读路径 DB 查询走 CPS 链：查完在回调里继续组装 FETCH。
+    uint64_t mailbox_id = ctx->selected_mailbox_id;
+    uint64_t user_id = ctx->user_id;
+
+    // 读路径快表：列表缓存命中（TTL 内且未被写命令失效）→ 整个 FETCH 免查库。
+    // 无 DB 段所以无需 pause；fetch_finalize 自带 drain + 续读，与非 pause 兼容。
+    // 失效语义见 MailboxListCache 注释（写命令显式失效 + TTL 兜底）。
+    if (m_mailboxListCache) {
+        MailboxListEntry lentry;
+        bool lstale = false;
+        if (m_mailboxListCache->get(mbox_cache_key(user_id, mailbox_id), lentry, lstale) && !lstale) {
+            fetch_from_mails(session, std::move(tag), is_uid,
+                             std::move(seq_set), std::move(attrs), std::move(lentry.mails));
+            return;
+        }
+    }
+
+    // 读路径 DB 查询走 CPS 链：查完在回调里继续组装 FETCH，并回填列表缓存。
     auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
@@ -859,13 +875,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     }
     session->set_paused(true);
     auto self = session->shared_from_this();
-    uint64_t mailbox_id = ctx->selected_mailbox_id;
-    uint64_t user_id = ctx->user_id;
 
     TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
         conn, mailbox_id, user_id,
-        [self, tag = std::move(tag), is_uid,
-         seq_set = std::move(seq_set), attrs = std::move(attrs)](
+        [this, self, conn, tag = std::move(tag), is_uid,
+         seq_set = std::move(seq_set), attrs = std::move(attrs),
+         mailbox_id, user_id](
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok || mails.empty()) {
@@ -873,79 +888,108 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
                 self->drain_buffered_commands();
                 return;
             }
-
-            std::transform(attrs.begin(), attrs.end(), attrs.begin(), ::toupper);
-
-            bool want_uid = is_uid || attrs.find("UID") != std::string::npos;
-            bool want_flags = attrs.find("FLAGS") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
-            bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
-            bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
-            bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
-            bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
-            bool has_header_fields = attrs.find("HEADER.FIELDS") != std::string::npos;
-            bool want_body_header = has_header_fields ||
-                attrs.find("BODY.PEEK[HEADER]") != std::string::npos ||
-                attrs.find("BODY[HEADER]") != std::string::npos;
-            std::string header_fields_filter;
-            bool header_fields_not = false;
-            if (has_header_fields) {
-                header_fields_not = attrs.find("HEADER.FIELDS.NOT") != std::string::npos;
-                size_t lp = attrs.find('(', attrs.find("HEADER.FIELDS"));
-                if (lp != std::string::npos) {
-                    size_t rp = attrs.find(')', lp);
-                    if (rp != std::string::npos)
-                        header_fields_filter = attrs.substr(lp + 1, rp - lp - 1);
-                }
+            // 回填列表缓存：TTL + 写命令显式失效保证一致性；大列表不缓存
+            //（单条 MB 级会撑爆 LRU），超大邮箱维持每轮查库。
+            if (m_mailboxListCache && mails.size() <= kMailboxListCacheMaxMails) {
+                m_mailboxListCache->put(mbox_cache_key(user_id, mailbox_id),
+                                        MailboxListEntry{mails});
             }
-            int body_part_num = 0;
-            {
-                auto bracket = attrs.find('[');
-                if (bracket != std::string::npos) {
-                    auto close = attrs.find(']', bracket);
-                    if (close != std::string::npos) {
-                        std::string num_str = attrs.substr(bracket + 1, close - bracket - 1);
-                        bool all_digits = !num_str.empty();
-                        for (char c : num_str) if (c < '0' || c > '9') { all_digits = false; break; }
-                        if (all_digits) body_part_num = std::stoi(num_str);
-                    }
-                }
-            }
-            bool want_body_part = (body_part_num > 0);
-            if (want_body_part) want_body = true;
-            bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
-
-            std::vector<std::pair<uint64_t, uint64_t>> ranges;
-            expand_seq_set(seq_set, mails.size(), ranges);
-            if (ranges.empty()) {
-                send_tagged(self, tag, "OK", "FETCH completed");
-                self->drain_buffered_commands();
-                return;
-            }
-
-            auto state = std::make_shared<FetchContext>();
-            state->tag = tag;
-            state->mails = std::move(mails);
-            state->ranges = std::move(ranges);
-            state->want_uid = want_uid;
-            state->want_flags = want_flags;
-            state->want_internaldate = want_internaldate;
-            state->want_rfc822_size = want_rfc822_size;
-            state->want_envelope = want_envelope;
-            state->want_body = want_body;
-            state->want_body_header = want_body_header;
-            state->want_body_struct = want_body_struct;
-            state->has_header_fields = has_header_fields;
-            state->header_fields_not = header_fields_not;
-            state->header_fields_filter = std::move(header_fields_filter);
-            state->body_part_num = body_part_num;
-            auto* srv = self->get_server();
-            state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
-
-            // 正文读取走 async：本地内联（行为与同步版一致），远程后端由装饰器
-            // 投递 worker —— 逐封 size/正文不再阻塞 io 线程；每封正文只读一次，
-            // header/body/BODYSTRUCTURE 兜底共用（旧路径最多读三次）。
-            fetch_drive(self, state);
+            fetch_from_mails(self, std::move(tag), is_uid,
+                             std::move(seq_set), std::move(attrs), std::move(mails));
         });
+}
+
+// DB 慢路径回调与列表缓存快路径共用的 FETCH 组装/驱动（原 handle_fetch 回调体）。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::string tag, bool is_uid,
+    std::string seq_set, std::string attrs,
+    std::vector<MailboxMailInfo> mails)
+{
+    auto self = session;
+    std::transform(attrs.begin(), attrs.end(), attrs.begin(), ::toupper);
+
+    bool want_uid = is_uid || attrs.find("UID") != std::string::npos;
+    bool want_flags = attrs.find("FLAGS") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
+    bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
+    bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
+    bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
+    bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
+    bool has_header_fields = attrs.find("HEADER.FIELDS") != std::string::npos;
+    bool want_body_header = has_header_fields ||
+        attrs.find("BODY.PEEK[HEADER]") != std::string::npos ||
+        attrs.find("BODY[HEADER]") != std::string::npos;
+    std::string header_fields_filter;
+    bool header_fields_not = false;
+    if (has_header_fields) {
+        header_fields_not = attrs.find("HEADER.FIELDS.NOT") != std::string::npos;
+        size_t lp = attrs.find('(', attrs.find("HEADER.FIELDS"));
+        if (lp != std::string::npos) {
+            size_t rp = attrs.find(')', lp);
+            if (rp != std::string::npos)
+                header_fields_filter = attrs.substr(lp + 1, rp - lp - 1);
+        }
+    }
+    int body_part_num = 0;
+    {
+        auto bracket = attrs.find('[');
+        if (bracket != std::string::npos) {
+            auto close = attrs.find(']', bracket);
+            if (close != std::string::npos) {
+                std::string num_str = attrs.substr(bracket + 1, close - bracket);
+                bool all_digits = !num_str.empty();
+                for (char c : num_str) if (c < '0' || c > '9') { all_digits = false; break; }
+                if (all_digits) body_part_num = std::stoi(num_str);
+            }
+        }
+    }
+    bool want_body_part = (body_part_num > 0);
+    if (want_body_part) want_body = true;
+    bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
+
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    expand_seq_set(seq_set, mails.size(), ranges);
+    if (ranges.empty()) {
+        send_tagged(self, tag, "OK", "FETCH completed");
+        self->drain_buffered_commands();
+        return;
+    }
+
+    auto state = std::make_shared<FetchContext>();
+    state->tag = tag;
+    state->mails = std::move(mails);
+    state->ranges = std::move(ranges);
+    state->want_uid = want_uid;
+    state->want_flags = want_flags;
+    state->want_internaldate = want_internaldate;
+    state->want_rfc822_size = want_rfc822_size;
+    state->want_envelope = want_envelope;
+    state->want_body = want_body;
+    state->want_body_header = want_body_header;
+    state->want_body_struct = want_body_struct;
+    state->has_header_fields = has_header_fields;
+    state->header_fields_not = header_fields_not;
+    state->header_fields_filter = std::move(header_fields_filter);
+    state->body_part_num = body_part_num;
+    auto* srv = self->get_server();
+    state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
+
+    // 正文读取走 async：本地内联（行为与同步版一致），远程后端由装饰器
+    // 投递 worker —— 逐封 size/正文不再阻塞 io 线程；每封正文只读一次，
+    // header/body/BODYSTRUCTURE 兜底共用（旧路径最多读三次）。
+    fetch_drive(self, state);
+}
+
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::invalidate_mailbox_list(
+    uint64_t user_id, uint64_t mailbox_id)
+{
+    // flags 变化与删信都不推进 uidnext，列表缓存只能靠写命令显式失效保一致；
+    // TTL 只兜跨节点/跨协议改库（SMTP 投递、POP3 DELE）的底。
+    if (m_mailboxListCache) {
+        m_mailboxListCache->invalidate(mbox_cache_key(user_id, mailbox_id));
+    }
 }
 
 // ---------- FETCH 续作链 ----------
@@ -1434,10 +1478,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
                                  steps = std::move(steps), mailbox_id, user_id,
                                  run_next](size_t i) mutable {
                         if (i >= steps.size()) {
-                            // 全部批量完成：失效统计缓存，回包
+                            // 全部批量完成：失效统计缓存与列表缓存，回包
                             if (this->m_mailboxStatsCache) {
                                 this->m_mailboxStatsCache->invalidate(mbox_cache_key(user_id, mailbox_id));
                             }
+                            this->invalidate_mailbox_list(user_id, mailbox_id);
                             response += tag + " OK STORE completed\r\n";
                             self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
                             self->drain_buffered_commands();
@@ -1476,7 +1521,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
 
     TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
         conn, mailbox_id, user_id,
-        [self, conn, tag = std::move(tag), mailbox_id, user_id](
+        [this, self, conn, tag = std::move(tag), mailbox_id, user_id](
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
@@ -1496,8 +1541,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
             // Actually delete from database
             TraditionalImapsFsm<ConnectionType>::expunge_mailbox_async(
                 conn, mailbox_id, user_id,
-                [self, tag = std::move(tag), expunged_seqs = std::move(expunged_seqs)](bool) {
+                [this, self, tag = std::move(tag), expunged_seqs = std::move(expunged_seqs),
+                 mailbox_id, user_id](bool) {
                     if (!self || self->is_closed()) return;
+                    this->invalidate_mailbox_list(user_id, mailbox_id);
                     std::string response;
                     for (auto seq : expunged_seqs) {
                         response += "* " + std::to_string(seq) + " EXPUNGE\r\n";
@@ -1541,8 +1588,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
             uint64_t user_id = ctx->user_id;
             TraditionalImapsFsm<ConnectionType>::expunge_mailbox_async(
                 conn, mailbox_id, user_id,
-                [self, finish](bool) {
+                [this, self, finish, mailbox_id, user_id](bool) {
                     if (!self || self->is_closed()) return;
+                    this->invalidate_mailbox_list(user_id, mailbox_id);
                     finish([self]() { self->drain_buffered_commands(); });
                 });
             return;
@@ -1677,7 +1725,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
     // CPS 链：找邮箱 id → 系统邮箱检查 → 删消息 → 删邮箱
     TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
         conn, user_id, mailbox_name,
-        [self, conn, tag = std::move(tag)](uint64_t mailbox_id) mutable {
+        [this, self, conn, tag = std::move(tag), user_id](uint64_t mailbox_id) mutable {
             if (!self || self->is_closed()) return;
             if (mailbox_id == 0) {
                 send_tagged(self, tag, "NO", "Mailbox not found");
@@ -1688,7 +1736,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
             // Check if it's a system mailbox
             (*conn)->async_query(db::sql::build_imap_check_mailbox_is_system(),
                                  {std::to_string(mailbox_id)},
-                                 [self, conn, tag = std::move(tag), mailbox_id]
+                                 [this, self, conn, tag = std::move(tag), mailbox_id, user_id]
                                  (std::shared_ptr<IDBResult> result) mutable {
                                      if (result && result->get_row_count() > 0 &&
                                          result->get_value(0, "is_system") == "1") {
@@ -1699,12 +1747,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
                                      // 删除消息 + 删除邮箱
                                      (*conn)->async_execute(db::sql::build_imap_delete_mailbox_messages(),
                                                             {std::to_string(mailbox_id)},
-                                                            [self, conn, tag = std::move(tag), mailbox_id]
+                                                            [this, self, conn, tag = std::move(tag), mailbox_id, user_id]
                                                             (bool ok1) mutable {
                                                                 (*conn)->async_execute(
                                                                     db::sql::build_imap_delete_mailbox(),
                                                                     {std::to_string(mailbox_id)},
-                                                                    [self, conn, tag = std::move(tag), ok1](bool ok2) {
+                                                                    [this, self, conn, tag = std::move(tag), ok1, mailbox_id, user_id](bool ok2) {
+                                                                        this->invalidate_mailbox_list(user_id, mailbox_id);
                                                                         if (ok1 && ok2)
                                                                             send_tagged(self, tag, "OK", "DELETE completed");
                                                                         else
@@ -1925,13 +1974,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
                 return;
             }
             // storage append 是阻塞 I/O，整体丢 worker
-            worker->post([self, conn, tag = std::move(tag), storage,
+            worker->post([this, self, conn, tag = std::move(tag), storage,
                           subject = std::move(subject), body_content = std::move(body_content),
                           init_status, mailbox_name = std::move(mailbox_name),
                           user_id, target_mbox_id]() mutable {
                 TraditionalImapsFsm<ConnectionType>::create_mail_async(
                     storage, conn, subject, body_content,
-                    [self, conn, tag = std::move(tag), user_id, target_mbox_id,
+                    [this, self, conn, tag = std::move(tag), user_id, target_mbox_id,
                      init_status, mailbox_name = std::move(mailbox_name)](
                         uint64_t mail_id, std::string, std::string error) mutable {
                         if (!self || self->is_closed()) return;
@@ -1942,7 +1991,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
                         }
                         TraditionalImapsFsm<ConnectionType>::get_user_email_async(
                             conn, user_id,
-                            [self, conn, tag = std::move(tag), mail_id, user_id,
+                            [this, self, conn, tag = std::move(tag), mail_id, user_id,
                              target_mbox_id, init_status, mailbox_name = std::move(mailbox_name)](
                                 std::string user_email) mutable {
                                 if (!self || self->is_closed()) return;
@@ -1953,9 +2002,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
                                 TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox_async(
                                     conn, mail_id, user_id, target_mbox_id,
                                     user_email, user_email, init_status,
-                                    [self, tag = std::move(tag), mail_id, target_mbox_id,
-                                     mailbox_name = std::move(mailbox_name), user_email](bool) {
+                                    [this, self, tag = std::move(tag), mail_id, target_mbox_id,
+                                     user_id, mailbox_name = std::move(mailbox_name), user_email](bool) {
                                         if (!self || self->is_closed()) return;
+                                        this->invalidate_mailbox_list(user_id, target_mbox_id);
                                         // 返回 APPENDUID
                                         uint64_t uidvalidity = target_mbox_id;
                                         std::string response = tag + " OK [APPENDUID "
@@ -2262,7 +2312,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     // → MOVE 再批量标记源邮箱 is_deleted=1
     TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
         conn, user_id, target_name,
-        [self, conn, tag = std::move(tag), seq_set = std::move(seq_set),
+        [this, self, conn, tag = std::move(tag), seq_set = std::move(seq_set),
          is_move, user_id, source_mailbox_id](uint64_t target_id) mutable {
             if (!self || self->is_closed()) return;
             if (target_id == 0) {
@@ -2273,7 +2323,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
 
             TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
                 conn, source_mailbox_id, user_id,
-                [self, conn, tag = std::move(tag), seq_set = std::move(seq_set),
+                [this, self, conn, tag = std::move(tag), seq_set = std::move(seq_set),
                  is_move, user_id, source_mailbox_id, target_id](
                     bool ok, std::vector<MailboxMailInfo> mails) mutable {
                     if (!self || self->is_closed()) return;
@@ -2310,10 +2360,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
                     // 批量插入：INSERT IGNORE 单条 VALUES 多行 + ROW_COUNT 计实际插入
                     TraditionalImapsFsm<ConnectionType>::batch_insert_mailbox_async(
                         conn, mail_ids, target_id, user_id,
-                        [self, conn, tag = std::move(tag), is_move,
-                         user_id, source_mailbox_id, mail_ids = std::move(mail_ids)](
+                        [this, self, conn, tag = std::move(tag), is_move,
+                         user_id, source_mailbox_id, target_id, mail_ids = std::move(mail_ids)](
                             size_t copied) mutable {
                             if (!self || self->is_closed()) return;
+                            // 目标邮箱新增行（COPY 的 mail_id 可能低于目标现有最大值，
+                            // uidnext 不推进，TTL 前缓存不会自愈）；MOVE 还动了源邮箱
+                            this->invalidate_mailbox_list(user_id, target_id);
+                            if (is_move) this->invalidate_mailbox_list(user_id, source_mailbox_id);
                             auto reply = [self, tag = std::move(tag), is_move, copied]() mutable {
                                 std::string cmd_name = is_move ? "MOVE" : "COPY";
                                 std::string response = tag + " OK " + cmd_name

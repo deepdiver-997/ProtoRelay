@@ -432,7 +432,11 @@ std::string build_imap_update_mail_flag_starred() {
 }
 
 std::string build_imap_append_mail_metadata() {
-    return "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, ?)";
+    // send_time 列是 DATETIME：客户端绑定的是 epoch 整数，必须 FROM_UNIXTIME
+    // 转换（裸整数在 STRICT_TRANS_TABLES 下报 Incorrect datetime value，
+    // 2026-09-24 APPEND 实测）；与 build_insert_mail 的 FROM_UNIXTIME 一致。
+    return "INSERT INTO mails (id, subject, body_path, send_time) "
+           "VALUES (?, ?, ?, FROM_UNIXTIME(?))";
 }
 
 std::string build_imap_append_mail_recipient() {

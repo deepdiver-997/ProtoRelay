@@ -24,6 +24,15 @@ ImapsServer::ImapsServer(const ServerConfig& config,
     m_tcp_fsm->set_mailbox_stats_cache(stats_cache);
     m_ssl_fsm->set_mailbox_stats_cache(stats_cache);
 
+    // FETCH 邮箱列表缓存：TCP/SSL 两个 FSM 必须共享同一实例——写命令在任一
+    // FSM 上失效，另一边的 FETCH 才能看见；分开建会出现跨监听器脏读。
+    auto list_cache = std::make_shared<
+        TraditionalImapsFsm<TcpConnection>::MailboxListCache>(
+            TraditionalImapsFsm<TcpConnection>::kMailboxListCacheCapacity,
+            TraditionalImapsFsm<TcpConnection>::kMailboxListCacheTtl);
+    m_tcp_fsm->set_mailbox_list_cache(list_cache);
+    m_ssl_fsm->set_mailbox_list_cache(list_cache);
+
     LOG_IMAP_INFO("IMAP server initialized, SSL fsm={}, TCP fsm={}",
                   m_ssl_fsm ? "ready" : "null",
                   m_tcp_fsm ? "ready" : "null");
