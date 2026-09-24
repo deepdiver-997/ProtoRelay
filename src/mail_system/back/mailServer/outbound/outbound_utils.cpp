@@ -291,7 +291,13 @@ std::string build_dkim_header(const std::unordered_map<std::string, std::string>
         }
         signing_input += canonicalize_header_relaxed(name, it->second);
     }
-    signing_input += canonicalize_header_relaxed("DKIM-Signature", dkim_value_without_b.str());
+    // RFC 6376 §3.7：DKIM-Signature 头参与哈希时不含结尾 CRLF（h= 里的普通被签头
+    // 仍带）。多这个 CRLF 会让所有验证器（opendkim/dkimpy/QQ/Gmail）报
+    // "signature verification failed"，而 bh 校验通过、错误不易归因。
+    std::string sig_header_canonicalized =
+        canonicalize_header_relaxed("DKIM-Signature", dkim_value_without_b.str());
+    sig_header_canonicalized.resize(sig_header_canonicalized.size() - 2);
+    signing_input += sig_header_canonicalized;
 
     std::string signature_b64;
     if (!sign_rsa_sha256_base64(signing_input, key_file, signature_b64, error_out)) {

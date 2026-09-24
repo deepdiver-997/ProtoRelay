@@ -18,6 +18,13 @@
 #include <string>
 #include <vector>
 
+#include <cctype>
+#include <unordered_map>
+
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+
+#include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/mailServer/outbound/outbound_utils.h"
@@ -318,6 +325,205 @@ int main() {
                             "3.8: DKIM-Signature contains signature value (b=)");
             } else {
                 std::printf("  [skip 3.8: openssl not available for DKIM key gen]\n");
+            }
+        }
+
+        // 3.9: DKIM 签名必须能被「验证器视角」验签通过
+        // 回归锁定：2026-09-25 生产事故 —— 签名输入给 DKIM-Signature 头多了结尾
+        // CRLF（RFC 6376 §3.7 要求该头哈希时不含结尾 CRLF），bh 校验通过但
+        // 所有验证器（opendkim/dkimpy/QQ/Gmail）都报 signature verification failed。
+        // 旧测试只查头存在，没验签，没能拦住。这里按 opendkim 的算法独立重建
+        // 签名输入并做 RSA 验签。
+        {
+            std::string key = dkim_key_file();
+            if (!key.empty()) {
+                std::string pub = key + ".pub";
+                std::string cmd =
+                    "openssl rsa -in '" + key + "' -pubout -out '" + pub + "' 2>/dev/null";
+                if (std::system(cmd.c_str()) == 0) {
+                    outbound::OutboundConfig dkim_cfg;
+                    dkim_cfg.dkim_enabled = true;
+                    dkim_cfg.dkim_selector = "test";
+                    dkim_cfg.dkim_domain = "scut.email";
+                    dkim_cfg.dkim_private_key_file = key;
+
+                    mail hot;
+                    hot.body =
+                        "From: a@scut.email\r\n"
+                        "To: b@gmail.com\r\n"
+                        "Subject: verify\r\n"
+                        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n"
+                        "Message-ID: <verify@scut.email>\r\n"
+                        "MIME-Version: 1.0\r\n"
+                        "Content-Type: text/plain; charset=UTF-8\r\n"
+                        "Content-Transfer-Encoding: 8bit\r\n"
+                        "\r\n"
+                        "body to be verified\r\n";
+                    bool dkim_applied = false;
+                    std::string dkim_err;
+                    std::string wire = outbound::build_outbound_message(
+                        rec, &hot, "a@scut.email", dkim_cfg, &dkim_applied, &dkim_err, nullptr);
+                    expect_true(dkim_applied, "3.9: signature produced");
+
+                    // 剥掉 DATA 终结符，拆出 DKIM-Signature 头与其余报文
+                    const std::string terminator = "\r\n.\r\n";
+                    expect_true(wire.size() > terminator.size() &&
+                                wire.compare(wire.size() - terminator.size(),
+                                             terminator.size(), terminator) == 0,
+                                "3.9: wire ends with DATA terminator");
+                    std::string payload = wire.substr(0, wire.size() - terminator.size());
+                    const std::string sig_prefix = "DKIM-Signature: ";
+                    expect_true(payload.find(sig_prefix) == 0,
+                                "3.9: DKIM-Signature is the first header");
+                    std::string sig_value = payload.substr(
+                        sig_prefix.size(), payload.find("\r\n") - sig_prefix.size());
+                    std::string message = payload.substr(payload.find("\r\n") + 2);
+
+                    // 解析 tag（b64 值里没有 ';'，按分号切安全；key/value 去首尾空格）
+                    std::unordered_map<std::string, std::string> tags;
+                    {
+                        auto trim_ws = [](const std::string& s) {
+                            size_t b = s.find_first_not_of(" \t");
+                            size_t e = s.find_last_not_of(" \t");
+                            return b == std::string::npos ? "" : s.substr(b, e - b + 1);
+                        };
+                        std::string copy = sig_value;
+                        size_t pos = 0;
+                        while (pos < copy.size()) {
+                            size_t semi = copy.find(';', pos);
+                            std::string tag = copy.substr(pos, semi == std::string::npos
+                                                                   ? std::string::npos
+                                                                   : semi - pos);
+                            size_t eq = tag.find('=');
+                            if (eq != std::string::npos) {
+                                tags[trim_ws(tag.substr(0, eq))] =
+                                    trim_ws(tag.substr(eq + 1));
+                            }
+                            if (semi == std::string::npos) break;
+                            pos = semi + 1;
+                        }
+                    }
+                    expect_true(tags.count("h") && tags.count("bh") && tags.count("b"),
+                                "3.9: signature has h=/bh=/b= tags");
+
+                    // 拆 header/body
+                    size_t body_start = message.find("\r\n\r\n");
+                    expect_true(body_start != std::string::npos, "3.9: header/body split");
+                    std::string header_block = message.substr(0, body_start);
+                    std::string body_block = message.substr(body_start + 4);
+
+                    // bh 校验：simple body canonicalization（剥尾部空行 + CRLF 行结束）
+                    {
+                        std::vector<std::string> lines;
+                        size_t pos = 0;
+                        while (pos < body_block.size()) {
+                            size_t nl = body_block.find("\r\n", pos);
+                            if (nl == std::string::npos) {
+                                lines.push_back(body_block.substr(pos));
+                                break;
+                            }
+                            lines.push_back(body_block.substr(pos, nl - pos));
+                            pos = nl + 2;
+                        }
+                        while (!lines.empty() && lines.back().empty()) lines.pop_back();
+                        std::string canonical;
+                        for (const auto& l : lines) canonical += l + "\r\n";
+                        if (canonical.empty()) canonical = "\r\n";
+                        unsigned char digest[32];
+                        EVP_Digest(canonical.data(), canonical.size(),
+                                   digest, nullptr, EVP_sha256(), nullptr);
+                        expect_true(outbound::base64_decode(tags["bh"]) ==
+                                        std::string(reinterpret_cast<char*>(digest), 32),
+                                    "3.9: bh matches simple-canonicalized body");
+                    }
+
+                    // 重建验证器视角的签名输入：
+                    //   h= 里的普通头按 relaxed 规范化，带结尾 CRLF；
+                    //   DKIM-Signature 自身按 relaxed 规范化但【不含】结尾 CRLF。
+                    std::string signing_input;
+                    {
+                        std::vector<std::string> names;
+                        size_t pos = 0;
+                        while (pos < tags["h"].size()) {
+                            size_t colon = tags["h"].find(':', pos);
+                            names.push_back(tags["h"].substr(
+                                pos, colon == std::string::npos ? std::string::npos
+                                                                : colon - pos));
+                            if (colon == std::string::npos) break;
+                            pos = colon + 1;
+                        }
+                        // fixture 无折叠头，逐行解析即可（测试 fixture 无 continuation）
+                        std::unordered_map<std::string, std::string> wire_headers;
+                        std::vector<std::string> wire_order;
+                        {
+                            size_t pos = 0;
+                            while (pos < header_block.size()) {
+                                size_t nl = header_block.find("\r\n", pos);
+                                std::string line = header_block.substr(
+                                    pos, nl == std::string::npos ? std::string::npos
+                                                                 : nl - pos);
+                                size_t colon = line.find(':');
+                                if (colon != std::string::npos) {
+                                    std::string name = line.substr(0, colon);
+                                    for (auto& c : name)
+                                        c = static_cast<char>(std::tolower(
+                                            static_cast<unsigned char>(c)));
+                                    std::string v = line.substr(colon + 1);
+                                    size_t b = v.find_first_not_of(" \t");
+                                    size_t e = v.find_last_not_of(" \t");
+                                    wire_headers[name] =
+                                        b == std::string::npos ? "" : v.substr(b, e - b + 1);
+                                    wire_order.push_back(name);
+                                }
+                                if (nl == std::string::npos) break;
+                                pos = nl + 2;
+                            }
+                        }
+                        for (const auto& name : names) {
+                            expect_true(wire_headers.count(name) != 0,
+                                        "3.9: signed header present in message");
+                            signing_input += name + ":" +
+                                             outbound::collapse_ws(wire_headers[name]) + "\r\n";
+                        }
+                        // b= 值删除后按 relaxed 规范化，且【不】追加结尾 CRLF
+                        std::string sig_without_b;
+                        {
+                            size_t btag = sig_value.find("; b=");
+                            sig_without_b = btag == std::string::npos
+                                                ? sig_value
+                                                : sig_value.substr(0, btag + 4);
+                        }
+                        signing_input += "dkim-signature:" + outbound::collapse_ws(sig_without_b);
+                    }
+
+                    // RSA-SHA256 验签
+                    FILE* pub_fp = std::fopen(pub.c_str(), "r");
+                    expect_true(pub_fp != nullptr, "3.9: public key opened");
+                    if (pub_fp) {
+                        EVP_PKEY* pk = PEM_read_PUBKEY(pub_fp, nullptr, nullptr, nullptr);
+                        std::fclose(pub_fp);
+                        expect_true(pk != nullptr, "3.9: public key parsed");
+                        if (pk) {
+                            EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+                            EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pk);
+                            EVP_DigestVerifyUpdate(ctx, signing_input.data(),
+                                                   signing_input.size());
+                            std::string sig_bytes = outbound::base64_decode(tags["b"]);
+                            int rc = EVP_DigestVerifyFinal(
+                                ctx, reinterpret_cast<const unsigned char*>(sig_bytes.data()),
+                                sig_bytes.size());
+                            EVP_MD_CTX_free(ctx);
+                            EVP_PKEY_free(pk);
+                            expect_true(rc == 1,
+                                        "3.9: signature verifies (no trailing CRLF in "
+                                        "DKIM-Signature hash input)");
+                        }
+                    }
+                } else {
+                    std::printf("  [skip 3.9: openssl not available for pub key export]\n");
+                }
+            } else {
+                std::printf("  [skip 3.9: openssl not available for DKIM key gen]\n");
             }
         }
     }
