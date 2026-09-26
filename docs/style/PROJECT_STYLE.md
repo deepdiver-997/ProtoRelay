@@ -69,6 +69,42 @@ This document captures conventions inspired by large production-grade CLI/networ
 - For new features, include at least one runtime verification command.
 - Keep changes small and focused; avoid unrelated formatting-only edits.
 
+### 10.1 ⚠️ 每个 bug 修复必须配一个专项场景回归测试（2026-09-27 起强制）
+
+**没有回归测试的 bugfix 不允许单独合入**——修复提交与回归测试同一提交推送。
+这不是形式主义：DKIM 验签链四个 bug 全部漏网，就是因为旧测试只断言
+「wire 里有 DKIM-Signature 头」这种存在性检查（详见
+`docs/bugfixes/2026-09-25-dkim-verification-chain-four-bugs.md` 教训 §1）。
+
+写回归测试的四条硬要求：
+
+1. **双向验证（防假绿）**：提交前把修复 stash/revert 掉重跑测试，必须 FAIL；
+   恢复修复后必须 PASS。「测过通过」不等于「测得住回归」——只验证过后半段的测试
+   可能在修复前就一直是绿的（3.9 之前的 DKIM 测试正是如此）。
+2. **验证者/消费者视角**：测「下游实际能验过/能收到」，不测「我们产出了某个字节」。
+   例：DKIM 要按 RFC 6376 规范化算法独立重建签名输入并做 RSA 验签
+   （outbound_utils_test 3.9），而不是检查头存在；STARTTLS 要断言 handoff 后会话
+   拿到的 ListenerConfig（starttls_handoff_test），而不是断言代码跑到了某行。
+3. **场景 = 触发条件的最小复刻**：bug 怎么触发的，测试就怎么搭。跨模块时序类
+   （pause+worker+drain 级联）在 SessionBase 层用 mock 驱动同样的调用序列
+   （pipeline_deferred_test）；字节级类（去点填充跨块）在纯函数层喂分块数据
+   （line_folder_test 9）。优先纯函数/mock 层——能在单测里复现的 bug 才守得住。
+4. **测试文件头注释写清前科**：事故日期、现象一句话、指向 bugfix 文档。
+   让下一个改这段代码的人知道这个测试在守什么。
+
+### 10.2 静默失败路径必须可观测
+
+新增/修改异步链时，每一条「失败返回」路径都要有日志（含关键上下文：
+域名/连接数/错误原因）。2026-09-25 入站 DKIM 的 `d2i_PUBKEY` 失败、pubkey-empty
+分支全静默，排查只能黑盒探针+二分，代价是整整一轮部署。返回 false 前不留痕
+= 给下一次事故埋雷。
+
+### 10.3 线上验证不能只看己方 250
+
+「对端 MX 收下了」≠「对端用户能看到」。投递链路改动后的验收顺序：
+mail-tester 报告（外部评分+验签明细）→ 对端真实账号确认 → 己方日志。
+DKIM/SPF/DMARC 的每一次改动都走一遍完整验收，不要用「代码看起来对」替代。
+
 ## 11. Async / Threading Model
 
 ### 11.1 改写 io 对象必须 post 到 io_context
