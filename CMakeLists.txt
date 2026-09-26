@@ -612,6 +612,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(starttls_handoff_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(starttls_handoff_test)
 
+    add_executable(pipeline_deferred_test ${COMMON_SRCS} test/unit/pipeline_deferred_test.cpp)
+    target_include_directories(pipeline_deferred_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(pipeline_deferred_test)
+
     # MetricsServer 核心 API 不变量测试（counter/gauge/histogram 语义）。
     # 不链 COMMON_SRCS：MetricsServer 是 header-only，只依赖 boost::asio。
     add_executable(metrics_core_test test/unit/metrics_core_test.cpp)
@@ -708,6 +712,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME server_base_test COMMAND server_base_test)
     add_test(NAME outbound_utils_test COMMAND outbound_utils_test)
     add_test(NAME starttls_handoff_test COMMAND starttls_handoff_test)
+    add_test(NAME pipeline_deferred_test COMMAND pipeline_deferred_test)
     add_test(NAME metrics_core_test COMMAND metrics_core_test)
     add_test(NAME bcrypt_test COMMAND bcrypt_test)
 
@@ -737,6 +742,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         server_base_test
         outbound_utils_test
         starttls_handoff_test
+        pipeline_deferred_test
         metrics_core_test
         bcrypt_test
     )
