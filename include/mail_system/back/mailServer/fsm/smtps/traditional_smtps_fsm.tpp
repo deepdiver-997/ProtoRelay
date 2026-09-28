@@ -271,10 +271,12 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     std::string response = "250-" + helo + " Hello\r\n"
         "250-SIZE 10240000\r\n"
         "250-8BITMIME\r\n";
-    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
-        response += "250-STARTTLS\r\n";
     {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        if constexpr (!std::is_same_v<ConnectionType, SslConnection>) {
+            if (ctx->listener_config.advertise_starttls)
+                response += "250-STARTTLS\r\n";
+        }
         if (ctx->listener_config.auth_policy != InboundAuthPolicy::OFF)
             response += "250-AUTH LOGIN PLAIN\r\n";
     }
@@ -292,6 +294,16 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
     std::shared_ptr<SessionBase<ConnectionType>> session)
 {
+    // 未通告的能力不得生效（RFC 3207 §4）：显式拒绝，会话保持在 WAIT_AUTH 可继续收信
+    if (auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        !ctx->listener_config.advertise_starttls) {
+        session->do_async_write("502 5.5.1 STARTTLS not supported\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                if (ec) return;
+                s->do_async_read();
+            });
+        return;
+    }
     session->do_async_write("220 Ready to start TLS\r\n",
         [](std::shared_ptr<SessionBase<ConnectionType>> self, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS: {}", ec.message()); return; }

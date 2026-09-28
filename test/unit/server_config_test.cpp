@@ -68,7 +68,7 @@ int main() {
             {"enable_tls1_3", false},
             {"certFile", "certs/cert.pem"},
             {"listeners", {
-                {{"type", "tcp"}, {"port", 25}},
+                {{"type", "tcp"}, {"port", 25}, {"advertise_starttls", false}},
                 {{"type", "ssl"}, {"port", 465}},
                 {{"type", "ssl"}, {"port", 0}}       // port 0 应被过滤
             }}
@@ -84,6 +84,8 @@ int main() {
                     c.listeners[0].port == 25, "tcp listener parsed");
         expect_true(c.listeners[1].type == ListenerType::SSL &&
                     c.listeners[1].port == 465, "ssl listener parsed");
+        expect_true(!c.listeners[0].advertise_starttls, "advertise_starttls=false parsed");
+        expect_true(c.listeners[1].advertise_starttls, "advertise_starttls defaults true");
         // 相对路径解析：resolve_path 把 base_dir 当「文件路径」取其 parent 再拼相对路径
         // （loadFromFile 传进来的其实是目录 → 存在 off-by-one，这里记录实际行为：
         //  base_dir=/srv/base 时解析到 /srv/certs/... 而非 /srv/base/certs/...）
@@ -101,6 +103,7 @@ int main() {
                                    ""), "empty listeners json ok");
         expect_true(c.max_auth_attempts == 3, "missing field keeps default");
         expect_true(c.address == "0.0.0.0", "missing address keeps default");
+        expect_true(ListenerConfig().advertise_starttls, "advertise_starttls defaults true");
     }
 
     // 5. listener_map / find_listener

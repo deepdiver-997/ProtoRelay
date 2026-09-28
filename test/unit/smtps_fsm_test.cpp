@@ -142,7 +142,8 @@ struct FsmTestFixture {
     };
 
     Handle make_session(const std::string& preload_data = "",
-                        InboundAuthPolicy auth_policy = InboundAuthPolicy::OFF) {
+                        InboundAuthPolicy auth_policy = InboundAuthPolicy::OFF,
+                        bool advertise_starttls = true) {
         auto conn_u = std::make_unique<MockConnection>();
         auto* conn_ptr = conn_u.get();
         if (!preload_data.empty())
@@ -156,6 +157,7 @@ struct FsmTestFixture {
         lc.type       = ListenerType::TCP;
         lc.port       = 25;
         lc.auth_policy = auth_policy;
+        lc.advertise_starttls = advertise_starttls;
         session->set_listener_config(lc);
         session->set_current_state(static_cast<int>(SmtpsState::INIT));
         session->set_next_event(static_cast<int>(SmtpsEvent::CONNECT));
@@ -229,6 +231,27 @@ TEST(ehlo_with_auth_policy_off) {
     auto w = h.conn->written();
     assert(!HAS(w, "AUTH LOGIN PLAIN")); // auth_policy=OFF 不宣告 AUTH
     std::cout << "  [PASS] ehlo_with_auth_policy_off" << std::endl;
+}
+
+TEST(ehlo_no_starttls_when_disabled) {
+    auto h = fx.make_session("EHLO test\r\n", InboundAuthPolicy::OFF, false);
+    fx.start(h);
+    auto w = h.conn->written();
+    assert(HAS(w, "250-8BITMIME"));      // 其余能力照常通告
+    assert(!HAS(w, "STARTTLS"));         // advertise_starttls=false 不宣告 STARTTLS
+    std::cout << "  [PASS] ehlo_no_starttls_when_disabled" << std::endl;
+}
+
+TEST(starttls_rejected_when_disabled) {
+    // 未通告 STARTTLS 的监听器收到 STARTTLS：502 拒绝，且会话保持可用继续收信
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "STARTTLS\r\n"
+        "NOOP\r\n", InboundAuthPolicy::OFF, false);
+    fx.start(h);
+    assert(wait_for_response(h, "502 5.5.1 STARTTLS not supported"));
+    assert(wait_for_response(h, "250 "));   // NOOP 正常应答，会话未被 STARTTLS 提前交接
+    std::cout << "  [PASS] starttls_rejected_when_disabled" << std::endl;
 }
 
 TEST(mail_from_ok) {
@@ -864,6 +887,9 @@ int main() {
 
         // ── STARTTLS (已知: 重构后需 STARTTLS handler 适配) ──
         // test_starttls(fx);
+        // advertise_starttls=false：25 端口明文投递开关（跨境 RST 规避，2026-09-28）
+        test_ehlo_no_starttls_when_disabled(fx);
+        test_starttls_rejected_when_disabled(fx);
 
         // ── 命令变体 ──
         test_helo_not_ehlo(fx);

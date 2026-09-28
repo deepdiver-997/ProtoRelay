@@ -36,6 +36,12 @@ struct ListenerConfig {
     ListenerType type = ListenerType::TCP;
     uint16_t port = 0;
     InboundAuthPolicy auth_policy = InboundAuthPolicy::OFF;
+    // false = EHLO 不通告 STARTTLS，对端按 RFC 3207 走明文投递。
+    // 背景：本服务器跨境方向 25 端口的 STARTTLS 握手会被链路中间设备注入 RST
+    // （2026-09-28 抓包实锤：ClientHello 后伪造双 RST、IP id 相同），而 Gmail
+    // 等 MTA 在 TLS 失败后只退避重试、不回落明文 —— 只要还通告 STARTTLS，
+    // 这些来源就永远投不进来。SendGrid 类会回落明文的 MTA 不受影响。
+    bool advertise_starttls = true;
 
     ListenerConfig() = default;
     ListenerConfig(ListenerType t, uint16_t p) : type(t), port(p) {}
@@ -116,6 +122,7 @@ struct ServerConfig {
                 ListenerConfig lc;
                 lc.type = listener_type_from_string(item.value("type", "tcp"));
                 lc.port = static_cast<uint16_t>(item.value("port", 0));
+                lc.advertise_starttls = item.value("advertise_starttls", true);
                 if (lc.port != 0) listeners.push_back(lc);
             }
         }

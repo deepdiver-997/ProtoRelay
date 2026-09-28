@@ -71,6 +71,7 @@ struct MailListenerConfig : public pr::ListenerConfig {
         lc.type   = pr::listener_type_from_string(item.value("type", "tcp"));
         lc.port   = static_cast<uint16_t>(item.value("port", 0));
         lc.auth_policy = inbound_auth_policy_from_string(item.value("auth_policy", "off"));
+        lc.advertise_starttls = item.value("advertise_starttls", true);
         lc.spf_mode   = item.value("spf_mode", "off");
         lc.dkim_mode  = item.value("dkim_mode", "off");
         lc.dmarc_mode = item.value("dmarc_mode", "off");
