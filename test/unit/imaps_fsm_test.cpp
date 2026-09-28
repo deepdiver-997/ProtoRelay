@@ -351,6 +351,120 @@ TEST(fetch_full_path_with_storage) {
     std::cout << "  [PASS] fetch_full_path_with_storage" << std::endl;
 }
 
+// ========== BODY.PEEK[n] 按部分取正文回归 ==========
+// 89449fa 引入的 substr off-by-one 把闭合 ']' 带进节号（"2]"→非数字→节号恒 0），
+// 服务器对 BODY[n] 一律不返回正文 → 客户端"content 为空"无限重试（2026-09-28）。
+TEST(fetch_body_part_number) {
+    auto io = std::make_shared<IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(false);
+    namespace st = mail_system::storage;
+    std::filesystem::create_directories("/tmp/imaps_fetch_part_test");
+    auto storage = std::make_shared<st::LocalFileStorageProvider>(
+        "/tmp/imaps_fetch_part_test/", "/tmp/imaps_fetch_part_test/");
+    auto router2 = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<st::IStorageProvider>>{storage});
+
+    ServerConfig cfg2;
+    cfg2.perf_mode = true; cfg2.apply_perf_mode();
+    cfg2.use_database = false; cfg2.system_domain = "test.local";
+    cfg2.storage.local.mail_path = "/tmp/imaps_fsm_test_mail3";
+    cfg2.storage.local.attachment_path = "/tmp/imaps_fsm_test_att3";
+    auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
+    auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
+
+    const std::string body =
+        "Subject: mime\r\n"
+        "Content-Type: multipart/alternative; boundary=\"BBBB\"\r\n"
+        "\r\n"
+        "--BBBB\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "hello plain part\r\n"
+        "\r\n"
+        "--BBBB\r\n"
+        "Content-Type: text/html\r\n"
+        "\r\n"
+        "<p>hello html part</p>\r\n"
+        "\r\n"
+        "--BBBB--\r\n";
+    const std::string body_path = "/tmp/imaps_fetch_part_test/mail_43";
+    { std::ofstream f(body_path, std::ios::binary); f << body; }
+
+    db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{
+            {"id", "43"}, {"sender", "a@t.local"}, {"recipient", "b@t.local"},
+            {"subject", "mime"}, {"body_path", body_path},
+            {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
+            {"status", "1"}, {"send_time", "1700000000"}}}));
+
+    auto conn_u = std::make_unique<MockConnection>();
+    auto* conn_ptr = conn_u.get();
+    auto session = std::make_shared<ImapsSession<MockConnection>>(
+        server2.get(), std::move(conn_u), fsm2);
+    auto* c = static_cast<ImapContext*>(session->get_context());
+    c->is_authenticated = true;
+    c->user_id = 1;
+    c->mailbox_selected = true;
+    c->selected_mailbox_id = 1;
+    c->current_tag = "A001";
+    session->set_current_state(static_cast<int>(ImapState::SELECTED));
+
+    // 异步 FETCH 完成后 mock 环境不会重新武装读路径，每个 session 只发一条命令
+    auto fetch_and_wait = [&](ImapsSession<MockConnection>& s, MockConnection* conn,
+                              const std::string& tag_line, const std::string& done_marker) {
+        s.handle_read(tag_line);
+        s.process_read();
+        for (int waited = 0; waited < 2000 && conn->written().find(
+                done_marker) == std::string::npos; waited += 5) {
+            conn->pump_executor();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        conn->pump_executor();
+        return conn->written();
+    };
+
+    auto w1 = fetch_and_wait(*session, conn_ptr, "A001 FETCH 1 (BODY.PEEK[1])\r\n",
+                             "A001 OK FETCH completed");
+    assert(w1.find("BODY[1] {16}") != std::string::npos);   // 节号解析成功且长度正确
+    assert(w1.find("hello plain part") != std::string::npos);
+
+    auto conn_u2 = std::make_unique<MockConnection>();
+    auto* conn_ptr2 = conn_u2.get();
+    auto session2 = std::make_shared<ImapsSession<MockConnection>>(
+        server2.get(), std::move(conn_u2), fsm2);
+    auto* c2 = static_cast<ImapContext*>(session2->get_context());
+    c2->is_authenticated = true;
+    c2->user_id = 1;
+    c2->mailbox_selected = true;
+    c2->selected_mailbox_id = 1;
+    c2->current_tag = "A002";
+    session2->set_current_state(static_cast<int>(ImapState::SELECTED));
+
+    // mock DB 结果是队列：第二个 session 的邮箱查询需要再压一份同样的结果
+    db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{
+            {"id", "43"}, {"sender", "a@t.local"}, {"recipient", "b@t.local"},
+            {"subject", "mime"}, {"body_path", body_path},
+            {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
+            {"status", "1"}, {"send_time", "1700000000"}}}));
+
+    auto w2 = fetch_and_wait(*session2, conn_ptr2, "A002 FETCH 1 (BODY.PEEK[2])\r\n",
+                             "A002 OK FETCH completed");
+    assert(w2.find("BODY[2] {") != std::string::npos);      // 节号 2 同样解析成功
+    assert(w2.find("<p>hello html part</p>") != std::string::npos);
+
+    std::filesystem::remove_all("/tmp/imaps_fetch_part_test");
+    io->stop(); wk->stop();
+    finish_session(session);
+    finish_session(session2);
+    std::cout << "  [PASS] fetch_body_part_number" << std::endl;
+}
+
 // FETCH 续作链迭代化回归：400 封。本地 storage 的 async_* 回调内联触发，
 // 旧实现 fetch_drive 逐封真递归 → 大邮箱 >~200 封栈溢出 SIGSEGV。
 // 修复后应循环展开（inline 回调外层 continue），400 封正常完成。
@@ -1010,6 +1124,7 @@ int main() {
         // ── UID FETCH crash repro ──
         test_uid_fetch_no_db(fx);
         test_fetch_full_path_with_storage(fx);
+        test_fetch_body_part_number(fx);   // BODY.PEEK[n] 节号 off-by-one 回归（2026-09-28）
         test_fetch_many_mails_no_stack_overflow(fx);
         test_literal_too_large_rejected(fx);
 

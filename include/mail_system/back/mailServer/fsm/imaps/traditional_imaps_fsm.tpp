@@ -937,7 +937,9 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
         if (bracket != std::string::npos) {
             auto close = attrs.find(']', bracket);
             if (close != std::string::npos) {
-                std::string num_str = attrs.substr(bracket + 1, close - bracket);
+                // substr 长度必须排除闭合 ']'：多算 1 会把 ']' 带进 num_str，
+                // all_digits 恒 false → BODY[n] 永远解析不出节号 → 正文为空
+                std::string num_str = attrs.substr(bracket + 1, close - bracket - 1);
                 bool all_digits = !num_str.empty();
                 for (char c : num_str) if (c < '0' || c > '9') { all_digits = false; break; }
                 if (all_digits) body_part_num = std::stoi(num_str);
