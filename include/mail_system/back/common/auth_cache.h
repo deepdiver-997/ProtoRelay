@@ -22,10 +22,15 @@ public:
               std::chrono::seconds ttl = std::chrono::minutes(5))
         : cache_(capacity, ttl) {}
 
-    // 查缓存命中返回 true，填充 entry（即使 TTL 过期也会返回）
+    // 查缓存：命中且未过期返回 true。过期条目视为 miss（TTL 兜底）：
+    // 2026-09-28 前的实现无视 stale 标志，过期条目在被 LRU 挤掉前一直生效，
+    // DB 换密码/解禁账号必须重启进程才生效（SMTP/IMAP 两个进程各一份缓存）。
+    // 过期后走 DB 路径重查并回填（LruCache::put 会刷新时间戳），代价是
+    // 每账号每 TTL 至多一次 DB 查询。
     bool lookup(const std::string& email, AuthCacheEntry& out) {
         bool stale;
-        return cache_.get(email, out, stale);
+        if (!cache_.get(email, out, stale)) return false;
+        return !stale;
     }
 
     // 写入缓存

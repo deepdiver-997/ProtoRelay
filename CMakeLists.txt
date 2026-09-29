@@ -507,6 +507,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     setup_mail_target(line_folder_test)
 
+    add_executable(auth_cache_test
+        test/unit/auth_cache_test.cpp
+    )
+    setup_mail_target(auth_cache_test)
+
     add_executable(mime_parser_test
         test/unit/mime_parser_test.cpp
         src/mail_system/back/mailServer/fsm/imaps/imap_utils.cpp
