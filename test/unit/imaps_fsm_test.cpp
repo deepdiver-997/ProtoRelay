@@ -13,6 +13,7 @@
 #include "framework/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/common/mail_crypto.h"
 #include "mock_connection.h"
 #include "mock_db_pool.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
@@ -127,6 +128,7 @@ TEST(capability_response) {
     h.conn->pump_executor();
     auto w = h.conn->written();
     assert(HAS(w, "CAPABILITY IMAP4rev1"));
+    assert(HAS(w, "AUTH=PLAIN"));   // SASL PLAIN 通告（2026-09-28 起）
     std::cout << "  [PASS] capability_response" << std::endl;
 }
 
@@ -190,6 +192,98 @@ TEST(login_wrong_password) {
     auto w = wait_for_reply(h);
     assert(!w.empty());
     std::cout << "  [PASS] login_wrong_password" << std::endl;
+}
+
+// ========== AUTHENTICATE PLAIN ==========
+// PLAIN 消息 = authzid NUL authcid NUL passwd
+static std::string sasl_plain_b64(const std::string& authcid, const std::string& password) {
+    std::string plain;
+    plain += '\0';
+    plain += authcid;
+    plain += '\0';
+    plain += password;
+    return outbound::base64_encode(reinterpret_cast<const unsigned char*>(plain.data()),
+                                   plain.size());
+}
+
+// 异步回复轮询：等到 written 出现 needle（或超时），避免 "+ " 抢先满足 wait_for_reply
+template <typename Handle>
+static std::string poll_written_for(Handle& h, const std::string& needle, int timeout_ms = 2000) {
+    for (int waited = 0; waited < timeout_ms; waited += 5) {
+        h.conn->pump_executor();
+        if (h.conn->written().find(needle) != std::string::npos) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    h.conn->pump_executor();
+    return h.conn->written();
+}
+
+TEST(auth_plain_ir_success) {
+    // SASL-IR：初始响应随命令行（fixture auth cache 命中 user0@test.local/test123）
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 AUTHENTICATE PLAIN " + sasl_plain_b64("user0@test.local", "test123") + "\r\n");
+    h.session->process_read();
+    auto w = poll_written_for(h, "A001 OK AUTHENTICATE completed");
+    assert(w.find("A001 OK AUTHENTICATE completed") != std::string::npos);
+    std::cout << "  [PASS] auth_plain_ir_success" << std::endl;
+}
+
+TEST(auth_plain_two_step) {
+    // 无初始响应：服务器发空挑战 "+ "，客户端续行 base64。
+    // 续行要先进 mock 读队列："+ " 写完成后 session 会 re-arm 读，mock 无数据
+    // 即 EOF 关连接（生产上客户端此时正在发续行，不存在这个窗口）。
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 AUTHENTICATE PLAIN\r\n");
+    h.conn->append_read_data(sasl_plain_b64("user0@test.local", "test123") + "\r\n");
+    h.session->process_read();
+    auto w = poll_written_for(h, "A001 OK AUTHENTICATE completed");
+    assert(w.find("A001 OK AUTHENTICATE completed") != std::string::npos);
+    std::cout << "  [PASS] auth_plain_two_step" << std::endl;
+}
+
+TEST(auth_plain_abort) {
+    // RFC 3501: 续行位置发 "*" 中止（同样先把续行喂进 mock 读队列）
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 AUTHENTICATE PLAIN\r\n");
+    h.conn->append_read_data("*\r\n");
+    h.session->process_read();
+    auto w = poll_written_for(h, "A001 NO AUTHENTICATE aborted");
+    assert(w.find("A001 NO AUTHENTICATE aborted") != std::string::npos);
+    std::cout << "  [PASS] auth_plain_abort" << std::endl;
+}
+
+TEST(auth_plain_wrong_password) {
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 AUTHENTICATE PLAIN " + sasl_plain_b64("user0@test.local", "wrong") + "\r\n");
+    h.session->process_read();
+    auto w = poll_written_for(h, "A001 NO AUTHENTICATE failed");
+    assert(w.find("A001 NO AUTHENTICATE failed") != std::string::npos);
+    std::cout << "  [PASS] auth_plain_wrong_password" << std::endl;
+}
+
+TEST(auth_plain_bad_base64) {
+    // 解码失败 / 缺 NUL 分隔 → NO
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 AUTHENTICATE PLAIN not-base64!!\r\n");
+    h.session->process_read();
+    auto w = poll_written_for(h, "A001 NO AUTHENTICATE failed");
+    assert(w.find("A001 NO AUTHENTICATE failed") != std::string::npos);
+    std::cout << "  [PASS] auth_plain_bad_base64" << std::endl;
+}
+
+TEST(auth_unsupported_mechanism) {
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 AUTHENTICATE CRAM-MD5\r\n");
+    h.session->process_read();
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "A001 NO Unsupported authentication mechanism: CRAM-MD5"));
+    std::cout << "  [PASS] auth_unsupported_mechanism" << std::endl;
 }
 
 TEST(login_many_failures_close) {
@@ -1112,6 +1206,12 @@ int main() {
         test_capability_response(fx);
         test_login_response(fx);
         test_login_success_real_auth(fx);
+        test_auth_plain_ir_success(fx);
+        test_auth_plain_two_step(fx);
+        test_auth_plain_abort(fx);
+        test_auth_plain_wrong_password(fx);
+        test_auth_plain_bad_base64(fx);
+        test_auth_unsupported_mechanism(fx);
         test_login_wrong_password(fx);
         test_login_many_failures_close(fx);
         test_noop_reply(fx);

@@ -314,6 +314,17 @@ private:
     void handle_capability(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_login(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_authenticate(std::shared_ptr<SessionBase<ConnectionType>> session);
+    // LOGIN 与 AUTHENTICATE PLAIN 共用的验证链：auto-domain 后 pause，把
+    // 「查 DB/缓存 + bcrypt 验密码」整体丢 worker 线程池，tagged 响应在回调补发
+    void start_auth_verify(std::shared_ptr<SessionBase<ConnectionType>> session,
+                           const std::string& tag,
+                           std::string username, std::string password,
+                           const char* ok_text, const char* fail_text);
+    // 解码 SASL PLAIN（authzid NUL authcid NUL passwd）后走 start_auth_verify；
+    // 解码失败/结构不对 → NO
+    void verify_sasl_plain(std::shared_ptr<SessionBase<ConnectionType>> session,
+                           const std::string& tag, const std::string& b64,
+                           const char* ok_text);
     void handle_logout(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_select(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_examine(std::shared_ptr<SessionBase<ConnectionType>> session);

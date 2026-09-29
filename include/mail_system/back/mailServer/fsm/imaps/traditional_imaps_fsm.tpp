@@ -4,6 +4,7 @@
 #include "mail_system/back/mailServer/imaps_server.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
 #include "mail_system/back/common/mime_parser.h"
+#include "mail_system/back/common/mail_crypto.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -301,7 +302,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_capability(
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>) {
         caps += " STARTTLS";
     }
-    caps += " IDLE UIDPLUS MOVE\r\n";
+    caps += " IDLE UIDPLUS MOVE AUTH=PLAIN\r\n";
 
     caps += tag + " OK CAPABILITY completed\r\n";
 
@@ -344,6 +345,17 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
         username = args;
     }
 
+    start_auth_verify(session, tag, std::move(username), std::move(password),
+                      "LOGIN completed", "LOGIN failed");
+}
+
+// ---------- LOGIN/AUTHENTICATE 共用验证链 ----------
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    const std::string& tag, std::string username, std::string password,
+    const char* ok_text, const char* fail_text)
+{
     // 自动补 @domain（兼容只传本地部分的客户端）
     if (!username.empty() && username.find('@') == std::string::npos) {
         auto config = std::atomic_load(&session->get_server()->m_config);
@@ -366,15 +378,15 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
     session->set_paused(true);
     auto self = session->shared_from_this();
     worker->post(
-        [self, tag = std::move(tag), username = std::move(username),
-         password = std::move(password), router, auth_cache]() mutable {
+        [self, tag, username = std::move(username), password = std::move(password),
+         router, auth_cache, ok_text, fail_text]() mutable {
             // async CPS 链（仿 POP3/SMTP auth）：每步 async_query + 回调续作。
             // 底层 MySQL async_* 是默认同步包装（回调内联执行），链在 worker
             // 线程跑完；将来接真异步 DB，回调在 DB 线程触发，conn 由链内
             // shared ScopedConnection 保活，调用方结构无需改动。
             TraditionalImapsFsm<ConnectionType>::auth_user_async(
                 router, auth_cache, username, password,
-                [self, tag, username = username](
+                [self, tag, username = username, ok_text, fail_text](
                     bool ok, uint64_t user_id, int shard) mutable {
                     if (!self || self->is_closed()) return;
                     if (ok) {
@@ -386,7 +398,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
                             c->shard_index = shard;
                         }
                         self->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
-                        send_tagged(self, tag, "OK", "LOGIN completed");
+                        send_tagged(self, tag, "OK", ok_text);
                         LOG_IMAP_INFO("IMAP login successful: {} (user_id={})", username, user_id);
                     } else {
                         LOG_IMAP_WARN("IMAP login failed: {}", username);
@@ -394,7 +406,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
                             self->close_after_flush();   // 阈值关闭走 io 线程,且不与在途写竞争
                             return;
                         }
-                        send_tagged(self, tag, "NO", "LOGIN failed");
+                        send_tagged(self, tag, "NO", fail_text);
                     }
                     self->drain_buffered_commands();
                 });
@@ -402,6 +414,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
 }
 
 // ---------- AUTHENTICATE ----------
+// 支持 SASL PLAIN（含 SASL-IR 初始响应与 "*" 中止）；其余机制维持 NO。
+// 无初始响应时发空挑战 "+ "，续行由 session handle_read 拦截后回到本 handler。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
     std::shared_ptr<SessionBase<ConnectionType>> session)
@@ -409,22 +423,71 @@ void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
-    // 解析机制名
-    std::string mechanism = session->get_last_command_args();
-    size_t space = mechanism.find(' ');
+    // 续行到达（handle_read 已拦截存入 context）
+    if (ctx && ctx->sasl_plain_state == 2) {
+        ctx->sasl_plain_state = 0;
+        std::string resp = std::move(ctx->sasl_plain_response);
+        ctx->sasl_plain_response.clear();
+        if (resp == "*") {   // RFC 3501 §6.2.2: 客户端可随时以 "*" 中止
+            send_tagged(session, tag, "NO", "AUTHENTICATE aborted");
+            return;
+        }
+        verify_sasl_plain(session, tag, resp, "AUTHENTICATE completed");
+        return;
+    }
+
+    const std::string args = session->get_last_command_args();
+    std::string mechanism = args;
+    std::string initial_response;
+    size_t space = args.find(' ');
     if (space != std::string::npos) {
-        mechanism = mechanism.substr(0, space);
+        mechanism = args.substr(0, space);
+        initial_response = args.substr(space + 1);
     }
     std::transform(mechanism.begin(), mechanism.end(), mechanism.begin(), ::toupper);
 
-    if (mechanism == "LOGIN") {
-        // AUTHENTICATE LOGIN → 直接转发到 LOGIN 逻辑
-        // args 已经是 "LOGIN" 或 "LOGIN <base64>"
-        // 简化版：通知客户端用 LOGIN 命令
-        send_tagged(session, tag, "NO", "Use LOGIN command directly (AUTHENTICATE LOGIN not yet implemented)");
-    } else {
+    if (mechanism != "PLAIN") {
         send_tagged(session, tag, "NO", "Unsupported authentication mechanism: " + mechanism);
+        return;
     }
+    if (!ctx) {
+        send_tagged(session, tag, "NO", "Server error");
+        return;
+    }
+
+    // SASL-IR：初始响应随命令行一起到达
+    if (!initial_response.empty()) {
+        verify_sasl_plain(session, tag, initial_response, "AUTHENTICATE completed");
+        return;
+    }
+
+    // 无初始响应：发空挑战等续行（RFC 3501 §6.2.2 的 "+ "）
+    ctx->sasl_plain_state = 1;
+    ctx->sasl_plain_response.clear();
+    session->do_async_write("+ \r\n", nullptr);
+}
+
+// 解码 SASL PLAIN 消息（authzid NUL authcid NUL passwd）并复用登录验证链。
+// base64 解码失败（EVP 返回负）得空串、缺分隔符或多余分段 → NO；
+// authzid 忽略（不做代理授权），以 authcid 为认证身份。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::verify_sasl_plain(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    const std::string& tag, const std::string& b64, const char* ok_text)
+{
+    const std::string decoded = outbound::base64_decode(b64);
+    size_t n1 = decoded.find('\0');
+    size_t n2 = (n1 == std::string::npos) ? std::string::npos
+                                          : decoded.find('\0', n1 + 1);
+    if (n1 == std::string::npos || n2 == std::string::npos ||
+        decoded.find('\0', n2 + 1) != std::string::npos) {
+        send_tagged(session, tag, "NO", "AUTHENTICATE failed");
+        return;
+    }
+    std::string username = decoded.substr(n1 + 1, n2 - n1 - 1);
+    std::string password = decoded.substr(n2 + 1);
+    start_auth_verify(session, tag, std::move(username), std::move(password),
+                      ok_text, "AUTHENTICATE failed");
 }
 
 // ---------- LOGOUT ----------

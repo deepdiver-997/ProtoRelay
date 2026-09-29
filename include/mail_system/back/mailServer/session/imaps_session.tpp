@@ -145,6 +145,16 @@ void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
         return;
     }
 
+    // SASL 续行：AUTHENTICATE PLAIN 的 base64 响应（或 "*" 中止）不是 IMAP 命令，
+    // 以 AUTHENTICATE 事件交回 FSM；tag 沿用命令行的（current_tag 未被覆盖）。
+    if (session->context_.sasl_plain_state == 1) {
+        session->context_.sasl_plain_response = line;
+        session->context_.sasl_plain_state = 2;
+        session->command_parsed_ = true;
+        session->next_event_ = ImapEvent::AUTHENTICATE;
+        return;
+    }
+
     // 检查是否 literal 声明（行尾的 {size}）
     size_t brace_pos = line.rfind('{');
     if (brace_pos != std::string::npos && line.back() == '}') {

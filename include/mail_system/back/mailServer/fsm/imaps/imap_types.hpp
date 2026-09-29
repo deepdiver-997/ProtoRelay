@@ -93,6 +93,12 @@ struct ImapContext {
     // IDLE
     bool idle_mode = false;                   // 是否处于 IDLE 状态
 
+    // SASL PLAIN（AUTHENTICATE）：0=非进行中 1=已发 "+ " 等待续行 2=续行已到待 FSM 消费。
+    // 续行（base64 响应或 "*" 中止）不是 IMAP 命令，由 session handle_read 拦截后
+    // 以 AUTHENTICATE 事件回到 FSM；tag 沿用命令行的（current_tag 未被覆盖）。
+    int sasl_plain_state = 0;
+    std::string sasl_plain_response;          // 续行原文
+
     // UID 命令标记（handle_uid 设置，handle_fetch/search 读取）
     bool is_uid_command = false;
     std::string uid_overridden_args;          // UID→seq 转换后的命令参数
@@ -118,6 +124,8 @@ struct ImapContext {
         uid_validity = 0;
         read_only = false;
         idle_mode = false;
+        sasl_plain_state = 0;
+        sasl_plain_response.clear();
         awaiting_literal = false;
         literal_size = 0;
         literal_buffer.clear();
