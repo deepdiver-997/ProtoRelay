@@ -6,6 +6,7 @@
 // ──────────────────────────────────────────────────────────────────
 #include "framework/tcp_server_base.h"
 #include "web_server/h2/h2_session.h"
+#include "framework/db/db_pool.h"
 #include <memory>
 #include <string>
 
@@ -18,7 +19,7 @@ public:
              std::string doc_root = ".",
              std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
              std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
-             std::shared_ptr<mail_system::DBPool> dbPool = nullptr);
+             std::shared_ptr<pr::DBPool> dbPool = nullptr);
     ~H2Server() override = default;
 
     const std::string& doc_root() const { return doc_root_; }

@@ -5,22 +5,25 @@
 #include <memory>
 #include <string>
 #include <map>
-#include "server_config.h"
-#include "intrusion_detector.h"
-#include "framework/thread_pool/thread_pool_base.h"
-#include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/db/db_service.h"
+#include "framework/server_config.h"
+#include "framework/db/db_pool.h"
 #include "framework/net/dns_resolver.h"
-#include <boost/asio/io_context.hpp>
-#include "mail_system/back/db/mysql_pool.h"
-#include "mail_system/back/db/mysql_service.h"
-#include "mail_system/back/entities/mail.h"
-#include "mail_system/back/common/lru_cache.h"
-#include "mail_system/back/storage/i_storage_provider.h"
-#include "mail_system/back/router/i_shard_router.h"
+#include "framework/thread_pool/thread_pool_base.h"
+#include "framework/intrusion_detector.h"
 #include "framework/metrics_server.h"
+#include <boost/asio/io_context.hpp>
+#include <atomic>
+#include <memory>
+#include <string>
+#include <map>
 
 namespace mail_system {
+
+// 应用层类型只前向声明：框架头不允许 include 应用层头（include 泄漏清理，
+// 2026-10-17）。成员是 shared_ptr，拷贝/析构都不需要完整类型；解引用方
+// （各 server / FSM）自己 include 真头。
+class IMailboxCache;
+namespace router { class IShardRouter; }
 
 enum class ServerState { Stopped, Running, Pausing, Paused };
 
@@ -44,7 +47,7 @@ public:
     ServerBase(const ServerConfig& config,
          std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
          std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
-         std::shared_ptr<DBPool> dbPool = nullptr);
+         std::shared_ptr<pr::DBPool> dbPool = nullptr);
     virtual ~ServerBase();
 
     ServerBase(const ServerBase&) = delete;

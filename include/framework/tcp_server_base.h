@@ -1,7 +1,8 @@
 #ifndef MAIL_SYSTEM_TCP_SERVER_BASE_H
 #define MAIL_SYSTEM_TCP_SERVER_BASE_H
 
-#include "server_base.h"
+#include "framework/server_base.h"
+#include "framework/db/db_pool.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
@@ -23,7 +24,7 @@ public:
     TcpServerBase(const ServerConfig& config,
                   std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
                   std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
-                  std::shared_ptr<DBPool> dbPool = nullptr);
+                  std::shared_ptr<pr::DBPool> dbPool = nullptr);
     ~TcpServerBase() override;
 
     void start() override;
@@ -73,7 +74,7 @@ TcpServerBase<TcpSession, SslSession>::TcpServerBase(
     const ServerConfig& config,
     std::shared_ptr<ThreadPoolBase> ioThreadPool,
     std::shared_ptr<ThreadPoolBase> workerThreadPool,
-    std::shared_ptr<DBPool> dbPool)
+    std::shared_ptr<pr::DBPool> dbPool)
     : ServerBase(config, ioThreadPool, workerThreadPool, dbPool)
     , m_sslContext(boost::asio::ssl::context::sslv23)
 {

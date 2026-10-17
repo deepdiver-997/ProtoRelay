@@ -2,8 +2,12 @@
 #define MAIL_SYSTEM_SERVER_CONFIG_H
 
 #include "framework/server_config_base.h"
-#include "mail_system/back/common/logger.h"
-#include "mail_system/back/db/db_pool.h"
+#include "framework/log/log_macros.h"
+#include "framework/db/db_pool_config.h"
+// 注：outbound_config.h / storage_config.h 是邮件域配置类型（DKIM 身份、存储后端参数），
+// ServerConfig 作为"整份应用配置的载体"合法组合它们 —— 这是应用配置住在框架层的既有
+// 结构性问题（见 docs/architecture），不是可删的残留；真要切干净需把配置拆成
+// 框架传输配置 + 应用自有配置两段，另行处理。
 #include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/storage/storage_config.h"
 #include <nlohmann/json.hpp>
@@ -142,7 +146,7 @@ struct ServerConfig : public pr::ServerConfig {
     std::vector<MailListenerConfig> mail_listeners;
 
     bool use_database;
-    DBPoolConfig db_pool_config;
+    pr::DBPoolConfig db_pool_config;
 
     bool dnsbl_enabled;
     bool perf_mode;

@@ -1,4 +1,5 @@
 #include "web_server/h2/h2_server.h"
+#include "framework/db/db_pool.h"
 #include "mail_system/back/common/logger.h"
 #include <memory>
 
@@ -9,7 +10,7 @@ H2Server::H2Server(const mail_system::ServerConfig& config,
                    std::string doc_root,
                    std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
                    std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
-                   std::shared_ptr<mail_system::DBPool> dbPool)
+                   std::shared_ptr<pr::DBPool> dbPool)
     : mail_system::TcpServerBase<TcpH2Session, SslH2Session>(
           config, ioThreadPool, workerThreadPool, dbPool)
     , doc_root_(std::move(doc_root))

@@ -15,6 +15,7 @@
 #include "mail_system/back/mailServer/outbound_server.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/router/i_shard_router.h"  // 解引用 m_shardRouter：server_base.h 已不再传递完整类型（泄漏清理）
 #include "mail_system/back/mailServer/outbound/dns_resolver.h"  // SyncDnsWrapper（MX 解析）
 #include <unordered_set>
 

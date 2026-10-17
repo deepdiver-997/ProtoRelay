@@ -11,6 +11,7 @@
 #include "web_server/http_types.hpp"
 #include "web_server/http_fsm.h"
 #include "web_server/http_session.h"
+#include "framework/db/db_pool.h"
 #include <memory>
 #include <string>
 
@@ -22,7 +23,7 @@ public:
                std::string doc_root = ".",
                std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
                std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
-               std::shared_ptr<mail_system::DBPool> dbPool = nullptr);
+               std::shared_ptr<pr::DBPool> dbPool = nullptr);
     ~HttpServer() override = default;
 
     const std::string& doc_root() const { return doc_root_; }

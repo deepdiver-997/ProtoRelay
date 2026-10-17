@@ -1,11 +1,18 @@
+// ─────────────────────────────────────────────────────────────────
+// 装配根（composition root）：本 .cpp 是全仓库唯一被允许认识具体 DB/存储/路由
+// 实现的框架文件 —— ServerBase 构造函数按配置把 mysql/mariadb/null、
+// local/s3/hdfs、三种 router 装配进抽象接口。头文件已不 include 应用层
+// （2026-10-17 include 泄漏清理）；这里的依赖是装配点的本职，不是泄漏。
+// 长期方向：整块搬到 mail_system 的 bootstrap 模块，框架只留注入后的生命周期。
+// ─────────────────────────────────────────────────────────────────
 #include "framework/server_base.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/log/log_macros.h"
 #include "mail_system/back/router/hash_shard_router.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/router/table_shard_router.h"
 #include "mail_system/back/entities/mail.h"
-#include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/distributed_mysql_pool.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/storage/async_storage_provider.h"

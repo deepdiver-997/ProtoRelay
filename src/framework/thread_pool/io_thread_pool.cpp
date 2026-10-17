@@ -1,6 +1,6 @@
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/io_context_registry.h"
-#include "mail_system/back/common/logger.h"
+#include "framework/log/log_macros.h"
 
 namespace mail_system {
 

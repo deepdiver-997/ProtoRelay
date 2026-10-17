@@ -1,7 +1,7 @@
 #ifndef SESSION_BASE_H
 #define SESSION_BASE_H
 
-#include "mail_system/back/common/logger.h"
+#include "framework/log/log_macros.h"
 #include "framework/connection/i_connection.h"
 #include "framework/server_base.h"
 #include <boost/asio.hpp>

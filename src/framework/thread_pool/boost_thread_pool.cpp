@@ -1,5 +1,5 @@
 #include "framework/thread_pool/boost_thread_pool.h"
-#include "mail_system/back/common/logger.h"
+#include "framework/log/log_macros.h"
 
 namespace mail_system {
 

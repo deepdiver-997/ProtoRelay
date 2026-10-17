@@ -5,6 +5,7 @@
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/password_rehash.h"
+#include "mail_system/back/storage/i_storage_provider.h"  // 正文/附件删除走 provider；server_base.h 已不再传递（泄漏清理）
 #include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "framework/connection/tcp_connection.h"
