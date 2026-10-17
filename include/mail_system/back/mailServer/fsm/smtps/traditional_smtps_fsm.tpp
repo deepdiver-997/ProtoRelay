@@ -4,6 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/password_rehash.h"
+#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/common/mime_parser.h"
@@ -18,6 +19,9 @@ namespace {
 
 // trusted_relay_networks 匹配：条目为精确 IP（含 IPv6）或 IPv4 CIDR。
 // 精确条目走字符串比较；CIDR 用 inet_pton 转主机序后按前缀比较，解析失败则跳过该条目。
+// 前缀用严格解析：这段跑在 io 线程的 RCPT handler 里，std::stoi 遇到 "10.0.0.0/" 或
+// "/x" 这类配置笔误会抛 invalid_argument 穿出 handler，io 线程的 run() 退出后不再重进，
+// 挂在该 io_context 上的全部连接静默僵死；而宽松解析把坏前缀当成 0 = 信任全网 = 开放中继。
 inline bool ip_in_trusted_networks(const std::string& ip,
                                    const std::vector<std::string>& networks) {
     if (ip.empty() || networks.empty()) return false;
@@ -26,8 +30,8 @@ inline bool ip_in_trusted_networks(const std::string& ip,
         const auto slash = entry.find('/');
         if (slash == std::string::npos) continue;
 
-        const auto prefix = std::stoi(entry.substr(slash + 1));
-        if (prefix < 0 || prefix > 32) continue;
+        uint64_t prefix = 0;
+        if (!parse_uint(std::string_view(entry).substr(slash + 1), prefix) || prefix > 32) continue;
 
         struct in_addr base{}, addr{};
         if (inet_pton(AF_INET, entry.substr(0, slash).c_str(), &base) != 1 ||
@@ -246,7 +250,7 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     std::shared_ptr<SessionBase<ConnectionType>> session)
 {
-    LOG_SMTP_DETAIL_DEBUG("Received EHLO: {}");
+    LOG_SMTP_DETAIL_DEBUG("Received EHLO: {}", session->get_last_command_args());
     if (auto* ctx = static_cast<SmtpsContext*>(session->get_context()))
         ctx->ehlo_domain = session->get_last_command_args();
 
@@ -1184,7 +1188,9 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
                         cb(false, 0);
                         return;
                     }
-                    int status = std::stoi(result->get_value(0, "status"));
+                    // safe_stoull：status 列 NULL/脏值 → 0 → 按"禁用"拒绝（fail-closed）。
+                    // 裸 std::stoi 在这个 worker 任务里抛出会直接 std::terminate 整进程。
+                    int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
                     if (status != 1) {
                         LOG_AUTH_WARN("User account disabled: {}", mail_address);
                         cb(false, 0);
@@ -1248,7 +1254,8 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
                 cb(false);
                 return;
             }
-            int status = std::stoi(result->get_value(0, "status"));
+            // safe_stoull：脏 status → 0 → 负缓存 + 550 User unknown（fail-closed），不抛
+            int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
             m_recipientCache->store(mail_address, {"", status, 0, 0});
             cb(status == 1);
         });

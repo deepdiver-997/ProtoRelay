@@ -8,16 +8,11 @@
 #include <set>
 #include <string>
 #include <vector>
+// safe_stoull：RETR/DELE 参数可能含非数字字符（RFC 1939 旧客户端常带括号备注），
+// 返回 0 表示非法。曾在此处与 imap_types.hpp 各放一份副本，2026-10-17 收口到 common。
+#include "mail_system/back/common/safe_parse.h"
 
 namespace mail_system {
-
-// safe_stoull: imap_types.hpp 里的同名 inline 工具，独立放一份避免互相 include。
-// RFC 1939 的 RETR/DELE 参数可能含非数字字符（旧客户端常带括号备注），用 std::stoull
-// 会抛异常；这里返回 0 表示非法。范围 [1, SIZE_MAX)。
-inline uint64_t safe_stoull(const std::string& s) {
-    if (s.empty()) return 0;
-    try { return std::stoull(s); } catch (...) { return 0; }
-}
 
 // ================================================================
 // POP3 状态枚举 (RFC 1939 §3)

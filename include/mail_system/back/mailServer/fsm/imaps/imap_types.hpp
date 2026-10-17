@@ -4,18 +4,9 @@
 #include <cstdint>
 #include <string>
 #include <ctime>
-#include <stdexcept>   // std::invalid_argument / out_of_range（safe_stoull）
-// ⚠ 必须有：macOS libc++ 会经 <string> 传递包含 <stdexcept>，Linux libstdc++ 不会，
-// 交叉编译时 catch(std::invalid_argument&) 直接报 expected unqualified-id。2026-08-29
+#include "mail_system/back/common/safe_parse.h"   // safe_stoull（曾在此处定义，2026-10-17 收口）
 
 namespace mail_system {
-
-// stoull/stoi/stoll 安全包装 — 非数字输入返回 0
-inline uint64_t safe_stoull(const std::string& s) {
-    try { return std::stoull(s); }
-    catch (const std::invalid_argument&) { return 0; }
-    catch (const std::out_of_range&)     { return 0; }
-}
 
 // ====================================================================
 // IMAP 状态枚举 (RFC 3501 §3 基本状态)

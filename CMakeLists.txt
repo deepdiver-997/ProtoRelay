@@ -582,6 +582,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(password_rehash_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(password_rehash_test)
 
+    add_executable(safe_parse_test test/unit/safe_parse_test.cpp)
+    setup_mail_target(safe_parse_test)
 
     add_executable(thread_pool_test
         src/framework/thread_pool/io_thread_pool.cpp
@@ -730,6 +732,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME metrics_core_test COMMAND metrics_core_test)
     add_test(NAME bcrypt_test COMMAND bcrypt_test)
     add_test(NAME password_rehash_test COMMAND password_rehash_test)
+    add_test(NAME safe_parse_test COMMAND safe_parse_test)
 
     # 聚合 target：新增单测只需在上面 add_executable/add_test，
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
@@ -761,6 +764,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         metrics_core_test
         bcrypt_test
         password_rehash_test
+        safe_parse_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界

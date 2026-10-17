@@ -488,6 +488,55 @@ TEST(rcpt_relay_denied) {
     std::cout << "  [PASS] rcpt_relay_denied" << std::endl;
 }
 
+// trusted_relay_networks 配置笔误（空前缀 / 非数字前缀 / 越界前缀 / 无斜杠垃圾）：
+//   1) 不许炸：修复前 std::stoi("") 在 RCPT handler（io 线程）抛 invalid_argument，
+//      本测试进程直接 abort；线上 io 线程的 run() 被 catch 后退出且不重进，挂在该
+//      io_context 上的全部连接静默僵死（比崩溃更难发现——进程还活着）。
+//   2) 不许误信任：坏前缀若被宽松解析成 0 = /0 = 匹配全网，等于对外开放中继。
+//   3) 坏条目之后的好条目仍要生效（跳过而非中止遍历）。
+TEST(rcpt_trusted_networks_malformed_entries_skipped) {
+    auto count = [](const std::string& s, const std::string& sub) {
+        size_t n = 0;
+        for (size_t pos = 0; (pos = s.find(sub, pos)) != std::string::npos; pos += sub.size()) ++n;
+        return n;
+    };
+    auto base = std::atomic_load(&fx.server->m_config);
+
+    // 只有坏条目：外部收件人必须仍被拒 → 没有任何条目被误解析成信任
+    {
+        ServerConfig c = *base;
+        c.trusted_relay_networks = {"10.0.0.0/", "192.168.0.0/x", "garbage", "10.0.0.0/99", "/8"};
+        std::atomic_store(&fx.server->m_config, std::make_shared<ServerConfig>(c));
+
+        auto h = fx.make_session(
+            "EHLO test\r\n"
+            "MAIL FROM:<spam@attacker.com>\r\n"
+            "RCPT TO:<victim@gmail.com>\r\n");
+        fx.start(h);
+        auto w = h.conn->written();
+        assert(HAS(w, "550 5.7.1 Relay access denied"));
+    }
+
+    // 坏条目后面跟一个覆盖 127.0.0.1（mock 客户端 IP）的好条目：必须放行 → 两个 250 Ok、无 550
+    {
+        ServerConfig c = *base;
+        c.trusted_relay_networks = {"10.0.0.0/", "garbage", "127.0.0.0/8"};
+        std::atomic_store(&fx.server->m_config, std::make_shared<ServerConfig>(c));
+
+        auto h = fx.make_session(
+            "EHLO test\r\n"
+            "MAIL FROM:<spam@attacker.com>\r\n"
+            "RCPT TO:<victim@gmail.com>\r\n");
+        fx.start(h);
+        auto w = h.conn->written();
+        assert(!HAS(w, "550"));
+        assert(count(w, "250 Ok") == 2);   // MAIL FROM + RCPT TO（信任中继放行）
+    }
+
+    std::atomic_store(&fx.server->m_config, base);   // 还原，后续用例共用 fixture
+    std::cout << "  [PASS] rcpt_trusted_networks_malformed_entries_skipped" << std::endl;
+}
+
 TEST(rcpt_unknown_local_rejected) {
     // 未认证 MTA 路径：本地不存在用户 → 550 User unknown（负缓存）
     auto h = fx.make_session(
@@ -872,6 +921,7 @@ int main() {
         test_mail_from_bad_syntax(fx);
         test_rcpt_to_bad_syntax(fx);
         test_rcpt_relay_denied(fx);
+        test_rcpt_trusted_networks_malformed_entries_skipped(fx);
         test_rcpt_unknown_local_rejected(fx);
         test_rcpt_local_known_accepted(fx);
         test_rcpt_auth_client_any_recipient(fx);

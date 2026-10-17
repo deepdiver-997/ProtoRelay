@@ -417,6 +417,48 @@ TEST(auth_user_db_async_bcrypt_no_rehash) {
     std::cout << "  [PASS] auth_user_db_async_bcrypt_no_rehash (bcrypt 行: 不发密码 UPDATE, 缓存原样)" << std::endl;
 }
 
+// 脏 status（列为 NULL 时 get_value 给 ""；或 schema 漂移成非数字）必须 535，不许炸进程。
+// 修复前：std::stoi("") 抛 invalid_argument 穿出 DB 回调——本测试里回调在 fire_query 的
+// 调用线程执行，进程直接 abort（ctest 报 "Subprocess aborted"）；线上同一路径在
+// boost::asio::thread_pool 的 worker 里，无人捕获 → std::terminate 整个 smtpsServer，
+// 一行脏数据干掉所有在线连接。修复后 safe_stoull → 0 → 按"禁用"拒绝（fail-closed）。
+TEST(auth_user_db_dirty_status) {
+    fx.apply_config(fx.with_spf("off"));
+    fx.db_pool->mock_conn()->set_deferred(true);
+    fx.db_pool->mock_conn()->clear_pending();
+
+    std::string user_plain = "dirty@test.local";
+    std::string user_b64 = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(user_plain.data()), user_plain.size());
+    std::string pass_plain = "test123";
+    std::string pass_b64 = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(pass_plain.data()), pass_plain.size());
+
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH LOGIN\r\n"
+        + user_b64 + "\r\n"
+        + pass_b64 + "\r\n",
+        InboundAuthPolicy::ON);
+    fx.run_on_io(h);
+
+    auto* db = fx.db_pool->mock_conn().get();
+    assert(wait_until([&] {
+        return db->has_pending_query() &&
+               !db->last_query_params().empty() && db->last_query_params()[0] == "dirty@test.local";
+    }));
+    // status 为空串（NULL 列）、密码本身是对的 —— 结果必须只取决于 status
+    db->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"status", ""}, {"password", "test123"}}}));
+
+    assert(wait_until([&] { return HAS(h->captured, "535 Authentication failed"); }));
+    // 没走到验密之后的任何 DB 写（不 rehash、不记 last_login）
+    assert(!db->has_pending_execute());
+    // 注：status!=1 的行在 store 之前就 return，不进认证缓存（三协议既有行为），
+    // 所以这里不断言负缓存；每次尝试都会再查一次库，由 record_auth_failure 的次数上限兜底。
+    std::cout << "  [PASS] auth_user_db_dirty_status (status=\"\" → 535, 进程存活, 无后续 DB 写)" << std::endl;
+}
+
 // ========== 3. DATA_END verify_all_from_file 异步路径 ==========
 
 TEST(verify_all_from_file_async) {
@@ -617,9 +659,10 @@ int main() {
         test_user_exists_db_async_exists(fx);
         test_user_exists_db_async_not_found(fx);
 
-        // 2b. AUTH auth_user_async DB 异步（明文行 rehash 链 + bcrypt 行对照）
+        // 2b. AUTH auth_user_async DB 异步（明文行 rehash 链 + bcrypt 行对照 + 脏 status 不炸）
         test_auth_user_db_async(fx);
         test_auth_user_db_async_bcrypt_no_rehash(fx);
+        test_auth_user_db_dirty_status(fx);
 
         // 3. DATA_END verify_all_from_file 异步
         test_verify_all_from_file_async(fx);
