@@ -452,6 +452,58 @@ void test_dedup_clamps_consistently() {
     check("dedup_matches_insert", insert_sql.find("'" + expect998 + "'") != std::string::npos);
 }
 
+// ---- webmail（只读列表/分页） ----
+
+void test_build_webmail_queries() {
+    namespace sql = mail_system::db::sql;
+
+    std::string list_mb = sql::build_webmail_list_mailboxes();
+    check_contains("webmail_list_mb_tables", list_mb, "FROM mailboxes mb");
+    check_contains("webmail_list_mb_mm_join", list_mb,
+                   "LEFT JOIN mail_mailbox mm ON mm.mailbox_id = mb.id");
+    // 聚合不放大：mr 必须限定本人收件行（(mail_id, recipient) 唯一），
+    // 否则多收件人邮件会把 total/unread 按收件人数翻倍
+    check_contains("webmail_list_mb_own_row", list_mb,
+                   "LEFT JOIN mail_recipients mr ON mr.mail_id = mm.mail_id AND mr.recipient = ?");
+    check_contains("webmail_list_mb_unread_rule", list_mb,
+                   "SUM(CASE WHEN mr.status = 1 THEN 1 ELSE 0 END)");
+    check_contains("webmail_list_mb_user_filter", list_mb, "WHERE mb.user_id = ?");
+    check_contains("webmail_list_mb_group", list_mb,
+                   "GROUP BY mb.id, mb.name, mb.box_type");
+
+    std::string get_mb = sql::build_webmail_get_mailbox_by_id();
+    // 归属校验合一：跨用户访问同箱 id 查 0 行 → 上层 404
+    check_contains("webmail_get_mb_ownership", get_mb,
+                   "FROM mailboxes WHERE id = ? AND user_id = ?");
+
+    std::string count = sql::build_webmail_count_mailbox_mails();
+    check_contains("webmail_count_scope", count,
+                   "FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?");
+
+    std::string page = sql::build_webmail_list_mailbox_mails(10, 20);
+    check_contains("webmail_page_from", page,
+                   "FROM mail_mailbox mm JOIN mails m ON mm.mail_id = m.id");
+    check_contains("webmail_page_scope", page,
+                   "WHERE mm.mailbox_id = ? AND mm.user_id = ?");
+    // 双视角聚合：sender=本人收件行，recipients=本人发件行
+    check_contains("webmail_page_sender_view", page,
+                   "MAX(CASE WHEN mr.recipient = ? THEN mr.sender END)");
+    check_contains("webmail_page_rcpt_view", page,
+                   "GROUP_CONCAT(DISTINCT CASE WHEN mr.sender = ? THEN mr.recipient END)");
+    check_contains("webmail_page_status_view", page,
+                   "MAX(CASE WHEN mr.recipient = ? THEN mr.status END)");
+    check_contains("webmail_page_attachment_probe", page,
+                   "EXISTS(SELECT 1 FROM attachments a WHERE a.mail_id = m.id)");
+    check_contains("webmail_page_group_by", page, "GROUP BY m.id");
+    // 稳定序：send_time 同秒靠雪花 id 决胜，翻页不重不漏
+    check_contains("webmail_page_order", page,
+                   "ORDER BY m.send_time DESC, m.id DESC");
+    check_contains("webmail_page_limit_offset", page, "LIMIT 10 OFFSET 20");
+
+    std::string page0 = sql::build_webmail_list_mailbox_mails(100, 0);
+    check_contains("webmail_page_first_page", page0, "LIMIT 100 OFFSET 0");
+}
+
 // ---- Utilities ----
 
 void test_build_select_last_insert_id() {
@@ -512,6 +564,8 @@ int main() {
     test_build_imap_append_queries();
     test_build_imap_expunge();
     test_build_imap_copy();
+
+    test_build_webmail_queries();
 
     test_build_shard_lookup();
 

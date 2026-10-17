@@ -11,9 +11,13 @@
 // ================================================================
 
 #include "framework/http/http_types.hpp"
+#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/webmail/api/api_util.h"
 #include "mail_system/back/webmail/api/auth_api.h"
+#include "mail_system/back/webmail/api/mail_api.h"
+#include "mail_system/back/webmail/mail_service.h"
 
+#include <cstring>
 #include <functional>
 #include <string>
 
@@ -21,8 +25,8 @@ namespace mail_system::webmail {
 
 class ApiRouter {
 public:
-    ApiRouter(AuthService& auth, SessionStore& sessions)
-        : auth_(auth), sessions_(sessions) {}
+    ApiRouter(AuthService& auth, SessionStore& sessions, MailService& mail)
+        : auth_(auth), sessions_(sessions), mail_(mail) {}
 
     using Complete = std::function<void(pr::http::HttpResponse)>;
 
@@ -62,6 +66,36 @@ public:
             complete(api::me(req, sessions_));
             return true;
         }
+        if (req.path == "/api/mailboxes") {
+            if (req.method != "GET") {
+                complete(api::error_response(405, "method not allowed"));
+                return true;
+            }
+            api::list_mailboxes(req, sessions_, mail_, complete);
+            return true;
+        }
+        // /api/mailboxes/{id}/messages —— id 严格 parse，非数字按未知路径 404
+        static constexpr char kMbPrefix[] = "/api/mailboxes/";
+        static constexpr char kMsgSuffix[] = "/messages";
+        if (req.path.rfind(kMbPrefix, 0) == 0 &&
+            req.path.size() > strlen(kMbPrefix) + strlen(kMsgSuffix) &&
+            req.path.compare(req.path.size() - strlen(kMsgSuffix),
+                             strlen(kMsgSuffix), kMsgSuffix) == 0) {
+            const std::string id_str = req.path.substr(
+                strlen(kMbPrefix),
+                req.path.size() - strlen(kMbPrefix) - strlen(kMsgSuffix));
+            uint64_t mailbox_id = 0;
+            if (!parse_uint(id_str, mailbox_id)) {
+                complete(api::error_response(404, "not found"));
+                return true;
+            }
+            if (req.method != "GET") {
+                complete(api::error_response(405, "method not allowed"));
+                return true;
+            }
+            api::list_messages(req, sessions_, mail_, mailbox_id, complete);
+            return true;
+        }
         complete(api::error_response(404, "not found"));
         return true;
     }
@@ -69,6 +103,7 @@ public:
 private:
     AuthService& auth_;
     SessionStore& sessions_;
+    MailService& mail_;
 };
 
 } // namespace mail_system::webmail

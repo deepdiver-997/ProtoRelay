@@ -207,6 +207,30 @@ std::string build_imap_copy_check_exists();
 std::string build_imap_copy_insert_mailbox();
 
 // ============================================================
+// webmail API（mail_system/back/webmail，只读列表/分页）
+// ============================================================
+
+// 用户全部邮箱 + 每箱 total/unread 聚合（侧边栏一条查询）。LEFT JOIN 限定
+// 本人收件行（mr.recipient = ?，(mail_id, recipient) 唯一）故聚合不放大；
+// 发件副本无本人收件行 → unread=0。参数 {mail_address, user_id}。
+std::string build_webmail_list_mailboxes();
+
+// 邮箱归属校验 + 元信息：id 不属于 user_id 即 0 行（跨用户访问 → 上层 404）。
+// 参数 {mailbox_id, user_id}。
+std::string build_webmail_get_mailbox_by_id();
+
+// 单箱邮件总数（分页 total）。参数 {mailbox_id, user_id}。
+std::string build_webmail_count_mailbox_mails();
+
+// 单箱邮件分页，每封一行。LEFT JOIN mr 聚合出双视角：sender=本人收件行的
+// 发件人（收件箱视角）；recipients=本人发件行的收件人 GROUP_CONCAT（发件箱
+// 视角，跨收件人行聚合）。EXISTS 探测附件（列表角标，读信页另有详情）。
+// 排序 send_time DESC, id DESC（id 为雪花 ID，同秒内仍稳定）。
+// LIMIT/OFFSET 由调用方严格 parse 后内联（纯数字，见 mail_api 参数校验）。
+// 参数 {mail_address, mail_address, mail_address, mailbox_id, user_id}。
+std::string build_webmail_list_mailbox_mails(std::uint32_t limit, std::uint32_t offset);
+
+// ============================================================
 // 分片路由
 // ============================================================
 

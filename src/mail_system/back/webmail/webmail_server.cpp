@@ -17,7 +17,8 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
       sessions_(sessions ? std::move(sessions) : std::make_shared<SessionStore>()),
       auth_service_(std::make_unique<AuthService>(
           get_shard_router(), auth_cache_, worker_pool)),
-      router_(*auth_service_, *sessions_) {
+      mail_service_(std::make_unique<MailService>(get_shard_router())),
+      router_(*auth_service_, *sessions_, *mail_service_) {
     // 工厂把 handler 注入每个新连接的 session；须在 start() 之前设置完成
     set_api_handler([this](const pr::http::HttpRequest& req,
                            std::function<void(pr::http::HttpResponse)> complete) {

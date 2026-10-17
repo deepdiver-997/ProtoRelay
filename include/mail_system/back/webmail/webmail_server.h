@@ -15,6 +15,7 @@
 #include "framework/http/http_server.h"
 #include "mail_system/back/webmail/api/api_router.h"
 #include "mail_system/back/webmail/auth_service.h"
+#include "mail_system/back/webmail/mail_service.h"
 #include "mail_system/back/webmail/session_store.h"
 
 #include <memory>
@@ -38,6 +39,7 @@ private:
     std::shared_ptr<AuthCache> auth_cache_;    // 保活（AuthService 内部按值持有拷贝）
     std::shared_ptr<SessionStore> sessions_;
     std::unique_ptr<AuthService> auth_service_;
+    std::unique_ptr<MailService> mail_service_;
     ApiRouter router_;
 };
 

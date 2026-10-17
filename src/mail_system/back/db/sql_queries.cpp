@@ -508,6 +508,50 @@ std::string build_imap_copy_insert_mailbox() {
 }
 
 // ============================================================
+// webmail（只读列表/分页）
+// ============================================================
+
+std::string build_webmail_list_mailboxes() {
+    return "SELECT mb.id, mb.name, mb.box_type, "
+           "COUNT(mm.id) AS total, "
+           "COALESCE(SUM(CASE WHEN mr.status = 1 THEN 1 ELSE 0 END), 0) AS unread "
+           "FROM mailboxes mb "
+           "LEFT JOIN mail_mailbox mm ON mm.mailbox_id = mb.id AND mm.user_id = mb.user_id "
+           "LEFT JOIN mail_recipients mr ON mr.mail_id = mm.mail_id AND mr.recipient = ? "
+           "WHERE mb.user_id = ? "
+           "GROUP BY mb.id, mb.name, mb.box_type ORDER BY mb.id";
+}
+
+std::string build_webmail_get_mailbox_by_id() {
+    return "SELECT id, name, box_type FROM mailboxes WHERE id = ? AND user_id = ?";
+}
+
+std::string build_webmail_count_mailbox_mails() {
+    return "SELECT COUNT(*) AS total FROM mail_mailbox WHERE mailbox_id = ? AND user_id = ?";
+}
+
+std::string build_webmail_list_mailbox_mails(std::uint32_t limit, std::uint32_t offset) {
+    std::ostringstream s;
+    s << "SELECT m.id, m.subject, UNIX_TIMESTAMP(m.send_time) AS send_time, "
+      << "mm.is_starred, mm.is_important, mm.is_deleted, "
+      << "EXISTS(SELECT 1 FROM attachments a WHERE a.mail_id = m.id) AS has_attachment, "
+      << "COALESCE(MAX(CASE WHEN mr.recipient = ? THEN mr.sender END), '') AS sender, "
+      << "COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN mr.sender = ? THEN mr.recipient END), '') "
+      << "AS recipients, "
+      << "COALESCE(MAX(CASE WHEN mr.recipient = ? THEN mr.status END), 0) AS status "
+      << "FROM mail_mailbox mm "
+      << "JOIN mails m ON mm.mail_id = m.id "
+      << "LEFT JOIN mail_recipients mr ON mr.mail_id = mm.mail_id "
+      << "WHERE mm.mailbox_id = ? AND mm.user_id = ? "
+      << "GROUP BY m.id, m.subject, m.send_time, mm.is_starred, mm.is_important, "
+      << "mm.is_deleted, "
+      << "EXISTS(SELECT 1 FROM attachments a WHERE a.mail_id = m.id) "
+      << "ORDER BY m.send_time DESC, m.id DESC "
+      << "LIMIT " << limit << " OFFSET " << offset;
+    return s.str();
+}
+
+// ============================================================
 // 分片路由
 // ============================================================
 

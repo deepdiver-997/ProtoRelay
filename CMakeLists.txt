@@ -412,6 +412,7 @@ if(BUILD_OBJECT_ONLY)
         src/framework/http/http_server.cpp
         src/mail_system/back/webmail/webmail_server.cpp
         src/mail_system/back/webmail/api/auth_api.cpp
+        src/mail_system/back/webmail/api/mail_api.cpp
         test/server/webmail_main.cpp
     )
     setup_mail_target(webmailServer_obj)
@@ -480,6 +481,7 @@ else()
         src/framework/http/http_server.cpp
         src/mail_system/back/webmail/webmail_server.cpp
         src/mail_system/back/webmail/api/auth_api.cpp
+        src/mail_system/back/webmail/api/mail_api.cpp
         test/server/webmail_main.cpp
     )
     setup_mail_target(webmailServer)
@@ -615,6 +617,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(webmail_test
         ${COMMON_SRCS}
         src/mail_system/back/webmail/api/auth_api.cpp
+        src/mail_system/back/webmail/api/mail_api.cpp
         test/unit/webmail_test.cpp
     )
     target_include_directories(webmail_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
