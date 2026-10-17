@@ -15,8 +15,12 @@
 #include "mail_system/back/webmail/session_store.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/router/static_shard_router.h"
+#include "mail_system/back/webmail/html_sanitize.h"
+#include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mock_db_pool.h"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -24,6 +28,7 @@
 using namespace mail_system;
 using namespace mail_system::webmail;
 namespace http = pr::http;
+#include <unistd.h>
 
 // ========== 夹具 ==========
 
@@ -259,23 +264,32 @@ struct MailApiFixture {
     std::shared_ptr<AuthCache> cache = std::make_shared<AuthCache>();
     SessionStore sessions{1000, std::chrono::seconds(60)};
     std::shared_ptr<test::MockDbPool> db = std::make_shared<test::MockDbPool>();
+    std::shared_ptr<storage::LocalFileStorageProvider> storage;
     std::shared_ptr<router::StaticShardRouter> shard;
     std::unique_ptr<AuthService> auth;
     std::unique_ptr<MailService> mail;
     std::unique_ptr<ApiRouter> router;
     const std::string token = SessionStore::generate_token();
 
-    MailApiFixture() {
+    // storage_dir 非空时装配本地存储（读信全流程用）；空 = 无存储，
+    // 读信走 body_available=false 降级路径
+    explicit MailApiFixture(const std::string& storage_dir = {}) {
         AuthCacheEntry active;
         active.password_hash = bcrypt_hash("secret");
         active.status = 1;
         active.user_id = 42;
         cache->inject("user@test.local", active);
 
+        std::vector<std::shared_ptr<pr::storage::IStorageProvider>> storages;
+        if (!storage_dir.empty()) {
+            std::filesystem::create_directories(storage_dir);
+            storage = std::make_shared<storage::LocalFileStorageProvider>(
+                storage_dir + "/", storage_dir + "/");
+            storages.push_back(storage);
+        }
         shard = std::make_shared<router::StaticShardRouter>(
             std::vector<std::pair<std::string, int>>{}, 0,
-            std::vector<std::shared_ptr<DBPool>>{db},
-            std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{});
+            std::vector<std::shared_ptr<DBPool>>{db}, std::move(storages));
         auth = std::make_unique<AuthService>(shard, cache, nullptr);
         mail = std::make_unique<MailService>(shard);
         router = std::make_unique<ApiRouter>(*auth, sessions, *mail);
@@ -508,6 +522,215 @@ static void test_mail_api_bad_requests() {
     std::cout << "  [PASS] mail_api_bad_requests" << std::endl;
 }
 
+// ========== html_sanitize / mime_view ==========
+
+static void test_html_sanitize_whitelist() {
+    namespace hs = html_sanitize;
+    // 脚本类元素连内容整块剥
+    assert(hs::sanitize("<script>alert(1)</script>ok") == "ok");
+    assert(hs::sanitize("<STYLE>body{}</STYLE>x") == "x");
+    assert(hs::sanitize("<iframe src=\"http://e\">f</iframe>y") == "y");
+    assert(hs::sanitize("<svg><circle/></svg>z") == "z");
+    // 事件属性 / style 一律不留
+    assert(hs::sanitize("<b onclick=\"x\" style=\"y\">hi</b>") == "<b>hi</b>");
+    assert(hs::sanitize("<img src=\"http://track/x\" alt=\"pic\" width=\"5\">")
+           == "<img alt=\"pic\" width=\"5\">");   // 远程图默认禁用（kickoff 决策 5）
+    // href 白名单：http/https/mailto 放行，其余 scheme 剥属性
+    assert(hs::sanitize("<a href=\"javascript:alert(1)\">x</a>") == "<a>x</a>");
+    assert(hs::sanitize("<a href=\"data:text/html,evil\">x</a>") == "<a>x</a>");
+    assert(hs::sanitize("<a href=\"https://a.b/c?d=1&e=2\">x</a>")
+           == "<a href=\"https://a.b/c?d=1&amp;e=2\">x</a>");
+    assert(hs::sanitize("<a href=\"mailto:a@b\">x</a>") == "<a href=\"mailto:a@b\">x</a>");
+    // 注释 / DOCTYPE / PI 整段剥
+    assert(hs::sanitize("<!-- c --><p>y</p>") == "<p>y</p>");
+    assert(hs::sanitize("<!DOCTYPE html><p>y</p>") == "<p>y</p>");
+    // 文本节点重新转义 + 字面 '<'
+    assert(hs::sanitize("1 < 2 & 3") == "1 &lt; 2 &amp; 3");
+    // 实体解码后过不了 scheme 白名单 → 剥（&#58; = ':'）
+    assert(hs::sanitize("<a href=\"javascript&#58;alert(1)\">x</a>") == "<a>x</a>");
+    // 恰好一次解码：已有实体不被二次转义（&amp; 进 &amp; 出）
+    assert(hs::sanitize("<a href=\"https://a.b/?x=1&amp;y=2\">v</a>")
+           == "<a href=\"https://a.b/?x=1&amp;y=2\">v</a>");
+    assert(hs::sanitize("<p>a &amp; b &lt;c&gt;</p>") == "<p>a &amp; b &lt;c&gt;</p>");
+    assert(hs::sanitize("&#65;&#x42;") == "AB");
+    // 未闭合引号/未闭合标签：不挂不炸，整体剥
+    assert(hs::sanitize("<a href=\"x").empty());
+    assert(hs::sanitize("a < b <i>c</i>") == "a &lt; b <i>c</i>");
+    // 白名单标签原样保留（重建形态）
+    assert(hs::sanitize("<P CLASS=x>para</P>") == "<p>para</p>");
+    std::cout << "  [PASS] html_sanitize_whitelist" << std::endl;
+}
+
+static void test_mime_view_decode() {
+    namespace mv = mime_view;
+    // QP：=XX、软换行、小写 hex、非法序列按字面、尾部悬挂 '='
+    assert(mv::decode_quoted_printable("h=C3=A9llo") == "h\xc3\xa9llo");
+    assert(mv::decode_quoted_printable("a=\r\nb") == "ab");
+    assert(mv::decode_quoted_printable("a=\nb") == "ab");
+    assert(mv::decode_quoted_printable("=2f") == "/");
+    assert(mv::decode_quoted_printable("a=zz") == "a=zz");
+    assert(mv::decode_quoted_printable("end=") == "end=");
+    // base64 part 解码（去行缀）
+    MimePart p;
+    p.encoding = "base64";
+    auto d = mv::decode_part(outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>("<b>x</b>"), 8), p);
+    assert(d.content == "<b>x</b>" && !d.truncated);
+    // 7bit 原样
+    p.encoding = "7bit";
+    d = mv::decode_part("raw\r\n", p);
+    assert(d.content == "raw\r\n");
+    // 截断上限
+    p.encoding = "7bit";
+    d = mv::decode_part(std::string(mv::kMaxDecodedBytes + 10, 'a'), p);
+    assert(d.truncated && d.content.size() == mv::kMaxDecodedBytes);
+    // 叶子查找：multipart 树里第一个 text/<subtype>
+    MimePart root;  root.type = "multipart"; root.subtype = "alternative";
+    MimePart html;  html.type = "text"; html.subtype = "html";
+    MimePart plain; plain.type = "text"; plain.subtype = "plain";
+    MimePart mixed; mixed.type = "multipart"; mixed.subtype = "mixed";
+    mixed.subs.push_back(plain);
+    root.subs.push_back(html);
+    root.subs.push_back(mixed);
+    assert(mv::find_text_leaf(root, "html") == &root.subs[0]);
+    assert(mv::find_text_leaf(root, "plain") == &root.subs[1].subs[0]);
+    std::cout << "  [PASS] mime_view_decode" << std::endl;
+}
+
+// ========== 读信全流程（MockDbPool + 本地存储）==========
+
+static void fire_message_meta(test::MockDbConnection& conn,
+                              const std::string& body_path) {
+    // ① 归属校验：mail 在箱内 + body_path
+    conn.fire_query(std::make_shared<test::MockDbResult>(MockRows{
+        {{"id", "7"}, {"subject", "Hello"}, {"body_path", body_path},
+         {"send_time", "1729200000"}, {"is_starred", "1"},
+         {"is_important", "0"}, {"is_deleted", "0"}}}));
+    // ② 发件人 / ③ 收件人 / ④ 附件（发起序 = 回调序，join 后进存储段）
+    conn.fire_query(std::make_shared<test::MockDbResult>(MockRows{
+        {{"sender", "alice@test.local"}}}));
+    conn.fire_query(std::make_shared<test::MockDbResult>(MockRows{
+        {{"recipient", "user@test.local"}},
+        {{"recipient", "other@test.local"}}}));
+    conn.fire_query(std::make_shared<test::MockDbResult>(MockRows{
+        {{"id", "5"}, {"filename", "notes.txt"}, {"file_size", "42"},
+         {"mime_type", "text/plain"}}}));
+    // 存储读取是本地 provider 内联执行：④ 一落地响应即同步产出
+}
+
+static void test_mail_api_get_message_flow() {
+    namespace fs = std::filesystem;
+    const auto dir = (fs::temp_directory_path() /
+                      ("webmail_test_" + std::to_string(::getpid()))).string();
+    fs::remove_all(dir);
+    MailApiFixture fx(dir);
+    Captured c;
+
+    // 组一封 multipart/alternative：QP 纯文本 + base64 HTML（含 script）
+    const std::string html_raw = "<p>hi <script>alert(1)</script><b>bold</b></p>";
+    const std::string html_b64 = outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(html_raw.data()), html_raw.size());
+    const std::string eml =
+        "From: Alice <alice@test.local>\r\n"
+        "To: user@test.local\r\n"
+        "Subject: Hello\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: multipart/alternative; boundary=\"BB\"\r\n"
+        "\r\n"
+        "--BB\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "Content-Transfer-Encoding: quoted-printable\r\n"
+        "\r\n"
+        "h=C3=A9llo w=C3=B6rld=\r\n"
+        "next line\r\n"
+        "--BB\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Transfer-Encoding: base64\r\n"
+        "\r\n"
+        + html_b64 + "\r\n"
+        "--BB--\r\n";
+    const std::string body_path = dir + "/7.eml";
+    { std::ofstream f(body_path, std::ios::binary); f << eml; }
+
+    assert(fx.router->handle(make_req("GET", "/api/mailboxes/81/messages/7", {},
+                                      "wb_session=" + fx.token),
+                             c.complete()));
+    auto conn = fx.db->mock_conn();
+    fire_message_meta(*conn, body_path);
+    assert(c.calls == 1 && c.resp->status == 200);
+
+    auto body = nlohmann::json::parse(c.resp->body);
+    assert(body["message"]["id"] == 7);
+    assert(body["message"]["sender"] == "alice@test.local");
+    assert(body["message"]["recipients"].size() == 2);
+    assert(body["message"]["is_starred"] == true);
+    assert(body["body_available"] == true);
+    // QP 解码（软换行 + UTF-8 字节）
+    assert(body["body"]["text"] == "h\xc3\xa9llo w\xc3\xb6rldnext line");
+    assert(body["body"]["charset_text"] == "utf-8");
+    // base64 解码 + 白名单清洗：script 连内容消失，合法标签保留
+    assert(body["body"]["html"] == "<p>hi <b>bold</b></p>");
+    // 附件清单来自 attachments 表
+    assert(body["attachments"].size() == 1);
+    assert(body["attachments"][0]["filename"] == "notes.txt");
+
+    // 再读一次走 sidecar 快路径（幂等，同样 200）
+    c = {};
+    assert(fx.router->handle(make_req("GET", "/api/mailboxes/81/messages/7", {},
+                                      "wb_session=" + fx.token),
+                             c.complete()));
+    fire_message_meta(*conn, body_path);
+    assert(c.calls == 1 && c.resp->status == 200);
+    body = nlohmann::json::parse(c.resp->body);
+    assert(body["body"]["html"] == "<p>hi <b>bold</b></p>");
+    fs::remove_all(dir);
+    std::cout << "  [PASS] mail_api_get_message_flow" << std::endl;
+}
+
+static void test_mail_api_get_message_degraded() {
+    MailApiFixture fx;   // 无存储 → 信壳 200 + body_available=false
+    Captured c;
+    assert(fx.router->handle(make_req("GET", "/api/mailboxes/81/messages/7", {},
+                                      "wb_session=" + fx.token),
+                             c.complete()));
+    fire_message_meta(*fx.db->mock_conn(), "");
+    assert(c.calls == 1 && c.resp->status == 200);
+    auto body = nlohmann::json::parse(c.resp->body);
+    assert(body["body_available"] == false);
+    assert(body["body"]["text_available"] == false);
+    assert(body["attachments"].size() == 1);
+    std::cout << "  [PASS] mail_api_get_message_degraded" << std::endl;
+}
+
+static void test_mail_api_get_message_denied() {
+    MailApiFixture fx;
+    Captured c;
+    // 非本人/不在此箱/无此信 → 统一 404
+    assert(fx.router->handle(make_req("GET", "/api/mailboxes/81/messages/7", {},
+                                      "wb_session=" + fx.token),
+                             c.complete()));
+    fx.db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>());
+    assert(c.calls == 1 && c.resp->status == 404);
+    // 未认证 → 401（零 DB 触达）
+    c = {};
+    assert(fx.router->handle(make_req("GET", "/api/mailboxes/81/messages/7"),
+                             c.complete()));
+    assert(c.resp->status == 401);
+    // 路径 id 非数字 → 404
+    c = {};
+    assert(fx.router->handle(make_req("GET", "/api/mailboxes/81/messages/abc", {},
+                                      "wb_session=" + fx.token),
+                             c.complete()));
+    assert(c.resp->status == 404);
+    // POST → 405
+    c = {};
+    assert(fx.router->handle(make_req("POST", "/api/mailboxes/81/messages/7", {},
+                                      "wb_session=" + fx.token),
+                             c.complete()));
+    assert(c.resp->status == 405);
+    std::cout << "  [PASS] mail_api_get_message_denied" << std::endl;
+}
+
 int main() {
     std::cout << "Running webmail tests..." << std::endl;
     test_session_store_basics();
@@ -524,6 +747,11 @@ int main() {
     test_mail_api_empty_mailbox();
     test_mail_api_db_down_fail_closed();
     test_mail_api_bad_requests();
+    test_html_sanitize_whitelist();
+    test_mime_view_decode();
+    test_mail_api_get_message_flow();
+    test_mail_api_get_message_degraded();
+    test_mail_api_get_message_denied();
     std::cout << "All webmail tests passed!" << std::endl;
     return 0;
 }

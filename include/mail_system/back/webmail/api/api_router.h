@@ -96,6 +96,32 @@ public:
             api::list_messages(req, sessions_, mail_, mailbox_id, complete);
             return true;
         }
+        // /api/mailboxes/{mb}/messages/{mail} —— 读信（两级 id 都严格 parse）
+        {
+            const std::string& path = req.path;
+            if (path.rfind(kMbPrefix, 0) == 0) {
+                const size_t mid = path.find("/messages/", strlen(kMbPrefix));
+                if (mid != std::string::npos) {
+                    const std::string mb_str = path.substr(strlen(kMbPrefix),
+                                                           mid - strlen(kMbPrefix));
+                    const std::string mail_str = path.substr(mid + strlen("/messages/"));
+                    uint64_t mailbox_id = 0, mail_id = 0;
+                    // 任何一段非数字（含空段）→ 未知路径 404
+                    if (!mb_str.empty() && !mail_str.empty() &&
+                        parse_uint(mb_str, mailbox_id) && parse_uint(mail_str, mail_id)) {
+                        if (req.method != "GET") {
+                            complete(api::error_response(405, "method not allowed"));
+                            return true;
+                        }
+                        api::get_message(req, sessions_, mail_, mailbox_id, mail_id,
+                                         complete);
+                        return true;
+                    }
+                    complete(api::error_response(404, "not found"));
+                    return true;
+                }
+            }
+        }
         complete(api::error_response(404, "not found"));
         return true;
     }

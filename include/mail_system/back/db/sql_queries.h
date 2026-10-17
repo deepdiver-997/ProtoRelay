@@ -230,6 +230,17 @@ std::string build_webmail_count_mailbox_mails();
 // 参数 {mail_address, mail_address, mail_address, mailbox_id, user_id}。
 std::string build_webmail_list_mailbox_mails(std::uint32_t limit, std::uint32_t offset);
 
+// 读信：邮件必须同时在该 mailbox 且属于该 user（mm 唯一键保证单行），
+// 0 行 = 无此信/不在此箱/非本人 → 上层统一 404。参数 {mail_id, mailbox_id, user_id}。
+std::string build_webmail_get_mail_in_mailbox();
+
+// 读信发件人/收件人/附件（读信页 From/To 行与附件清单）。
+// 附件清单来自 attachments 表（SMTP 收信时落库），下载按 attachment id 走
+// 后续的鉴权流式端点。参数均 {mail_id}。
+std::string build_webmail_get_mail_sender();
+std::string build_webmail_get_mail_recipients();
+std::string build_webmail_list_mail_attachments();
+
 // ============================================================
 // 分片路由
 // ============================================================

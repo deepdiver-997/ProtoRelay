@@ -1,5 +1,6 @@
 #include "mail_system/back/webmail/api/mail_api.h"
 #include "mail_system/back/webmail/api/api_util.h"
+#include "mail_system/back/webmail/html_sanitize.h"
 
 #include <nlohmann/json.hpp>
 
@@ -121,6 +122,59 @@ void list_messages(const pr::http::HttpRequest& req, SessionStore& sessions,
                 {"page_size", out.page_size},
                 {"total_pages", total_pages},
                 {"messages", std::move(arr)}}));
+        });
+}
+
+void get_message(const pr::http::HttpRequest& req, SessionStore& sessions,
+                 MailService& mail, uint64_t mailbox_id, uint64_t mail_id,
+                 const Complete& complete) {
+    WebSessionInfo info;
+    if (!session_user(sessions, req, info)) {
+        complete(error_response(401, "not authenticated"));
+        return;
+    }
+    mail.get_message_async(info.user_id, info.address, mailbox_id, mail_id,
+        [complete](MessageDetail out) {
+            if (out.server_error) {
+                complete(error_response(503, "database unavailable"));
+                return;
+            }
+            if (out.not_found) {
+                // 不区分"无此信/不在此箱/非你的信"，跨用户探测只得到 404
+                complete(error_response(404, "message not found"));
+                return;
+            }
+            nlohmann::json atts = nlohmann::json::array();
+            for (const auto& a : out.attachments)
+                atts.push_back({{"id", a.id}, {"filename", a.filename},
+                                {"size", a.size}, {"mime_type", a.mime_type}});
+            nlohmann::json body = nlohmann::json{
+                {"text_available", out.text_available},
+                {"html_available", out.html_available},
+                {"charset_text", out.charset_text},
+                {"charset_html", out.charset_html},
+                {"text_truncated", out.text_truncated},
+                {"html_truncated", out.html_truncated},
+            };
+            if (out.text_available) body["text"] = std::move(out.text);
+            if (out.html_available) {
+                // 白名单清洗（kickoff 设计决策 5 第一道防线）；前端仍须
+                // sandbox iframe + CSP 渲染——两层防线缺一不可
+                body["html"] = html_sanitize::sanitize(std::move(out.html));
+            }
+            complete(json_response(200, nlohmann::json{
+                {"message", {{"id", out.id},
+                             {"subject", out.subject},
+                             {"sender", out.sender},
+                             {"recipients", out.recipients},
+                             {"send_time", static_cast<int64_t>(out.send_time)},
+                             {"status", out.status},
+                             {"is_starred", out.starred},
+                             {"is_important", out.important},
+                             {"is_deleted", out.deleted}}},
+                {"body", std::move(body)},
+                {"body_available", out.body_available},
+                {"attachments", std::move(atts)}}));
         });
 }
 

@@ -551,6 +551,29 @@ std::string build_webmail_list_mailbox_mails(std::uint32_t limit, std::uint32_t 
     return s.str();
 }
 
+std::string build_webmail_get_mail_in_mailbox() {
+    return "SELECT m.id, m.subject, m.body_path, "
+           "UNIX_TIMESTAMP(m.send_time) AS send_time, "
+           "mm.is_starred, mm.is_important, mm.is_deleted "
+           "FROM mail_mailbox mm JOIN mails m ON mm.mail_id = m.id "
+           "WHERE mm.mail_id = ? AND mm.mailbox_id = ? AND mm.user_id = ?";
+}
+
+// 与 IMAP get_mail_sender_async / get_mail_recipients_async 同口径
+//（收件行多于一行为多收件人邮件，发件人取任一行均一致）
+std::string build_webmail_get_mail_sender() {
+    return "SELECT sender FROM mail_recipients WHERE mail_id = ? LIMIT 1";
+}
+
+std::string build_webmail_get_mail_recipients() {
+    return "SELECT recipient FROM mail_recipients WHERE mail_id = ?";
+}
+
+std::string build_webmail_list_mail_attachments() {
+    return "SELECT id, filename, file_size, mime_type FROM attachments "
+           "WHERE mail_id = ? ORDER BY id";
+}
+
 // ============================================================
 // 分片路由
 // ============================================================

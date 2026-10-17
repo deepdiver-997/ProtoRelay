@@ -45,10 +45,10 @@ std::string build_envelope_string(
     const std::string& message_id);
 std::string build_fetch_body_response(const std::string& body_content, size_t octets);
 
-// BODYSTRUCTURE 构建（RFC 3501 §7.4.2）+ MIME part 正文提取
+// BODYSTRUCTURE 构建（RFC 3501 §7.4.2）
+// part 正文提取 extract_part_content 已上移 common/mime_parser.h（IMAP/webmail 共用）
 std::string build_bodystructure(const std::string& raw);
 std::string build_bodystructure_tree(const MimePart& mp);
-std::string extract_part_content(const std::string& raw, const MimePart& part);
 
 // 展开逗号分隔的序列号集（"1" / "1:*" / "1,3,5" / "1:3,5" / "*"）→ (start,end)
 // 闭区间列表（已 clamp 到 [1,total]）

@@ -357,37 +357,6 @@ std::string build_bodystructure_tree(const MimePart& mp) {
     return result;
 }
 
-// 提取 MIME part 的正文：跳过该 part 自己的 MIME header，返回原始内容。
-// 注意：BODY[<section>] 按 RFC 3501 返回的是原始编码内容（base64/quoted-printable 保持原样），
-// 由客户端根据 BODYSTRUCTURE 的 body-fld-enc 自行解码。因此这里不做 transfer-encoding 解码。
-// raw 是完整 body 文件内容（含顶层 header + multipart），part 来自预解析 MimePart 树
-// （offset/length 为该 part 在 raw 中的字节区间，含其自己的 MIME header）。
-std::string extract_part_content(const std::string& raw, const MimePart& part) {
-    size_t start = part.offset;
-    size_t end = part.offset + part.length;
-    if (start >= raw.size()) return {};
-    if (end > raw.size()) end = raw.size();
-    if (end <= start) return {};
-
-    // 在 part 范围内定位 header/body 分隔
-    size_t sep = raw.find("\r\n\r\n", start);
-    if (sep == std::string::npos || sep >= end) {
-        sep = raw.find("\n\n", start);
-        if (sep == std::string::npos || sep >= end) return {};
-    }
-    size_t body_start = sep + (raw[sep] == '\r' ? 4 : 2);
-    // 兼容旧 sidecar：非 multipart 根 part 的 length 可能只覆盖 header
-    // （parse_mime_tree 的旧 bug）。此时 body 应从 header 之后延伸到消息末尾。
-    if (body_start >= end && start == 0) end = raw.size();
-    if (body_start >= end) return {};
-
-    std::string body = raw.substr(body_start, end - body_start);
-    // 去掉尾部空白行
-    while (!body.empty() && (body.back() == '\r' || body.back() == '\n'))
-        body.pop_back();
-    return body;
-}
-
 // 展开逗号分隔的序列号集（支持 "1" / "1:*" / "1,3,5" / "1:3,5" / "*"）
 // 输出到 ranges（(start,end) 闭区间列表，已 clamp 到 [1,total]）
 void expand_seq_set(const std::string& seq_set, size_t total,

@@ -2,13 +2,16 @@
 #define MAIL_SYSTEM_WEBMAIL_API_MAIL_API_H
 
 // ================================================================
-// mail_api — 邮件读路径端点（webmail MVP-2 第一步：列表/分页）
+// mail_api — 邮件读路径端点（webmail MVP-2）
 //
-//   GET /api/mailboxes                    邮箱列表（含每箱 total/unread）
-//   GET /api/mailboxes/{id}/messages      单箱邮件分页（?page=&page_size=）
+//   GET /api/mailboxes                        邮箱列表（含每箱 total/unread）
+//   GET /api/mailboxes/{id}/messages          单箱邮件分页（?page=&page_size=）
+//   GET /api/mailboxes/{id}/messages/{mid}    读信（解码正文 + 附件清单）
 //
-// 两个端点都要求会话（cookie）；会话校验在内存表，直连路径不做 DB 往返。
-// DB 查询经 MailService 异步编排，complete 恰好调用一次。
+// 读信返回的 html 字段已经 html_sanitize 白名单清洗；红线要求前端仍以
+// sandbox iframe（无 same-origin/脚本）+ CSP 渲染——两层防线缺一不可。
+// 所有端点要求会话（cookie）；DB 查询经 MailService 异步编排，
+// complete 恰好调用一次。
 // ================================================================
 
 #include "framework/http/http_types.hpp"
@@ -28,6 +31,10 @@ void list_mailboxes(const pr::http::HttpRequest& req, SessionStore& sessions,
 // mailbox_id 已由路由层严格 parse（非数字不会到达这里）
 void list_messages(const pr::http::HttpRequest& req, SessionStore& sessions,
                    MailService& mail, uint64_t mailbox_id, const Complete& complete);
+
+void get_message(const pr::http::HttpRequest& req, SessionStore& sessions,
+                 MailService& mail, uint64_t mailbox_id, uint64_t mail_id,
+                 const Complete& complete);
 
 } // namespace mail_system::webmail::api
 
