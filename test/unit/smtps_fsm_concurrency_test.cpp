@@ -303,13 +303,19 @@ TEST(user_exists_db_async_not_found) {
 }
 
 // ========== 2b. AUTH auth_user_async DB 异步路径 ==========
+//
+// 2026-10-17 起 DB 路径对 MD5/明文历史行多一跳：验密通过后先发 CAS 密码 UPDATE
+// （rehash-on-login，见 common/password_rehash.h），再发 update_last_login，最后 235。
+// 本测试固定这个顺序与 CAS 参数：少了旧值守卫 = 并发改密被 bcrypt(旧密码) 覆盖；
+// 顺序反了 = 235 之前密码没升级。bcrypt 行"绝不多这一跳"的对照用例见下一个测试。
 
 TEST(auth_user_db_async) {
     fx.apply_config(fx.with_spf("off"));
     fx.db_pool->mock_conn()->set_deferred(true);
     fx.db_pool->mock_conn()->clear_pending();   // 排除持久化 worker 等其它查询来源
 
-    // dbuser@test.local 不在认证缓存 → 走 DB：async_query(取 password) → async_execute(update_last_login)
+    // dbuser@test.local 不在认证缓存 → 走 DB：
+    //   async_query(取 password) → [明文行] async_execute(CAS 密码 UPDATE) → async_execute(update_last_login)
     std::string user_plain = "dbuser@test.local";
     std::string user_b64 = mail_system::outbound::base64_encode(
         reinterpret_cast<const unsigned char*>(user_plain.data()), user_plain.size());
@@ -331,16 +337,84 @@ TEST(auth_user_db_async) {
         return db->has_pending_query() &&
                !db->last_query_params().empty() && db->last_query_params()[0] == "dbuser@test.local";
     }));
-    // 触发查询：status=1 + 明文密码 test123 → verify_password 通过
+    // 触发查询：status=1 + 明文密码 test123 → verify_password_hash 通过
     db->fire_query(std::make_shared<test::MockDbResult>(
         std::vector<std::map<std::string, std::string>>{{{"status", "1"}, {"password", "test123"}}}));
 
-    // 第二步：密码验证通过后 auth_user_async 发 async_execute(update_last_login)
+    // 第二步：明文行 → rehash-on-login 先发 CAS 密码 UPDATE
+    // （bcrypt_hash 在回调线程同步算 ~几百 ms，wait_until 3s 足够）
     assert(wait_until([&] { return db->has_pending_execute(); }));
+    {
+        const std::string sql = db->last_query_sql();
+        const auto p = db->last_query_params();
+        assert(HAS(sql, "SET password = ?"));
+        assert(HAS(sql, "AND password = ?"));          // CAS 守卫：限定旧值
+        assert(p.size() == 3);
+        assert(is_bcrypt_hash(p[0]));                   // 新值是 bcrypt
+        assert(bcrypt_verify("test123", p[0]));         // 且能验回原密码
+        assert(p[1] == "dbuser@test.local");
+        assert(p[2] == "test123");                      // 旧值 = 刚从 DB 读到的明文
+    }
+    db->fire_execute(true);
+
+    // 第三步：升级落地后才发 update_last_login
+    assert(wait_until([&] {
+        return db->has_pending_execute() && HAS(db->last_query_sql(), "last_login_time");
+    }));
     db->fire_execute(true);
 
     assert(wait_until([&] { return HAS(h->captured, "235 Authentication successful"); }));
-    std::cout << "  [PASS] auth_user_db_async (auth_user_async DB 查询+登录记录 回调 → 235)" << std::endl;
+
+    // 缓存条目已刷成 bcrypt：明文不再躺在 AuthCache 里一个 TTL
+    AuthCacheEntry ce;
+    assert(fx.fsm->m_authCache->lookup("dbuser@test.local", ce));
+    assert(is_bcrypt_hash(ce.password_hash));
+    assert(bcrypt_verify("test123", ce.password_hash));
+    std::cout << "  [PASS] auth_user_db_async (明文行: SELECT → CAS 密码 UPDATE → last_login → 235, 缓存已升级)" << std::endl;
+}
+
+// 对照：bcrypt 行验密通过后唯一一次 execute 必须直接是 update_last_login，
+// 不许出现密码 UPDATE，缓存条目原样保留（否则每次登录都白算一次 bcrypt 并写一次 DB）。
+TEST(auth_user_db_async_bcrypt_no_rehash) {
+    fx.apply_config(fx.with_spf("off"));
+    fx.db_pool->mock_conn()->set_deferred(true);
+    fx.db_pool->mock_conn()->clear_pending();
+
+    std::string user_plain = "bcuser@test.local";   // 与上一用例不同账号：避免缓存命中走快路径
+    std::string user_b64 = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(user_plain.data()), user_plain.size());
+    std::string pass_plain = "test123";
+    std::string pass_b64 = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(pass_plain.data()), pass_plain.size());
+    const std::string stored_bcrypt = bcrypt_hash("test123", 4);   // 低 cost：验密快
+
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH LOGIN\r\n"
+        + user_b64 + "\r\n"
+        + pass_b64 + "\r\n",
+        InboundAuthPolicy::ON);
+    fx.run_on_io(h);
+
+    auto* db = fx.db_pool->mock_conn().get();
+    assert(wait_until([&] {
+        return db->has_pending_query() &&
+               !db->last_query_params().empty() && db->last_query_params()[0] == "bcuser@test.local";
+    }));
+    db->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"status", "1"}, {"password", stored_bcrypt}}}));
+
+    assert(wait_until([&] { return db->has_pending_execute(); }));
+    assert(!HAS(db->last_query_sql(), "SET password"));
+    assert(HAS(db->last_query_sql(), "last_login_time"));
+    db->fire_execute(true);
+
+    assert(wait_until([&] { return HAS(h->captured, "235 Authentication successful"); }));
+
+    AuthCacheEntry ce;
+    assert(fx.fsm->m_authCache->lookup("bcuser@test.local", ce));
+    assert(ce.password_hash == stored_bcrypt);   // 原样，没被重哈希
+    std::cout << "  [PASS] auth_user_db_async_bcrypt_no_rehash (bcrypt 行: 不发密码 UPDATE, 缓存原样)" << std::endl;
 }
 
 // ========== 3. DATA_END verify_all_from_file 异步路径 ==========
@@ -543,8 +617,9 @@ int main() {
         test_user_exists_db_async_exists(fx);
         test_user_exists_db_async_not_found(fx);
 
-        // 2b. AUTH auth_user_async DB 异步
+        // 2b. AUTH auth_user_async DB 异步（明文行 rehash 链 + bcrypt 行对照）
         test_auth_user_db_async(fx);
+        test_auth_user_db_async_bcrypt_no_rehash(fx);
 
         // 3. DATA_END verify_all_from_file 异步
         test_verify_all_from_file_async(fx);

@@ -352,6 +352,10 @@ std::string build_update_last_login() {
     return "UPDATE users SET last_login_time = NOW() WHERE mail_address = ?";
 }
 
+std::string build_update_password_hash() {
+    return "UPDATE users SET password = ? WHERE mail_address = ? AND password = ?";
+}
+
 std::string build_recipient_exists_query() {
     return "SELECT id, status FROM users WHERE mail_address = ? LIMIT 1";
 }

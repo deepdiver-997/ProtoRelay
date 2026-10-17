@@ -74,6 +74,41 @@ int main() {
         }
     }
 
+    // 存储格式自动识别（三协议共用口径）。守卫：统一之前 IMAP/POP3 不认 MD5，
+    // 同一账号 SMTP 能发、IMAP 登不上；这里固定三种格式各自的判定与校验结果。
+    {
+        auto expect = [](bool got, bool want, const char* what) {
+            if (got == want) { g_pass++; return; }
+            g_fail++;
+            std::printf("  FAIL %s: got %d want %d\n", what, (int)got, (int)want);
+        };
+        const std::string bc        = kVec[0].hash;                           // "$2b$10$…"
+        const std::string md5_hello = "5d41402abc4b2a76b9719d911017c592";    // md5("hello")
+        const std::string plain     = "secret";
+
+        expect(is_bcrypt_hash(bc),            true,  "is_bcrypt $2b$");
+        expect(is_bcrypt_hash("$2a$10$abc"),  true,  "is_bcrypt $2a$ prefix only");
+        expect(is_bcrypt_hash(md5_hello),     false, "is_bcrypt md5");
+        expect(is_bcrypt_hash(plain),         false, "is_bcrypt plain");
+        expect(is_bcrypt_hash(""),            false, "is_bcrypt empty");
+
+        expect(verify_password_hash("correct-pass", bc), true,  "verify bcrypt ok");
+        expect(verify_password_hash("wrong", bc),        false, "verify bcrypt wrong");
+        expect(verify_password_hash("hello", md5_hello), true,  "verify md5 ok");
+        expect(verify_password_hash("Hello", md5_hello), false, "verify md5 wrong");
+        expect(verify_password_hash("secret", plain),    true,  "verify plain ok");
+        expect(verify_password_hash("Secret", plain),    false, "verify plain wrong");
+        // 32 位小写 hex 一律按 MD5 校验：把 MD5 串本身当密码输入不会走明文等值比对
+        expect(verify_password_hash(md5_hello, md5_hello), false, "md5 literal is not plaintext");
+        // 大写 hex 不在 MD5 口径内 → 按明文比对（与既有 SMTP 行为一致）
+        expect(verify_password_hash("5D41402ABC4B2A76B9719D911017C592",
+                                    "5D41402ABC4B2A76B9719D911017C592"), true, "upper hex is plaintext");
+
+        expect(password_needs_rehash(bc),        false, "rehash bcrypt no");
+        expect(password_needs_rehash(md5_hello), true,  "rehash md5 yes");
+        expect(password_needs_rehash(plain),     true,  "rehash plain yes");
+    }
+
     std::printf("bcrypt_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -3,11 +3,11 @@
 
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
+#include "mail_system/back/common/password_rehash.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/common/mime_parser.h"
 #include <filesystem>
-#include <openssl/md5.h>
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/mailServer/smtps_server.h"
 #include <arpa/inet.h>
@@ -40,20 +40,8 @@ inline bool ip_in_trusted_networks(const std::string& ip,
     return false;
 }
 
-// 密码验证：自动检测 bcrypt / MD5 / 明文
-inline bool verify_password(const std::string& input, const std::string& stored) {
-    if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
-        return bcrypt_verify(input, stored);
-    if (stored.size() == 32 && std::all_of(stored.begin(), stored.end(),
-            [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
-        unsigned char md5[MD5_DIGEST_LENGTH];
-        MD5(reinterpret_cast<const unsigned char*>(input.data()), input.size(), md5);
-        char hex[33];
-        for (int i = 0; i < MD5_DIGEST_LENGTH; ++i) snprintf(hex + i*2, 3, "%02x", md5[i]);
-        return stored == std::string(hex, 32);
-    }
-    return stored == input;
-}
+// 密码校验见 common/bcrypt.h::verify_password_hash（bcrypt / MD5 / 明文自动识别，
+// 三协议共用）；原先此处的文件内副本已并入。
 } // namespace
 
 // ========== 工具函数实现 ==========
@@ -1175,7 +1163,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
             if (cache->lookup(mail_address, ce)) {
                 if (ce.status != 1) { cb(false, 0); return; }
                 shard = ce.shard;
-                const bool ok = verify_password(password, ce.password_hash);
+                const bool ok = verify_password_hash(password, ce.password_hash);
                 cb(ok, ok ? shard : 0);
                 return;
             }
@@ -1203,14 +1191,16 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
                         return;
                     }
                     std::string stored = result->get_value(0, "password");
-                    cache->store(mail_address, {stored, status, 0, shard});
-                    const bool ok = verify_password(password, stored);
-                    if (ok) {
-                        (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                                               [conn, cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
-                    } else {
-                        cb(false, 0);
-                    }
+                    AuthCacheEntry entry{stored, status, 0, shard};
+                    cache->store(mail_address, entry);
+                    if (!verify_password_hash(password, stored)) { cb(false, 0); return; }
+                    // 验密通过：MD5/明文历史行 → bcrypt 回写 + 刷缓存（已是 bcrypt 则直通），
+                    // 再记 last_login，最后回调。见 common/password_rehash.h 的契约说明。
+                    rehash_password_if_needed_async(conn, cache, mail_address, password, stored, entry,
+                        [conn, mail_address, shard, cb = std::move(cb)]() mutable {
+                            (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
+                                [conn, cb = std::move(cb), shard](bool) { cb(true, shard); });
+                        });
                 });
         };
 

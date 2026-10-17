@@ -161,6 +161,11 @@ std::string build_dedup_by_message_id(const std::string& sender,
 std::string build_auth_user_query();
 std::string build_update_last_login();
 
+// rehash-on-login：把 MD5/明文历史行升级为 bcrypt。CAS 语义——WHERE 同时限定旧
+// password 值：用户用旧密码登录中若管理员恰好改了密码，这条升级不会把新密码覆盖
+// 回旧值（影响 0 行，下次登录按新密码走）。参数顺序 {new_hash, mail_address, old_stored}
+std::string build_update_password_hash();
+
 // RCPT TO 校验：本地收件人是否存在（未认证 MTA 入站路径）
 std::string build_recipient_exists_query();
 

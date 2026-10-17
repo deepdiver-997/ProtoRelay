@@ -574,6 +574,15 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(bcrypt_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(bcrypt_test)
 
+    add_executable(password_rehash_test
+        test/unit/password_rehash_test.cpp
+        src/mail_system/back/common/bcrypt.cpp
+        src/mail_system/back/db/sql_queries.cpp
+    )
+    target_include_directories(password_rehash_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(password_rehash_test)
+
+
     add_executable(thread_pool_test
         src/framework/thread_pool/io_thread_pool.cpp
         src/framework/thread_pool/io_context_registry.cpp
@@ -720,6 +729,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME pipeline_deferred_test COMMAND pipeline_deferred_test)
     add_test(NAME metrics_core_test COMMAND metrics_core_test)
     add_test(NAME bcrypt_test COMMAND bcrypt_test)
+    add_test(NAME password_rehash_test COMMAND password_rehash_test)
 
     # 聚合 target：新增单测只需在上面 add_executable/add_test，
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
@@ -750,6 +760,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         pipeline_deferred_test
         metrics_core_test
         bcrypt_test
+        password_rehash_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界

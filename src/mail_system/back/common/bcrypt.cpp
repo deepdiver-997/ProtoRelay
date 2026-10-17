@@ -1,4 +1,5 @@
 #include "mail_system/back/common/bcrypt.h"
+#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <cstdio>
 #include <cstring>
@@ -482,6 +483,44 @@ bool bcrypt_verify(const std::string& password, const std::string& hash) {
     // Constant-time comparison on the hash portion (position 29 onward, 31 chars)
     // Simple memcmp is OK here since we're comparing self-computed values
     return std::memcmp(computed.c_str() + 29, hash.c_str() + 29, 31) == 0;
+}
+
+// =========================================================================
+// 存储格式自动识别（声明与口径说明见 bcrypt.h）
+// =========================================================================
+bool is_bcrypt_hash(const std::string& stored) {
+    return stored.size() >= 2 && stored[0] == '$' && stored[1] == '2';
+}
+
+static bool looks_like_md5_hex(const std::string& s) {
+    if (s.size() != 32) return false;
+    for (char c : s) {
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!hex) return false;
+    }
+    return true;
+}
+
+bool verify_password_hash(const std::string& input, const std::string& stored) {
+    if (is_bcrypt_hash(stored)) return bcrypt_verify(input, stored);
+    if (looks_like_md5_hex(stored)) {
+        // EVP 接口：OpenSSL 3 已将直接调用 MD5() 标记为废弃
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int digest_len = 0;
+        if (EVP_Digest(input.data(), input.size(), digest, &digest_len,
+                       EVP_md5(), nullptr) != 1 || digest_len != 16) {
+            return false;
+        }
+        char hex[16 * 2 + 1];
+        for (unsigned int i = 0; i < digest_len; ++i)
+            std::snprintf(hex + i * 2, 3, "%02x", digest[i]);
+        return stored == std::string(hex, 32);
+    }
+    return stored == input;
+}
+
+bool password_needs_rehash(const std::string& stored) {
+    return !is_bcrypt_hash(stored);
 }
 
 } // namespace mail_system

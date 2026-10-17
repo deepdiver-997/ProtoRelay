@@ -4,6 +4,7 @@
 #include "mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/common/password_rehash.h"
 #include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "framework/connection/tcp_connection.h"
@@ -95,9 +96,7 @@ void TraditionalPop3Fsm<ConnectionType>::auth_user_async(
     AuthCacheEntry ce;
     if (auth_cache && auth_cache->lookup(mail_address, ce)) {
         if (ce.status != 1) { cb(false, 0, shard); return; }
-        bool ok = (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
-                    ? bcrypt_verify(password, ce.password_hash)
-                    : (ce.password_hash == password);
+        bool ok = verify_password_hash(password, ce.password_hash);
         cb(ok, ce.user_id, ce.shard);
         return;
     }
@@ -133,22 +132,16 @@ void TraditionalPop3Fsm<ConnectionType>::auth_user_async(
             }
             std::string stored = result->get_value(0, "password");
             uint64_t user_id = safe_stoull(result->get_value(0, "id"));
-            if (auth_cache) {
-                auth_cache->store(mail_address, {stored, status, user_id, shard});
-            }
-            bool ok = false;
-            if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
-                ok = bcrypt_verify(password, stored);
-            } else {
-                ok = (stored == password);
-                if (ok) LOG_AUTH_WARN("User {} still using plaintext password", mail_address);
-            }
-            if (ok) {
-                (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                    [conn, cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
-            } else {
-                cb(false, 0, shard);
-            }
+            AuthCacheEntry entry{stored, status, user_id, shard};
+            if (auth_cache) auth_cache->store(mail_address, entry);
+            if (!verify_password_hash(password, stored)) { cb(false, 0, shard); return; }
+            // 验密通过：MD5/明文历史行 → bcrypt 回写 + 刷缓存（已是 bcrypt 则直通），
+            // 再记 last_login，最后回调。见 common/password_rehash.h 的契约说明。
+            rehash_password_if_needed_async(conn, auth_cache, mail_address, password, stored, entry,
+                [conn, mail_address, user_id, shard, cb = std::move(cb)]() mutable {
+                    (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
+                        [conn, cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
+                });
         });
 }
 

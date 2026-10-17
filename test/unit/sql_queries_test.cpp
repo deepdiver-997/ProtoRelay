@@ -229,6 +229,20 @@ void test_build_update_last_login() {
     check_contains("update_login_where", sql, "mail_address = ?");
 }
 
+// rehash-on-login 回写：必须是 CAS（WHERE 限定旧 password 值）。
+// 去掉旧值守卫 = 用户用旧密码登录期间管理员改的新密码会被 bcrypt(旧密码) 覆盖回去。
+void test_build_update_password_hash() {
+    std::string sql = mail_system::db::sql::build_update_password_hash();
+    check_contains("update_pwd_table",      sql, "UPDATE users");
+    check_contains("update_pwd_set",        sql, "SET password = ?");
+    check_contains("update_pwd_where_addr", sql, "mail_address = ?");
+    check_contains("update_pwd_cas_guard",  sql, "AND password = ?");
+    // 三个占位符，顺序 {new_hash, mail_address, old_stored}
+    size_t marks = 0;
+    for (char c : sql) if (c == '?') ++marks;
+    check("update_pwd_three_params", marks == 3, "expected 3 placeholders, got " + std::to_string(marks));
+}
+
 void test_build_recipient_exists_query() {
     std::string sql = mail_system::db::sql::build_recipient_exists_query();
     check_contains("rcpt_exists_from", sql, "FROM users");
@@ -476,6 +490,7 @@ int main() {
 
     test_build_auth_user_query();
     test_build_update_last_login();
+    test_build_update_password_hash();
     test_build_recipient_exists_query();
     test_build_increment_sent_today_query();
 
