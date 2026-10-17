@@ -6,6 +6,7 @@
   "listen_host": "127.0.0.1",
   "listen_port": 8080,
   "register_domain": "example.com",
+  "admin_key": "change-me-admin-key",
   "invite_codes": [
     {"code": "EXAMPLE2026", "max_uses": 5, "expires_days": 90},
     {"code": "INTERVIEW2026", "max_uses": 3, "expires_days": 60}

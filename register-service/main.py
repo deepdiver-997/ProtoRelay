@@ -5,12 +5,12 @@ ProtoRelay 邀请码注册服务
 前面用 nginx/Caddy 反代并加 SSL，或直接用 SSH 本地转发访问。
 """
 
-import json, re, time, os, subprocess
+import json, re, time, os, subprocess, hmac
 from datetime import datetime, timedelta
 from typing import Optional
 
 import mysql.connector
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -200,6 +200,183 @@ def register(req: RegisterRequest, request: Request):
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"Registration failed: {e}")
+    finally:
+        db.close()
+
+# ---------------------------------------------------------------------------
+# Admin 管理后台（webmail kickoff MVP-1：别名 / 账号状态 / 发信配额）
+#
+# 鉴权：X-Admin-Key 头与 config.json 的 admin_key 常量时间比对；config 未配
+# admin_key（空）→ 一律 403 fail-closed。
+#
+# 别名（mail_aliases：alias→target 多行 = 免费邮件组）写入侧防链：
+#   - target 必须是 users 表在用账号；
+#   - alias 地址不得与任何用户地址重合（两命名空间分离）；
+#   - target 不得本身是别名（禁 alias→alias 链）。
+# 与 C++ 读侧兜底（build_alias_targets_query 的 JOIN users）双保险。
+# 注意：SMTP 进程内别名缓存 TTL 300s，改别名后最多 5 分钟才影响 RCPT 校验。
+# ---------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r"^[^@\s,;:<>]+@[^@\s,;:<>]+\.[^@\s,;:<>]+$")
+
+class AliasCreate(BaseModel):
+    alias_address: str
+    target_address: str
+
+class StatusUpdate(BaseModel):
+    status: int  # 1=启用 0=禁用
+
+def require_admin(x_admin_key: str = Header(default="")):
+    key = str(CONFIG.get("admin_key", ""))
+    if not key or not hmac.compare_digest(x_admin_key, key):
+        raise HTTPException(401, "admin key required")
+
+def _valid_address(addr: str) -> bool:
+    return bool(addr) and len(addr) <= 255 and bool(EMAIL_RE.match(addr))
+
+@app.get("/admin/users")
+def admin_users(x_admin_key: str = Header(default=""), limit: int = 50, offset: int = 0):
+    """用户列表（id/地址/状态/当日配额计数）"""
+    require_admin(x_admin_key)
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    db = get_db()
+    try:
+        cur = db.cursor(dictionary=True)
+        cur.execute(
+            "SELECT id, mail_address, name, status, sent_today, sent_date, register_time "
+            "FROM users ORDER BY id LIMIT %s OFFSET %s", (limit, offset))
+        return {"users": cur.fetchall()}
+    finally:
+        db.close()
+
+@app.post("/admin/users/{user_id}/status")
+def admin_user_status(user_id: int, req: StatusUpdate,
+                      x_admin_key: str = Header(default="")):
+    """启用/禁用账号（禁用后三协议 + webmail 登录同时拒绝，受各自缓存 TTL 影响）"""
+    require_admin(x_admin_key)
+    if req.status not in (0, 1):
+        raise HTTPException(400, "status must be 0 or 1")
+    db = get_db()
+    try:
+        cur = db.cursor(dictionary=True)
+        # 先查存在再更新：MySQL 默认 rowcount 是"改变的行数"，幂等设置
+        # （状态不变）会得 0，不能拿来判存在性
+        cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "user not found")
+        cur.execute("UPDATE users SET status = %s WHERE id = %s", (req.status, user_id))
+        db.commit()
+        return {"ok": True, "user_id": user_id, "status": req.status}
+    except HTTPException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.post("/admin/users/{user_id}/reset-quota")
+def admin_user_reset_quota(user_id: int, x_admin_key: str = Header(default="")):
+    """重置当日发信计数（解限今天已发满的用户；sent_date 置 NULL = 首封按 0 计）"""
+    require_admin(x_admin_key)
+    db = get_db()
+    try:
+        cur = db.cursor(dictionary=True)
+        cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "user not found")
+        cur.execute(
+            "UPDATE users SET sent_today = 0, sent_date = NULL WHERE id = %s", (user_id,))
+        db.commit()
+        return {"ok": True, "user_id": user_id}
+    except HTTPException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@app.get("/admin/aliases")
+def admin_alias_list(alias: str, x_admin_key: str = Header(default="")):
+    """查一个别名/组地址的全部投递目标"""
+    require_admin(x_admin_key)
+    if not _valid_address(alias):
+        raise HTTPException(400, "invalid alias address")
+    db = get_db()
+    try:
+        cur = db.cursor(dictionary=True)
+        cur.execute(
+            "SELECT target_address, is_active, created_at FROM mail_aliases "
+            "WHERE alias_address = %s ORDER BY id", (alias,))
+        return {"alias": alias, "targets": cur.fetchall()}
+    finally:
+        db.close()
+
+@app.post("/admin/aliases")
+def admin_alias_create(req: AliasCreate, x_admin_key: str = Header(default="")):
+    """加一条 alias→target（同别名多行 = 邮件组成员追加，幂等）"""
+    require_admin(x_admin_key)
+    alias, target = req.alias_address.strip(), req.target_address.strip()
+    if not _valid_address(alias) or not _valid_address(target):
+        raise HTTPException(400, "invalid address format")
+
+    db = get_db()
+    try:
+        cur = db.cursor(dictionary=True)
+        # 防链 1：target 必须是在用真实账号
+        cur.execute("SELECT id, status FROM users WHERE mail_address = %s", (target,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(400, f"target {target} is not an existing user")
+        if row["status"] != 1:
+            raise HTTPException(400, f"target {target} is disabled")
+        # 防链 2：alias 地址不得与用户地址重合（命名空间分离）
+        cur.execute("SELECT id FROM users WHERE mail_address = %s", (alias,))
+        if cur.fetchone():
+            raise HTTPException(400, f"alias {alias} collides with an existing user address")
+        # 防链 3：target 不得本身是别名（alias→alias 链，读侧 JOIN users 亦兜底）
+        cur.execute("SELECT id FROM mail_aliases WHERE alias_address = %s", (target,))
+        if cur.fetchone():
+            raise HTTPException(400, f"target {target} is itself an alias (chains forbidden)")
+
+        cur.execute(
+            "INSERT INTO mail_aliases (alias_address, target_address) VALUES (%s, %s) "
+            "ON DUPLICATE KEY UPDATE is_active = 1", (alias, target))
+        db.commit()
+        return {"ok": True, "alias": alias, "target": target,
+                "note": "SMTP RCPT 展开受 5 分钟别名缓存影响"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"alias create failed: {e}")
+    finally:
+        db.close()
+
+@app.delete("/admin/aliases/{alias_address}")
+def admin_alias_delete(alias_address: str, x_admin_key: str = Header(default=""),
+                       target: Optional[str] = None):
+    """删别名：不给 target 删整组；给了只删一行"""
+    require_admin(x_admin_key)
+    if not _valid_address(alias_address):
+        raise HTTPException(400, "invalid alias address")
+    if target is not None and not _valid_address(target):
+        raise HTTPException(400, "invalid target address")
+    db = get_db()
+    try:
+        cur = db.cursor()
+        if target is None:
+            cur.execute("DELETE FROM mail_aliases WHERE alias_address = %s", (alias_address,))
+        else:
+            cur.execute(
+                "DELETE FROM mail_aliases WHERE alias_address = %s AND target_address = %s",
+                (alias_address, target))
+        db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "alias row not found")
+        return {"ok": True, "removed": cur.rowcount}
+    except HTTPException:
+        db.rollback()
+        raise
     finally:
         db.close()
 
