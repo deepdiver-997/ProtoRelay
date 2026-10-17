@@ -22,7 +22,7 @@ static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
         std::vector<std::shared_ptr<mail_system::storage::IStorageProvider>>{});
 }
 
-#include "web_server/h2/h2_server.h"
+#include "framework/http/h2/h2_server.h"
 #include "mail_system/back/common/logger.h"
 #include <csignal>
 #include <iostream>
@@ -34,7 +34,7 @@ static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
 using namespace mail_system;
 
 static sigset_t g_sigset;
-static std::unique_ptr<web_server::h2::H2Server> g_server;
+static std::unique_ptr<pr::http::h2::H2Server> g_server;
 
 int main(int argc, char* argv[]) {
     int port = argc > 1 ? std::atoi(argv[1]) : 8081;
@@ -62,7 +62,7 @@ int main(int argc, char* argv[]) {
         io_pool->start();
         auto wk_pool = std::make_shared<pr::BoostThreadPool>(config.worker_thread_count);
         wk_pool->start();
-        g_server = std::make_unique<web_server::h2::H2Server>(config, doc_root, io_pool, wk_pool, make_null_router());
+        g_server = std::make_unique<pr::http::h2::H2Server>(config, doc_root, io_pool, wk_pool, make_null_router());
         g_server->start();
 
         std::cout << "HTTP/2 static file server on :" << port << "  doc_root=" << doc_root

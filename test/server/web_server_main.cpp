@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────────────
-// web_server_main — HTTP/1.1 静态文件服务器入口
+// web_server_main — HTTP/1.1 静态文件服务器入口（framework/http 的演示应用）
 //
 // 用法:  web_server_main [doc_root] [port]
 //       默认  doc_root=./config/web  port=8080
@@ -20,7 +20,7 @@ static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
         std::vector<std::shared_ptr<mail_system::storage::IStorageProvider>>{});
 }
 
-#include "web_server/http_server.h"
+#include "framework/http/http_server.h"
 #include "mail_system/back/common/logger.h"
 #include <csignal>
 #include <iostream>
@@ -32,7 +32,7 @@ static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
 using namespace mail_system;
 
 static sigset_t g_sigset;
-static std::unique_ptr<web_server::HttpServer> g_server;
+static std::unique_ptr<pr::http::HttpServer> g_server;
 
 int main(int argc, char* argv[]) {
     std::string doc_root = argc > 1 ? argv[1] : "./config/web";
@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
         io_pool->start();
         auto wk_pool = std::make_shared<pr::BoostThreadPool>(config.worker_thread_count);
         wk_pool->start();
-        g_server = std::make_unique<web_server::HttpServer>(config, doc_root, io_pool, wk_pool, make_null_router());
+        g_server = std::make_unique<pr::http::HttpServer>(config, doc_root, io_pool, wk_pool, make_null_router());
         g_server->start();
 
         LOG_SERVER_INFO("HTTP server running. Ctrl+C to stop.");

@@ -395,11 +395,11 @@ if(BUILD_OBJECT_ONLY)
     setup_mail_target(mailServer_obj)
     add_library(webServer_obj OBJECT
         ${COMMON_SRCS}
-        src/web_server/message_processor.cpp
-        src/web_server/http_parser.cpp
-        src/web_server/http_fsm_inst.cpp
-        src/web_server/http_session_inst.cpp
-        src/web_server/http_server.cpp
+        src/framework/http/message_processor.cpp
+        src/framework/http/http_parser.cpp
+        src/framework/http/http_fsm_inst.cpp
+        src/framework/http/http_session_inst.cpp
+        src/framework/http/http_server.cpp
         test/server/web_server_main.cpp
     )
     setup_mail_target(webServer_obj)
@@ -436,24 +436,24 @@ else()
 
     add_executable(webServer
         ${COMMON_SRCS}
-        src/web_server/message_processor.cpp
-        src/web_server/http_parser.cpp
-        src/web_server/http_fsm_inst.cpp
-        src/web_server/http_session_inst.cpp
-        src/web_server/http_server.cpp
+        src/framework/http/message_processor.cpp
+        src/framework/http/http_parser.cpp
+        src/framework/http/http_fsm_inst.cpp
+        src/framework/http/http_session_inst.cpp
+        src/framework/http/http_server.cpp
         test/server/web_server_main.cpp
     )
     setup_mail_target(webServer)
 
     add_executable(h2web
         ${COMMON_SRCS}
-        src/web_server/message_processor.cpp
-        src/web_server/http_parser.cpp        # resolve_safe_path / mime（静态路由复用）
-        src/web_server/codec/h2_codec.cpp
-        src/web_server/h2/h2_framer.cpp
-        src/web_server/h2/h2_hpack.cpp
-        src/web_server/h2/h2_session_inst.cpp
-        src/web_server/h2/h2_server.cpp
+        src/framework/http/message_processor.cpp
+        src/framework/http/http_parser.cpp        # resolve_safe_path / mime（静态路由复用）
+        src/framework/http/codec/h2_codec.cpp
+        src/framework/http/h2/h2_framer.cpp
+        src/framework/http/h2/h2_hpack.cpp
+        src/framework/http/h2/h2_session_inst.cpp
+        src/framework/http/h2/h2_server.cpp
         test/server/h2web_main.cpp
     )
     setup_mail_target(h2web)
@@ -537,11 +537,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # web_server 纯函数层单测：MessageProcessor / h2_framer / h2_hpack / h2_codec
     add_executable(h2_web_test
         test/unit/h2_web_test.cpp
-        src/web_server/message_processor.cpp
-        src/web_server/http_parser.cpp
-        src/web_server/h2/h2_framer.cpp
-        src/web_server/h2/h2_hpack.cpp
-        src/web_server/codec/h2_codec.cpp
+        src/framework/http/message_processor.cpp
+        src/framework/http/http_parser.cpp
+        src/framework/http/h2/h2_framer.cpp
+        src/framework/http/h2/h2_hpack.cpp
+        src/framework/http/codec/h2_codec.cpp
     )
     setup_mail_target(h2_web_test)
 
