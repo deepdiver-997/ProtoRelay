@@ -628,6 +628,19 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_mail_from_mail_from(
     handle_wait_auth_mail_from(session);
 }
 
+namespace {
+// 别名展开目标追加进收件人列表，跳过已存在的：同一封邮件对同一收件人重复
+// 记录会撞 mail_mailbox 的 uk_mail_box_user 唯一键，回滚整个持久化事务。
+template <typename Context>
+void push_recipient_deduped(Context* c, std::vector<std::string>& targets) {
+    for (auto& t : targets) {
+        if (std::find(c->recipient_addresses.begin(), c->recipient_addresses.end(), t)
+                == c->recipient_addresses.end())
+            c->recipient_addresses.push_back(std::move(t));
+    }
+}
+} // namespace
+
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
@@ -661,20 +674,42 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         // 外部投递开关：external_delivery_enabled=false 时拒外部域收件人。
         // 内部投递（system_domain）不受影响；未认证 25 端口 MTA 入站本来就禁中继。
         auto cfg = std::atomic_load(&session->get_server()->m_config);
-        if (!cfg->external_delivery_enabled) {
-            std::string domain;
-            auto at = recipient.rfind('@');
-            if (at != std::string::npos) domain = recipient.substr(at + 1);
-            if (algorithm::to_lower(algorithm::trim(domain)) != algorithm::to_lower(cfg->system_domain)) {
-                LOG_SMTP_INFO("RCPT external delivery disabled: {}", recipient);
-                session->do_async_write("550 5.7.1 External delivery disabled\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                        if (ec) return;
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        s->do_async_read();
-                    });
-                return;
-            }
+        std::string domain;
+        auto at = recipient.rfind('@');
+        if (at != std::string::npos) domain = recipient.substr(at + 1);
+        const bool is_local =
+            algorithm::to_lower(algorithm::trim(domain)) == algorithm::to_lower(cfg->system_domain);
+        if (!cfg->external_delivery_enabled && !is_local) {
+            LOG_SMTP_INFO("RCPT external delivery disabled: {}", recipient);
+            session->do_async_write("550 5.7.1 External delivery disabled\r\n",
+                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    if (ec) return;
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                    s->do_async_read();
+                });
+            return;
+        }
+        // 本地域收件人：别名展开（邮件组，webmail/客户端 587 提交同一语义）。
+        // 非别名或别名查询失败 → 原样接受：提交模式不因别名查询新增拒绝理由，
+        // 保持"未认证路径才做存在性校验"的既有语义。
+        if (is_local) {
+            this->alias_targets_async(session, recipient,
+                [session, recipient](std::vector<std::string> targets) {
+                    auto* c = static_cast<SmtpsContext*>(session->get_context());
+                    if (targets.empty()) {
+                        c->recipient_addresses.push_back(recipient);
+                    } else {
+                        push_recipient_deduped(c, targets);
+                    }
+                    session->do_async_write("250 Ok\r\n",
+                        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                            if (ec) return;
+                            s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                            s->drain_buffered_commands();
+                            if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
+                        });
+                });
+            return;
         }
         ctx->recipient_addresses.push_back(recipient);
         session->do_async_write("250 Ok\r\n",
@@ -734,14 +769,24 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         return;
     }
 
-    // 本地域名 → 校验用户存在性（DB 或缓存）
-    this->user_exists_async(session, recipient,
-        [session, recipient](bool exists) {
+    // 本地域名 → 收件人解析：真实用户直收；别名展开为全部在用目标（邮件组）；
+    // 两者皆非 → 550 User unknown。
+    this->resolve_recipient_async(session, recipient,
+        [session, recipient](std::vector<std::string> targets) {
             auto* c = static_cast<SmtpsContext*>(session->get_context());
-            const char* resp = exists ? "250 Ok\r\n" : "550 5.1.1 User unknown\r\n";
-            if (!exists) LOG_SMTP_WARN("RCPT user unknown: {}", recipient);
-            if (exists) c->recipient_addresses.push_back(recipient);
-            session->do_async_write(resp,
+            if (targets.empty()) {
+                LOG_SMTP_WARN("RCPT user unknown: {}", recipient);
+                session->do_async_write("550 5.1.1 User unknown\r\n",
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                        if (ec) return;
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                        s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
+                    });
+                return;
+            }
+            push_recipient_deduped(c, targets);
+            session->do_async_write("250 Ok\r\n",
                 [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                     if (ec) return;
                     s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
@@ -1258,6 +1303,63 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
             int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
             m_recipientCache->store(mail_address, {"", status, 0, 0});
             cb(status == 1);
+        });
+}
+
+// RCPT TO 收件人解析：用户（缓存→DB）→ 别名（缓存→DB）→ 空（550）。
+// pause 语义与 user_exists_async 一致：DB 查询前 set_paused(true)，回调不恢复，
+// 统一由调用方写完成回调的 drain_buffered_commands() 收口。
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::resolve_recipient_async(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
+    std::function<void(std::vector<std::string>)> cb)
+{
+    if (!session) { cb({}); return; }
+
+    AuthCacheEntry ce;
+    if (m_recipientCache->lookup(mail_address, ce)) {
+        if (ce.status == 1) { cb({mail_address}); return; }
+        alias_targets_async(std::move(session), mail_address, std::move(cb));
+        return;
+    }
+    user_exists_async(session, mail_address,
+        [this, session, mail_address, cb = std::move(cb)](bool exists) mutable {
+            if (exists) { cb({mail_address}); return; }
+            alias_targets_async(session, mail_address, std::move(cb));
+        });
+}
+
+// 别名目标查询：缓存（含负缓存=空 vector）→ DB。空结果（确认非别名）同样入缓存；
+// DB 失败返回空但不缓存——提交路径对空回退为原样接受，不能把一次故障固化成 5 分钟非别名。
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& alias_address,
+    std::function<void(std::vector<std::string>)> cb)
+{
+    std::vector<std::string> cached;
+    bool stale = false;
+    if (m_aliasCache->get(alias_address, cached, stale) && !stale) { cb(std::move(cached)); return; }
+
+    int shard = 0;
+    if (m_shardRouter) { int r = m_shardRouter->route(alias_address); if (r >= 0) shard = r; }
+    std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
+    if (!pool) { LOG_SMTP_WARN("alias check no DB pool for shard {}", shard); cb({}); return; }
+    auto conn = pool->acquire_connection();
+    if (!conn->is_valid()) { LOG_SMTP_WARN("alias check failed to get DB connection"); cb({}); return; }
+
+    if (session) session->set_paused(true);
+
+    std::string sql = db::sql::build_alias_targets_query();
+    (*conn)->async_query(sql, {alias_address},
+        [this, session, alias_address, conn,
+         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+            std::vector<std::string> targets;
+            if (result) {
+                for (size_t i = 0; i < result->get_row_count(); ++i)
+                    targets.push_back(result->get_value(i, "target_address"));
+                m_aliasCache->put(alias_address, targets);
+            }
+            cb(std::move(targets));
         });
 }
 

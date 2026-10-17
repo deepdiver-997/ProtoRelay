@@ -293,11 +293,52 @@ TEST(user_exists_db_async_not_found) {
                !db->last_query_params().empty() && db->last_query_params()[0] == "ghost@test.local";
     }));
 
-    // 空结果 → 不存在 → 550 User unknown（负缓存）
+    // 第一跳：用户查询空结果 → 不存在 → 别名展开第二跳（邮件组，2026-10-18）
+    db->fire_query(std::make_shared<test::MockDbResult>());
+
+    // 第二跳：别名查询同样空（非别名）→ 550 User unknown（负缓存）
+    assert(wait_until([&] {
+        return db->has_pending_query() &&
+               !db->last_query_params().empty() && db->last_query_params()[0] == "ghost@test.local";
+    }));
     db->fire_query(std::make_shared<test::MockDbResult>());
 
     assert(wait_until([&] { return HAS(h->captured, "550 5.1.1 User unknown"); }));
     std::cout << "  [PASS] user_exists_db_async_not_found (DB 回调触发 → 550)" << std::endl;
+}
+
+TEST(rcpt_alias_db_async_expansion) {
+    // 两跳 DB 链：用户空结果 → mail_aliases 命中 → 展开为组目标（DATA 可进 = 250 非 550）
+    fx.apply_config(fx.with_spf("off"));
+    fx.db_pool->mock_conn()->set_deferred(true);
+    fx.db_pool->mock_conn()->clear_pending();
+
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<s@test.local>\r\n"
+        "RCPT TO:<group@test.local>\r\n"
+        "DATA\r\n");
+    fx.run_on_io(h);
+
+    auto* db = fx.db_pool->mock_conn().get();
+    assert(wait_until([&] {
+        return db->has_pending_query() &&
+               !db->last_query_params().empty() && db->last_query_params()[0] == "group@test.local";
+    }));
+    // 第一跳：不是用户（空结果）
+    db->fire_query(std::make_shared<test::MockDbResult>());
+    // 第二跳：别名命中两行目标 → 展开为组投递
+    assert(wait_until([&] {
+        return db->has_pending_query() &&
+               !db->last_query_params().empty() && db->last_query_params()[0] == "group@test.local";
+    }));
+    db->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{
+            {{"target_address", "rcpt@test.local"}},
+            {{"target_address", "dbuser@test.local"}}}));
+
+    assert(wait_until([&] { return HAS(h->captured, "354 Start mail input"); }));
+    std::cout << "  [PASS] rcpt_alias_db_async_expansion (两跳 DB 链 → 展开 250)" << std::endl;
 }
 
 // ========== 2b. AUTH auth_user_async DB 异步路径 ==========
@@ -656,6 +697,7 @@ int main() {
         // 2. RCPT user_exists DB 异步
         test_user_exists_db_async_exists(fx);
         test_user_exists_db_async_not_found(fx);
+        test_rcpt_alias_db_async_expansion(fx);
 
         // 2b. AUTH auth_user_async DB 异步（明文行 rehash 链 + bcrypt 行对照 + 脏 status 不炸）
         test_auth_user_db_async(fx);

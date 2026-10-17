@@ -173,3 +173,14 @@ DELIMITER ;
 --   ALTER TABLE mails ADD COLUMN spam_status TINYINT NOT NULL DEFAULT 0;
 --   ALTER TABLE mails ADD COLUMN spam_score FLOAT DEFAULT NULL;
 --   ALTER TABLE mails ADD INDEX idx_spam_status (spam_status);
+-- 邮件别名/组表（2026-10-18 webmail 开工，与 config/sql/create_tables.sql 对齐）
+CREATE TABLE IF NOT EXISTS mail_aliases (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    alias_address VARCHAR(255) NOT NULL COMMENT '别名/组地址（完整地址，本地域名）',
+    target_address VARCHAR(255) NOT NULL COMMENT '投递目标（必须是 users.mail_address 且 status=1）',
+    is_active TINYINT(1) NOT NULL DEFAULT 1 COMMENT '0=停用（RCPT 展开跳过）',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_alias_target (alias_address, target_address),
+    INDEX idx_alias_address (alias_address)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件别名/组表：alias→target 多行=邮件组';

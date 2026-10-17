@@ -18,6 +18,7 @@
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include <boost/asio/ssl.hpp>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -51,6 +52,10 @@ public:
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
     // RCPT TO 校验缓存（独立于认证缓存，缓存用户存在性 status：1=存在 0=不存在）
     std::shared_ptr<AuthCache> m_recipientCache = std::make_shared<AuthCache>();
+    // RCPT 别名展开缓存（mail_aliases，alias→target 多行=邮件组）：地址 → 投递目标
+    // 列表；空 vector = 已确认非别名（负缓存）。public 供测试注入，与 m_recipientCache 同。
+    std::shared_ptr<LruCache<std::string, std::vector<std::string>>> m_aliasCache =
+        std::make_shared<LruCache<std::string, std::vector<std::string>>>(10000, std::chrono::seconds(300));
 
     TraditionalSmtpsFsm(
         std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
@@ -99,6 +104,19 @@ public:
     void user_exists_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                            const std::string& mail_address,
                            std::function<void(bool exists)> cb);
+
+    // RCPT TO 收件人解析（2026-10-18 别名/邮件组）：真实用户 → {地址本身}；
+    // 别名 → 全部在用目标（已由 build_alias_targets_query 的 JOIN users 保证，
+    // 天然无 alias→alias 链）；两者皆非 → 空列表（调用方回 550）。
+    void resolve_recipient_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+                                 const std::string& mail_address,
+                                 std::function<void(std::vector<std::string> targets)> cb);
+
+    // 别名目标查询（m_aliasCache 缓存 → DB）。DB 故障/无连接按非别名处理返回空
+    // 且不写负缓存（提交路径对空结果回退为"原样接受"，不能把故障固化 5 分钟）。
+    void alias_targets_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+                             const std::string& alias_address,
+                             std::function<void(std::vector<std::string> targets)> cb);
 
     // 每日发信配额：认证账号 MAIL FROM 时原子占用今日一个配额（条件 UPDATE + ROW_COUNT）。
     // 回调 allowed=true 表示占用成功（或配额关闭/DB 故障 fail-open）；false = 超限。

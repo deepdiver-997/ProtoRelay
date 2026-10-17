@@ -360,6 +360,12 @@ std::string build_recipient_exists_query() {
     return "SELECT id, status FROM users WHERE mail_address = ? LIMIT 1";
 }
 
+std::string build_alias_targets_query() {
+    return "SELECT ua.target_address FROM mail_aliases ua "
+           "JOIN users u ON u.mail_address = ua.target_address AND u.status = 1 "
+           "WHERE ua.alias_address = ? AND ua.is_active = 1";
+}
+
 // 每日发信配额：原子占用今日一个配额（跨天自动归零；sent_date NULL=首封按 0 处理）。
 // 条件 WHERE 卡住超限（affected rows = 0）；调用方用 SELECT ROW_COUNT() 读结果。
 std::string build_increment_sent_today_query() {

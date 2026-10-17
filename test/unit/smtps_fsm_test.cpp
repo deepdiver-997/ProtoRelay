@@ -124,6 +124,14 @@ struct FsmTestFixture {
         inject_rcpt("r2@test.local", 1);
         // 不存在的本地用户（负缓存）
         inject_rcpt("nobody@test.local", 0);
+
+        // 预注入别名缓存（RCPT 展开，无 DB 环境）：team→user1+user2 邮件组；
+        // 空 vector = 确认非别名（负缓存）。别名目标必须是注入过收件人缓存的
+        // 真实用户，与 build_alias_targets_query 的 JOIN users 语义一致。
+        fsm->m_aliasCache->put("team@test.local",
+                               {"user1@test.local", "user2@test.local"});
+        fsm->m_aliasCache->put("solo@test.local", {"user0@test.local"});
+        fsm->m_aliasCache->put("plain@test.local", {});
     }
 
     ~FsmTestFixture() {
@@ -283,6 +291,122 @@ TEST(data_354) {
     auto w = h.conn->written();
     assert(HAS(w, "354 Start mail input"));
     std::cout << "  [PASS] data_354" << std::endl;
+}
+
+// ========== RCPT 别名/邮件组（mail_aliases 展开，2026-10-18）==========
+
+// 轮询等待收件人列表填充（认证路径的 RCPT 解析异步于喂入返回）
+template <typename Handle>
+static bool wait_for_recipient_count(Handle& h, size_t n, int timeout_ms = 2000) {
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    for (int waited = 0; waited < timeout_ms; waited += 5) {
+        h.conn->pump_executor();
+        if (c->recipient_addresses.size() >= n) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    h.conn->pump_executor();
+    return c->recipient_addresses.size() >= n;
+}
+
+TEST(rcpt_alias_expands_targets) {
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@test.local>\r\n"
+        "RCPT TO:<team@test.local>\r\n");
+    fx.start(h);
+    assert(wait_for_response(h, "250 Ok"));
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    // 别名本身不进收件人列表，展开为全部在用目标（邮件组语义）
+    assert(c->recipient_addresses.size() == 2);
+    assert(c->recipient_addresses[0] == "user1@test.local");
+    assert(c->recipient_addresses[1] == "user2@test.local");
+    std::cout << "  [PASS] rcpt_alias_expands_targets" << std::endl;
+}
+
+TEST(rcpt_alias_dedup_against_explicit_recipient) {
+    // 同一封邮件：组展开目标与显式 RCPT 的真实用户重复时只投一次，
+    // 重复记录会撞 mail_mailbox 唯一键回滚整个事务
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@test.local>\r\n"
+        "RCPT TO:<team@test.local>\r\n"
+        "RCPT TO:<user1@test.local>\r\n"
+        "RCPT TO:<team@test.local>\r\n");
+    fx.start(h);
+    assert(wait_for_recipient_count(h, 2));
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(c->recipient_addresses.size() == 2);  // user1 去重，team 二次展开全跳过
+    std::cout << "  [PASS] rcpt_alias_dedup_against_explicit_recipient" << std::endl;
+}
+
+TEST(rcpt_alias_unknown_still_550) {
+    // 非用户非别名（负收件缓存 + 别名缓存 miss + 无 DB pool → 空目标）→ 550
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@test.local>\r\n"
+        "RCPT TO:<nobody@test.local>\r\n");
+    fx.start(h);
+    assert(wait_for_response(h, "550 5.1.1 User unknown"));
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(c->recipient_addresses.empty());
+    std::cout << "  [PASS] rcpt_alias_unknown_still_550" << std::endl;
+}
+
+TEST(rcpt_real_user_not_rerouted) {
+    // 真实用户优先：正收件缓存命中直接收本人，别名缓存不参与
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n");
+    fx.start(h);
+    assert(wait_for_response(h, "250 Ok"));
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(c->recipient_addresses.size() == 1);
+    assert(c->recipient_addresses[0] == "rcpt@test.local");
+    std::cout << "  [PASS] rcpt_real_user_not_rerouted" << std::endl;
+}
+
+TEST(auth_rcpt_alias_expands_targets) {
+    // 587 提交路径同一展开语义：webmail/客户端给组发信必须达全体成员
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<team@test.local>\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_recipient_count(h, 2));
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(c->recipient_addresses[0] == "user1@test.local");
+    assert(c->recipient_addresses[1] == "user2@test.local");
+    std::cout << "  [PASS] auth_rcpt_alias_expands_targets" << std::endl;
+}
+
+TEST(auth_rcpt_nonalias_local_accepted_as_is) {
+    // 提交模式不因别名查询新增拒绝理由：本地非别名收件人原样接受
+    //（别名缓存 miss + 无 DB pool → 空目标 → 按原收件人入列表）
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<someone@test.local>\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_recipient_count(h, 1));
+    auto* c = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(c->recipient_addresses[0] == "someone@test.local");
+    assert(!HAS(h.conn->written(), "550"));
+    std::cout << "  [PASS] auth_rcpt_nonalias_local_accepted_as_is" << std::endl;
 }
 
 TEST(full_delivery_pipeline) {
@@ -943,6 +1067,14 @@ int main() {
         test_helo_not_ehlo(fx);
         test_noop_response(fx);
         test_rset_envelope_reset(fx);
+
+        // ── RCPT 别名/邮件组 ──
+        test_rcpt_alias_expands_targets(fx);
+        test_rcpt_alias_dedup_against_explicit_recipient(fx);
+        test_rcpt_alias_unknown_still_550(fx);
+        test_rcpt_real_user_not_rerouted(fx);
+        test_auth_rcpt_alias_expands_targets(fx);
+        test_auth_rcpt_nonalias_local_accepted_as_is(fx);
 
         // ── 多事务 ──
         test_multiple_transactions(fx);   // 串两封邮件入队

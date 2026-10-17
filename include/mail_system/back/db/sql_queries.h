@@ -169,6 +169,11 @@ std::string build_update_password_hash();
 // RCPT TO 校验：本地收件人是否存在（未认证 MTA 入站路径）
 std::string build_recipient_exists_query();
 
+// RCPT TO 别名展开（mail_aliases，alias→target 多行=邮件组）。JOIN users(status=1)
+// 在读侧兜底：目标必须是在用真实账号；别名不是 users 行，alias→alias 链即使被
+// 脏写入也查不出目标，读路径天然无环。参数 {alias_address}，多行结果按序展开。
+std::string build_alias_targets_query();
+
 // 每日发信配额：条件 UPDATE 原子占用今日一个配额（超限 affected rows = 0）
 std::string build_increment_sent_today_query();
 

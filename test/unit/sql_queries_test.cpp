@@ -250,6 +250,16 @@ void test_build_recipient_exists_query() {
     check_contains("rcpt_exists_limit", sql, "LIMIT 1");
 }
 
+void test_build_alias_targets_query() {
+    std::string sql = mail_system::db::sql::build_alias_targets_query();
+    check_contains("alias_from", sql, "FROM mail_aliases");
+    // 防链兜底：目标必须 JOIN users 且在用——别名不是 users 行，alias→alias
+    // 链即使脏写入也查不出目标，读路径天然无环
+    check_contains("alias_join_users", sql, "JOIN users u ON u.mail_address = ua.target_address AND u.status = 1");
+    check_contains("alias_where", sql, "ua.alias_address = ?");
+    check_contains("alias_active_only", sql, "ua.is_active = 1");
+}
+
 void test_build_increment_sent_today_query() {
     std::string sql = mail_system::db::sql::build_increment_sent_today_query();
     check_contains("sent_quota_update", sql, "UPDATE users");
@@ -492,6 +502,7 @@ int main() {
     test_build_update_last_login();
     test_build_update_password_hash();
     test_build_recipient_exists_query();
+    test_build_alias_targets_query();
     test_build_increment_sent_today_query();
 
     test_build_imap_list_mailboxes();
