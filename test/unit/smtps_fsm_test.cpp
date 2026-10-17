@@ -40,9 +40,7 @@ struct TestServer : SmtpsServer {
                std::shared_ptr<ThreadPoolBase> io,
                std::shared_ptr<ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : SmtpsServer(c, io, w, nullptr) {
-        m_shardRouter = std::move(r);
-    }
+        : SmtpsServer(c, io, w, std::move(r)) {}
     void start() override {}
 };
 

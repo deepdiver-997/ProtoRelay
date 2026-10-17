@@ -10,9 +10,9 @@ H2Server::H2Server(const mail_system::ServerConfig& config,
                    std::string doc_root,
                    std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
                    std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
-                   std::shared_ptr<pr::DBPool> dbPool)
+                   std::shared_ptr<mail_system::router::IShardRouter> shardRouter)
     : mail_system::TcpServerBase<TcpH2Session, SslH2Session>(
-          config, ioThreadPool, workerThreadPool, dbPool)
+          config, ioThreadPool, workerThreadPool, shardRouter)
     , doc_root_(std::move(doc_root))
 {
     LOG_SERVER_INFO("H2Server (HTTP/2 multi-stream) ready, doc_root={}", doc_root_);

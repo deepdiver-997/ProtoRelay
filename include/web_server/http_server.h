@@ -20,10 +20,10 @@ namespace web_server {
 class HttpServer : public mail_system::TcpServerBase<TcpHttpSession, SslHttpSession> {
 public:
     HttpServer(const mail_system::ServerConfig& config,
-               std::string doc_root = ".",
-               std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
-               std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
-               std::shared_ptr<pr::DBPool> dbPool = nullptr);
+               std::string doc_root,
+               std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
+               std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
+               std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
     ~HttpServer() override = default;
 
     const std::string& doc_root() const { return doc_root_; }

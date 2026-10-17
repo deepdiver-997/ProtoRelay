@@ -15,9 +15,9 @@ class SmtpsServer : public TcpServerBase<SmtpsSession<TcpConnection>,
                                           SmtpsSession<SslConnection>> {
 public:
     SmtpsServer(const ServerConfig& config,
-         std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
-         std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
-         std::shared_ptr<DBPool> dbPool = nullptr);
+         std::shared_ptr<ThreadPoolBase> ioThreadPool,
+         std::shared_ptr<ThreadPoolBase> workerThreadPool,
+         std::shared_ptr<router::IShardRouter> shardRouter);
     virtual ~SmtpsServer() override;
 
 protected:

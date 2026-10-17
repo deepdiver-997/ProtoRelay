@@ -13,9 +13,9 @@ class Pop3Server : public TcpServerBase<Pop3Session<TcpConnection>,
                                          Pop3Session<SslConnection>> {
 public:
     Pop3Server(const ServerConfig& config,
-         std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
-         std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
-         std::shared_ptr<DBPool> dbPool = nullptr);
+         std::shared_ptr<ThreadPoolBase> ioThreadPool,
+         std::shared_ptr<ThreadPoolBase> workerThreadPool,
+         std::shared_ptr<router::IShardRouter> shardRouter);
     ~Pop3Server() override;
 
     void start() override;

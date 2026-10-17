@@ -282,6 +282,7 @@ set(COMMON_SRCS
     src/mail_system/back/db/mysql_service.cpp
     src/mail_system/back/db/sql_queries.cpp
     src/framework/server_base.cpp
+    src/mail_system/back/bootstrap.cpp
     src/framework/thread_pool/boost_thread_pool.cpp
     src/framework/thread_pool/io_thread_pool.cpp
     src/framework/thread_pool/io_context_registry.cpp

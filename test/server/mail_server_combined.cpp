@@ -22,6 +22,7 @@
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/cli/help_text.h"
+#include "mail_system/back/bootstrap.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>
@@ -221,14 +222,19 @@ int main(int argc, char* argv[]) {
         //    内部会创建 PersistentQueue + OutboundClient
         // ================================================================
         LOG_SERVER_INFO("Creating SMTP server...");
+        mail_system::bootstrap::Options shared_pools;
+        shared_pools.io_pool = io_pool;
+        shared_pools.worker_pool = work_pool;
+        auto smtp_res = mail_system::bootstrap::assemble(smtp_config, shared_pools);
         g_smtp_server = std::make_shared<SmtpsServer>(
-            smtp_config, io_pool, work_pool, db_pool);
+            smtp_config, smtp_res.io_pool, smtp_res.worker_pool, smtp_res.shard_router);
         g_smtp_server->m_configFilePath = options.smtp_config_path;
         LOG_SERVER_INFO("SMTP server created with {} listener(s)", smtp_config.mail_listeners.size());
 
         LOG_SERVER_INFO("Creating IMAP server...");
+        auto imap_res = mail_system::bootstrap::assemble(imap_config, shared_pools);
         g_imap_server = std::make_shared<ImapsServer>(
-            imap_config, io_pool, work_pool, db_pool);
+            imap_config, imap_res.io_pool, imap_res.worker_pool, imap_res.shard_router);
         g_imap_server->m_configFilePath = options.imap_config_path;
         LOG_SERVER_INFO("IMAP server created with {} listener(s)", imap_config.mail_listeners.size());
 

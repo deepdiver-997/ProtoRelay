@@ -1,5 +1,6 @@
 #include "mail_system/back/mailServer/smtps_server.h"
 #include "mail_system/back/cli/help_text.h"
+#include "mail_system/back/bootstrap.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>
@@ -138,7 +139,8 @@ int main(int argc, char* argv[]) {
         std::cout << std::endl;
 
         // 创建服务器
-        g_server = std::make_unique<SmtpsServer>(config);
+        auto res = mail_system::bootstrap::assemble(config);
+        g_server = std::make_unique<SmtpsServer>(config, res.io_pool, res.worker_pool, res.shard_router);
         g_server->m_configFilePath = config_path;
 
         // 启动服务器

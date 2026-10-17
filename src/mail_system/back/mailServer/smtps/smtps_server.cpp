@@ -14,8 +14,8 @@ namespace mail_system {
 SmtpsServer::SmtpsServer(const ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
       std::shared_ptr<ThreadPoolBase> wokerThreadPool,
-       std::shared_ptr<DBPool> dbPool)
-        : TcpServerBase(config, ioThreadPool, wokerThreadPool, dbPool) {
+       std::shared_ptr<router::IShardRouter> shardRouter)
+        : TcpServerBase(config, ioThreadPool, wokerThreadPool, shardRouter) {
     auto cfg = std::atomic_load(&m_config);
 
     // DNS resolver (共享基础资源，入站验证+出站投递+DNSBL共用)

@@ -44,10 +44,13 @@ inline const char* server_state_to_string(ServerState s) {
 // ================================================================
 class ServerBase {
 public:
+    // 纯依赖注入（2026-10-18）：只接受现成资源，任一为空/未 start → 抛
+    // std::invalid_argument 响亮报错，绝不悄悄自建。装配（DB 池/存储/路由的
+    // 具体工厂）在 mail_system::bootstrap::assemble —— 框架不认识任何具体驱动。
     ServerBase(const ServerConfig& config,
-         std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
-         std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
-         std::shared_ptr<pr::DBPool> dbPool = nullptr);
+         std::shared_ptr<ThreadPoolBase> ioThreadPool,
+         std::shared_ptr<ThreadPoolBase> workerThreadPool,
+         std::shared_ptr<router::IShardRouter> shardRouter);
     virtual ~ServerBase();
 
     ServerBase(const ServerBase&) = delete;

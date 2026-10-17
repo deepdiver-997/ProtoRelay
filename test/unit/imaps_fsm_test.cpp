@@ -34,9 +34,7 @@ struct TestServer : ServerBase {
                std::shared_ptr<ThreadPoolBase> io,
                std::shared_ptr<ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : ServerBase(c, io, w, nullptr) {
-        m_shardRouter = std::move(r);
-    }
+        : ServerBase(c, io, w, std::move(r)) {}
     void start() override {}
     bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };

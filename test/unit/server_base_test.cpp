@@ -17,6 +17,10 @@
 #include <thread>
 #include <unistd.h>
 
+#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/db/db_pool.h"
+#include "mail_system/back/router/static_shard_router.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 #include "framework/metrics_server.h"
 #include "framework/net/dns_resolver.h"
 #include "framework/server_base.h"
@@ -49,9 +53,11 @@ std::filesystem::path tmp_dir() {
 
 // ServerBase 是抽象基类：实现纯虚接口的最小具体子类
 struct TestServerBase : ServerBase {
-    explicit TestServerBase(const ServerConfig& c) : ServerBase(c, nullptr, nullptr, nullptr) {}
-    TestServerBase(const ServerConfig& c, std::shared_ptr<ThreadPoolBase> io)
-        : ServerBase(c, io, nullptr, nullptr) {}
+    TestServerBase(const ServerConfig& c,
+                   std::shared_ptr<ThreadPoolBase> io,
+                   std::shared_ptr<ThreadPoolBase> worker,
+                   std::shared_ptr<router::IShardRouter> router)
+        : ServerBase(c, io, worker, router) {}
     void start() override {}
     bool should_reject_connection(std::string& reason, const std::string&) const override {
         reason.clear();
@@ -117,13 +123,35 @@ ServerConfig make_cfg() {
 
 int main() {
     std::printf("server_base_test\n");
+    // 纯 DI：全部用例共享一套最小资源（池已 start + 空 router）
+    auto io_pool = std::make_shared<IOThreadPool>(1);
+    io_pool->start();
+    auto wk_pool = std::make_shared<BoostThreadPool>(1);
+    wk_pool->start();
+    auto null_router = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{}, 0,
+        std::vector<std::shared_ptr<pr::DBPool>>{},
+        std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+
+    // 纯 DI 契约：缺资源必须响亮抛 invalid_argument，绝不悄悄自建（2026-10-18）
+    {
+        int threw = 0;
+    try { TestServerBase b(make_cfg(), nullptr, wk_pool, null_router); (void)b; }
+        catch (const std::invalid_argument&) { ++threw; }
+    try { TestServerBase b(make_cfg(), io_pool, nullptr, null_router); (void)b; }
+        catch (const std::invalid_argument&) { ++threw; }
+    try { TestServerBase b(make_cfg(), io_pool, wk_pool, nullptr); (void)b; }
+        catch (const std::invalid_argument&) { ++threw; }
+        expect_true(threw == 3, "null resource -> loud invalid_argument (x3)");
+    }
+
     auto dir = tmp_dir();
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 
     // 1. 构造 + 生命周期状态
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         expect_true(server.get_state() == ServerState::Paused,
                     "ctor leaves server Paused");
         expect_true(server.m_domain == "test.local", "domain from config");
@@ -138,7 +166,7 @@ int main() {
 
     // 2. 连接计数
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         server.increment_connection_count();
         expect_true(server.active_connections_.load() == 1, "active +1");
         server.decrement_connection_count();
@@ -153,7 +181,7 @@ int main() {
 
     // 3. metrics 缺失时 push_* 安全 no-op
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         server.push_metric_gauge("g", {}, 1.0);
         server.push_metric_counter("c", {}, 1);
         server.push_metric_observe("o", {}, 1.0);
@@ -166,7 +194,7 @@ int main() {
         auto cfg = make_cfg();
         cfg.intrusion_detection_enabled = true;
         cfg.intrusion_ban_threshold      = 3;
-        TestServerBase server(cfg);
+        TestServerBase server(cfg, io_pool, wk_pool, null_router);
         server.m_intrusionDetector.set_enabled(true);
         server.m_intrusionDetector.set_ban_threshold(3);
 
@@ -180,7 +208,7 @@ int main() {
 
     // 5. reload_config：合法热重载
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         auto good = dir / "good.json";
         std::ofstream(good) << R"({"address":"0.0.0.0","listeners":[{"type":"tcp","port":25}],"log_level":"debug"})";
         expect_true(server.reload_config(good.string()), "valid reload accepted");
@@ -190,7 +218,7 @@ int main() {
 
     // 6. reload_config：结构变化（监听器端口）→ 拒绝
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         auto bad = dir / "bad-structure.json";
         std::ofstream(bad) << R"({"address":"0.0.0.0","listeners":[{"type":"ssl","port":465}]})";
         expect_true(!server.reload_config(bad.string()), "listener change rejected");
@@ -198,7 +226,7 @@ int main() {
 
     // 7. reload_config：地址变化 → 拒绝
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         auto bad = dir / "bad-addr.json";
         std::ofstream(bad) << R"({"address":"1.2.3.4","listeners":[{"type":"tcp","port":25}]})";
         expect_true(!server.reload_config(bad.string()), "address change rejected");
@@ -206,7 +234,7 @@ int main() {
 
     // 8. reload_config：文件不存在 → false
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         expect_true(!server.reload_config((dir / "nope.json").string()),
                     "missing config file -> false");
     }
@@ -217,7 +245,7 @@ int main() {
         auto cfg = make_cfg();
         cfg.intrusion_detection_enabled = true;
         cfg.intrusion_ban_threshold      = 3;
-        TestServerBase server(cfg);
+        TestServerBase server(cfg, io_pool, wk_pool, null_router);
         server.m_intrusionDetector.set_enabled(true);
         server.m_intrusionDetector.set_ban_threshold(3);
 
@@ -239,7 +267,7 @@ int main() {
 
     // 10. reload_config：幂等 — 同一文件 reload 两次结果一致
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         auto cfg_path = dir / "idempotent.json";
         std::ofstream(cfg_path) << R"({"address":"0.0.0.0","listeners":[{"type":"tcp","port":25}],"log_level":"warn"})";
         expect_true(server.reload_config(cfg_path.string()),  "first reload ok");
@@ -250,7 +278,7 @@ int main() {
 
     // 11. reload_config：第二次 reload 失败不影响第一次的 config
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         auto good = dir / "good2.json";
         std::ofstream(good) << R"({"address":"0.0.0.0","listeners":[{"type":"tcp","port":25}],"log_level":"trace"})";
         expect_true(server.reload_config(good.string()), "first reload");
@@ -265,7 +293,7 @@ int main() {
 
     // 12. request_stop 后连接计数仍可递增（不变性：状态机转换不阻塞计数器）
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         server.request_stop();
         expect_true(server.get_state() == ServerState::Pausing, "stop requested");
         server.increment_connection_count();
@@ -280,7 +308,7 @@ int main() {
 
     // 13. A2：DNS 注入 — 注入后 get_dns_resolver() 返注入的实例（剧情 invariant）
     {
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         expect_true(server.get_dns_resolver() == nullptr, "no resolver by default");
         auto stub = std::make_shared<StubDnsResolver>();
         server.m_dnsResolver = stub;
@@ -302,7 +330,7 @@ int main() {
         io_pool->start();
         std::thread io_thread([&] { io_pool->get_io_context().run(); });
 
-        TestServerBase server(cfg, io_pool);
+        TestServerBase server(cfg, io_pool, wk_pool, null_router);
         server.start_metrics_server();
 
         // wait for bound_port to be set (start() in ctor path is sync, but be defensive)
@@ -365,7 +393,7 @@ int main() {
             void*   get_context() override { return nullptr; }
             std::string get_last_command_args() const override { return ""; }
         };
-        TestServerBase server(make_cfg());
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         // 出站型：tracks_connection_count_ 默认 false → close() 不能 decrement
         {
             auto s = std::make_shared<TestSession>(&server);
@@ -384,6 +412,9 @@ int main() {
             expect_true(server.active_connections_.load() == 0, "accept-counted close decrements to 0");
         }
     }
+
+    io_pool->stop();
+    wk_pool->stop();
 
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

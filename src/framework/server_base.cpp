@@ -1,229 +1,54 @@
 // ─────────────────────────────────────────────────────────────────
-// 装配根（composition root）：本 .cpp 是全仓库唯一被允许认识具体 DB/存储/路由
-// 实现的框架文件 —— ServerBase 构造函数按配置把 mysql/mariadb/null、
-// local/s3/hdfs、三种 router 装配进抽象接口。头文件已不 include 应用层
-// （2026-10-17 include 泄漏清理）；这里的依赖是装配点的本职，不是泄漏。
-// 长期方向：整块搬到 mail_system 的 bootstrap 模块，框架只留注入后的生命周期。
+// ServerBase —— 纯依赖注入（2026-10-18）。
+//
+// 构造函数只接受现成资源（io 池 / worker 池 / shard router），空指针响亮
+// 抛 invalid_argument，绝不悄悄自建。装配（DB 池/存储/路由的具体工厂）在
+// mail_system/back/bootstrap.cpp —— 框架不再认识任何具体驱动，依赖方向
+// 恢复"应用 → 框架"。本文件保留的唯一应用层 include 是 i_shard_router.h：
+// refresh_metrics 要遍历 router 报告各 shard 的池/存储状态（生命周期职责，
+// 非装配职责）。
 // ─────────────────────────────────────────────────────────────────
 #include "framework/server_base.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/boost_thread_pool.h"
 #include "framework/log/log_macros.h"
-#include "mail_system/back/router/hash_shard_router.h"
-#include "mail_system/back/router/static_shard_router.h"
-#include "mail_system/back/router/table_shard_router.h"
-#include "mail_system/back/entities/mail.h"
-#include "mail_system/back/db/distributed_mysql_pool.h"
-#include "mail_system/back/db/mysql_service.h"
-#include "mail_system/back/storage/async_storage_provider.h"
-#include "mail_system/back/storage/distributed_file_storage_provider.h"
-#if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
-#include "mail_system/back/storage/hdfs_web_storage_provider.h"
-#endif
-#include "mail_system/back/storage/local_file_storage_provider.h"
-#include "mail_system/back/storage/null_storage_provider.h"
-#ifdef ENABLE_S3_STORAGE
-#include "mail_system/back/storage/s3_storage_provider.h"
-#endif
-#include "mail_system/back/db/null_db_pool.h"
-#ifdef HAVE_MARIADB
-#include "mail_system/back/db/mariadb_pool.h"
-#endif
+#include "mail_system/back/router/i_shard_router.h"
 #include <iostream>
 #include <fstream>
+#include <stdexcept>
 
 namespace mail_system {
 
 ServerBase::ServerBase(const ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
-      std::shared_ptr<ThreadPoolBase> wokerThreadPool,
-       std::shared_ptr<DBPool> dbPool)
-    : m_ioThreadPool(ioThreadPool),
-      m_workerThreadPool(wokerThreadPool),
+      std::shared_ptr<ThreadPoolBase> workerThreadPool,
+       std::shared_ptr<router::IShardRouter> shardRouter)
+    : m_ioThreadPool(std::move(ioThreadPool)),
+      m_workerThreadPool(std::move(workerThreadPool)),
+      m_shardRouter(std::move(shardRouter)),
       m_domain(config.system_domain.empty() ? std::string("example.com") : config.system_domain),
       m_config(std::make_shared<ServerConfig>(config))
 {
-    auto cfg = std::atomic_load(&m_config);
+    // 纯 DI：资源必须齐备。静默容忍空指针曾让"谁负责建池"这笔账糊涂了三年
+    // （构造函数里藏着一个 180 行的工厂，测试只能靠事后覆盖 m_shardRouter 绕开）。
+    if (!m_ioThreadPool)
+        throw std::invalid_argument("ServerBase: io thread pool is required "
+                                    "(assemble via mail_system::bootstrap::assemble)");
+    if (!m_workerThreadPool)
+        throw std::invalid_argument("ServerBase: worker thread pool is required "
+                                    "(assemble via mail_system::bootstrap::assemble)");
+    if (!m_shardRouter)
+        throw std::invalid_argument("ServerBase: shard router is required "
+                                    "(assemble via mail_system::bootstrap::assemble)");
+    if (!m_ioThreadPool->is_running() || !m_workerThreadPool->is_running())
+        throw std::invalid_argument("ServerBase: thread pools must be started before construction");
+
     try {
         Logger::get_instance().init(
             config.log_file, 1024 * 1024 * 5, 3,
             Logger::string_to_level(config.log_level),
             config.log_to_console, config.log_to_file);
         LOG_SERVER_INFO("Logger initialized with level: {}", config.log_level);
-
-        // ---- 1. 创建 DB 池 ----
-        auto main_db_pool = dbPool;
-        if (config.use_database && main_db_pool == nullptr) {
-            if (config.db_pool_config.achieve.find("mysql") == 0) {
-                try {
-                    if (config.db_pool_config.achieve == "mysql_distributed")
-                        main_db_pool = DistributedMySQLPoolFactory::get_instance().create_pool(
-                            config.db_pool_config, std::make_shared<MySQLService>());
-                    else
-                        main_db_pool = MySQLPoolFactory::get_instance().create_pool(
-                            config.db_pool_config, std::make_shared<MySQLService>());
-                } catch (const std::exception& e) {
-                    LOG_SERVER_ERROR("Failed to create MySQL pool: {}", e.what());
-                }
-            }
-#ifdef HAVE_MARIADB
-            else if (config.db_pool_config.achieve == "mariadb") {
-                try {
-                    // db_service 传 nullptr：工厂内部创建 MariaDBService
-                    main_db_pool = MariaDBPoolFactory::get_instance().create_pool(
-                        config.db_pool_config, nullptr);
-                } catch (const std::exception& e) {
-                    LOG_SERVER_ERROR("Failed to create MariaDB pool: {}", e.what());
-                }
-            }
-#else
-            else if (config.db_pool_config.achieve == "mariadb") {
-                LOG_SERVER_ERROR("achieve=mariadb 但本构建未启用 MariaDB 引擎（缺 mariadb-connector-c 头文件）");
-            }
-#endif
-        }
-        if (!main_db_pool) {
-            main_db_pool = std::make_shared<NullDBPool>();
-            LOG_SERVER_INFO("Null database pool created");
-        } else {
-            LOG_SERVER_INFO("Database pool initialized successfully");
-        }
-
-        // ---- 2. 创建存储 ----
-        const auto& sc = config.storage;
-        std::shared_ptr<storage::IStorageProvider> main_storage;
-        switch (storage::provider_type_from_string(sc.provider)) {
-        case storage::StorageProviderType::Distributed:
-            main_storage = std::make_shared<storage::DistributedFileStorageProvider>(
-                sc.distributed.roots, sc.distributed.replica_count);
-            break;
-        case storage::StorageProviderType::HdfsWeb:
-#if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
-            main_storage = std::make_shared<storage::HdfsWebStorageProvider>(
-                sc.hdfs.endpoint, sc.hdfs.base_path, sc.hdfs.user,
-                sc.hdfs.replication, static_cast<long>(sc.hdfs.timeout_ms),
-                sc.hdfs.max_write_buffer_bytes);
-            break;
-#else
-            throw std::runtime_error("hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON");
-#endif
-        case storage::StorageProviderType::Null:
-            main_storage = std::make_shared<storage::NullStorageProvider>();
-            break;
-        case storage::StorageProviderType::S3:
-#ifdef ENABLE_S3_STORAGE
-            main_storage = std::make_shared<storage::S3StorageProvider>(
-                sc.s3.endpoint, sc.s3.bucket,
-                sc.s3.access_key, sc.s3.secret_key,
-                sc.s3.region, static_cast<long>(sc.s3.timeout_ms),
-                sc.s3.use_path_style, sc.s3.max_write_buffer_bytes);
-            break;
-#else
-            throw std::runtime_error("s3 requires ENABLE_S3_STORAGE=ON");
-#endif
-        case storage::StorageProviderType::Local:
-        default:
-            if (!std::filesystem::exists(sc.local.mail_path))
-                std::filesystem::create_directories(sc.local.mail_path);
-            if (!std::filesystem::exists(sc.local.attachment_path))
-                std::filesystem::create_directories(sc.local.attachment_path);
-            main_storage = std::make_shared<storage::LocalFileStorageProvider>(
-                sc.local.mail_path, sc.local.attachment_path);
-            break;
-        }
-        {
-            storage::IoError err;
-            if (!main_storage->ensure_ready(err))
-                throw std::runtime_error("Storage init failed: " + err.message);
-        }
-
-        // ---- 2b. 远程后端套真异步装饰器 ----
-        // S3/WebHDFS 的 PUT/GET 是毫秒~百毫秒级阻塞网络操作：commit_async 与
-        // 三个 async 读投递到 worker 线程池执行，io 线程不再被卡（调用点已按
-        // pause 独占约定改造）。本地后端保持内联——stat/mmap/进 page cache 的
-        // 写都是 µs 级，多一次线程跳转纯属浪费。
-        // executor 惰性取 pool：装配此刻 worker 池尚未创建（见 ---- 5 ----），
-        // 首次存储操作远晚于初始化完成，届时必然已就绪；无池配置内联兜底。
-        if (sc.provider == "s3" || sc.provider == "hdfs_web") {
-            main_storage = std::make_shared<storage::AsyncStorageProvider>(
-                main_storage,
-                [this](std::function<void()> task) {
-                    if (m_workerThreadPool) {
-                        m_workerThreadPool->post(std::move(task));
-                    } else {
-                        task();
-                    }
-                });
-        }
-
-        // ---- 3. 创建 Shard Router ----
-        auto& rc = config.router_config;
-        std::vector<std::shared_ptr<DBPool>> shard_db_pools;
-        std::vector<std::shared_ptr<storage::IStorageProvider>> shard_storages;
-
-        if (!rc.shards.empty()) {
-            for (size_t i = 0; i < rc.shards.size() && i < rc.shard_count; ++i) {
-                auto& se = rc.shards[i];
-                std::shared_ptr<DBPool> sdb;
-                if (!se.db_config_file.empty()) {
-                    DBPoolConfig scfg;
-                    if (scfg.loadFromJson(se.db_config_file)) {
-                        if (scfg.achieve == "mysql_distributed")
-                            sdb = DistributedMySQLPoolFactory::get_instance().create_pool(
-                                scfg, std::make_shared<MySQLService>());
-                        else
-                            sdb = MySQLPoolFactory::get_instance().create_pool(
-                                scfg, std::make_shared<MySQLService>());
-                    }
-                }
-                shard_db_pools.push_back(sdb ? sdb : main_db_pool);
-
-                std::shared_ptr<storage::IStorageProvider> sst;
-                if (!se.storage_root.empty()) {
-                    auto mail_dir = se.storage_root + "/mail";
-                    auto att_dir  = se.storage_root + "/attachments";
-                    if (!std::filesystem::exists(mail_dir))
-                        std::filesystem::create_directories(mail_dir);
-                    if (!std::filesystem::exists(att_dir))
-                        std::filesystem::create_directories(att_dir);
-                    sst = std::make_shared<storage::LocalFileStorageProvider>(mail_dir, att_dir);
-                }
-                shard_storages.push_back(sst ? sst : main_storage);
-            }
-        } else {
-            shard_db_pools = {main_db_pool};
-            shard_storages = {main_storage};
-        }
-
-        if (rc.type == "table") {
-            if (!main_db_pool)
-                throw std::runtime_error("table router requires a database pool");
-            m_shardRouter = std::make_shared<router::TableShardRouter>(
-                main_db_pool,
-                rc.table_name, rc.email_column, rc.shard_column,
-                rc.shard_count, rc.cache_capacity,
-                shard_db_pools, shard_storages);
-        } else if (rc.type == "static") {
-            m_shardRouter = std::make_shared<router::StaticShardRouter>(
-                rc.static_mappings, rc.default_shard,
-                shard_db_pools, shard_storages);
-        } else {
-            m_shardRouter = std::make_shared<router::HashShardRouter>(
-                rc.shard_count, shard_db_pools, shard_storages);
-        }
-        LOG_SERVER_INFO("Shard router initialized: type={} shard_count={}",
-                        m_shardRouter->name(), m_shardRouter->shard_count());
-
-        // ---- 4. 线程池 ----
-        if (config.io_thread_count > 0 && m_ioThreadPool == nullptr) {
-            m_ioThreadPool = std::make_shared<IOThreadPool>(config.io_thread_count);
-            m_ioThreadPool->start();
-        }
-        if (config.worker_thread_count > 0 && m_workerThreadPool == nullptr) {
-            m_workerThreadPool = std::make_shared<BoostThreadPool>(config.worker_thread_count);
-            m_workerThreadPool->start();
-        }
-
         LOG_SERVER_INFO("Server initialized with {} listener(s)", config.listeners.size());
         m_state = ServerState::Paused;
     } catch (const std::exception& e) {
@@ -248,9 +73,11 @@ void ServerBase::stop(ServerState state) {
 
     stop_metrics_server();
 
-    if (m_ioThreadPool) m_ioThreadPool->stop();
-    if (m_workerThreadPool) m_workerThreadPool->stop();
-    LOG_SERVER_INFO("ThreadPools stopped");
+    // 纯 DI（2026-10-18）：io/worker 池是调用方注入的资源，所有权在装配方
+    // （bootstrap / main / 测试 fixture），ServerBase 析构与 stop() 都不碰它们
+    // ——共享注入场景（mailServer 合并入口两 server 共池、测试多用例共池）下，
+    // 第一个 server 析构就把池停掉，后续构造直接拿到"已停止"的池。
+    // 池的关闭顺序归装配方：main 持 Assembled 资源，作用域结束时自行 stop。
 
     m_intrusionDetector.persist();
     LOG_SERVER_INFO("Server stopped");

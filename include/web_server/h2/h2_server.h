@@ -16,10 +16,10 @@ namespace h2 {
 class H2Server : public mail_system::TcpServerBase<TcpH2Session, SslH2Session> {
 public:
     H2Server(const mail_system::ServerConfig& config,
-             std::string doc_root = ".",
-             std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
-             std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
-             std::shared_ptr<pr::DBPool> dbPool = nullptr);
+             std::string doc_root,
+             std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
+             std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
+             std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
     ~H2Server() override = default;
 
     const std::string& doc_root() const { return doc_root_; }

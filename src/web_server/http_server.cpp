@@ -9,9 +9,9 @@ HttpServer::HttpServer(const mail_system::ServerConfig& config,
                        std::string doc_root,
                        std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
                        std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
-                       std::shared_ptr<pr::DBPool> dbPool)
+                       std::shared_ptr<mail_system::router::IShardRouter> shardRouter)
     : mail_system::TcpServerBase<TcpHttpSession, SslHttpSession>(
-          config, ioThreadPool, workerThreadPool, dbPool)
+          config, ioThreadPool, workerThreadPool, shardRouter)
     , doc_root_(std::move(doc_root))
 {
     m_tcp_fsm = std::make_shared<HttpFsm<mail_system::TcpConnection>>();

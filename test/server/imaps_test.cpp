@@ -1,5 +1,6 @@
 #include "mail_system/back/mailServer/imaps_server.h"
 #include "mail_system/back/cli/help_text.h"
+#include "mail_system/back/bootstrap.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>
@@ -139,7 +140,8 @@ int main(int argc, char* argv[]) {
             LOG_SERVER_INFO("  Listener: {}:{} auth={}", listener_type_to_string(l.type), l.port,
                            inbound_auth_policy_to_string(l.auth_policy));
 
-        g_server = std::make_unique<ImapsServer>(config);
+        auto res = mail_system::bootstrap::assemble(config);
+        g_server = std::make_unique<ImapsServer>(config, res.io_pool, res.worker_pool, res.shard_router);
         g_server->m_configFilePath = config_path;
         g_server->start();
 

@@ -16,8 +16,8 @@ constexpr int kLockSweepIntervalSeconds = 300;
 Pop3Server::Pop3Server(const ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
       std::shared_ptr<ThreadPoolBase> workerThreadPool,
-       std::shared_ptr<DBPool> dbPool)
-        : TcpServerBase(config, ioThreadPool, workerThreadPool, dbPool) {
+       std::shared_ptr<router::IShardRouter> shardRouter)
+        : TcpServerBase(config, ioThreadPool, workerThreadPool, shardRouter) {
     m_tcp_fsm = std::make_shared<TraditionalPop3Fsm<TcpConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_shardRouter);
     m_ssl_fsm = std::make_shared<TraditionalPop3Fsm<SslConnection>>(

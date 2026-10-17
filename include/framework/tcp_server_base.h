@@ -22,9 +22,9 @@ template <typename TcpSession, typename SslSession>
 class TcpServerBase : public ServerBase {
 public:
     TcpServerBase(const ServerConfig& config,
-                  std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
-                  std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
-                  std::shared_ptr<pr::DBPool> dbPool = nullptr);
+                  std::shared_ptr<ThreadPoolBase> ioThreadPool,
+                  std::shared_ptr<ThreadPoolBase> workerThreadPool,
+                  std::shared_ptr<router::IShardRouter> shardRouter);
     ~TcpServerBase() override;
 
     void start() override;
@@ -74,8 +74,8 @@ TcpServerBase<TcpSession, SslSession>::TcpServerBase(
     const ServerConfig& config,
     std::shared_ptr<ThreadPoolBase> ioThreadPool,
     std::shared_ptr<ThreadPoolBase> workerThreadPool,
-    std::shared_ptr<pr::DBPool> dbPool)
-    : ServerBase(config, ioThreadPool, workerThreadPool, dbPool)
+    std::shared_ptr<router::IShardRouter> shardRouter)
+    : ServerBase(config, ioThreadPool, workerThreadPool, shardRouter)
     , m_sslContext(boost::asio::ssl::context::sslv23)
 {
     auto cfg = std::atomic_load(&m_config);

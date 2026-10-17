@@ -12,6 +12,11 @@
 
 #include <boost/asio.hpp>
 
+#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/db/db_pool.h"
+#include "mail_system/back/router/static_shard_router.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 #include "framework/tcp_server_base.h"
 
 using namespace mail_system;
@@ -75,6 +80,24 @@ ServerConfig make_cfg() {
     return cfg;
 }
 
+// 纯 DI：ServerBase 三件套缺一不可。本测试不触碰 DB/存储，显式传最小 null-object。
+struct DiResources {
+    std::shared_ptr<mail_system::IOThreadPool> io;
+    std::shared_ptr<mail_system::BoostThreadPool> worker;
+    std::shared_ptr<mail_system::router::IShardRouter> router;
+};
+static DiResources make_resources() {
+    auto io = std::make_shared<mail_system::IOThreadPool>(1);
+    io->start();
+    auto worker = std::make_shared<mail_system::BoostThreadPool>(1);
+    worker->start();
+    auto router = std::make_shared<mail_system::router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{}, 0,
+        std::vector<std::shared_ptr<pr::DBPool>>{},
+        std::vector<std::shared_ptr<mail_system::storage::IStorageProvider>>{});
+    return {io, worker, router};
+}
+
 } // namespace
 
 int main() {
@@ -84,7 +107,8 @@ int main() {
 
     // 用例 1：端口在 m_listener_configs 里 → 完整透传监听器配置
     {
-        HandoffTestServer server(make_cfg());
+        auto di = make_resources();
+        HandoffTestServer server(make_cfg(), di.io, di.worker, di.router);
         tcp::acceptor acc(io, tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
         uint16_t port = acc.local_endpoint().port();
 
@@ -109,7 +133,8 @@ int main() {
 
     // 用例 2：端口不在表里（如测试外接）→ 安全回退默认配置，不崩
     {
-        HandoffTestServer server(make_cfg());
+        auto di = make_resources();
+        HandoffTestServer server(make_cfg(), di.io, di.worker, di.router);
         tcp::acceptor acc(io, tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
         (void)acc.local_endpoint().port();
 

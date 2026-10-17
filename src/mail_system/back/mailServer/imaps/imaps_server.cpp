@@ -10,8 +10,8 @@ namespace mail_system {
 ImapsServer::ImapsServer(const ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
       std::shared_ptr<ThreadPoolBase> workerThreadPool,
-       std::shared_ptr<DBPool> dbPool)
-        : TcpServerBase(config, ioThreadPool, workerThreadPool, dbPool) {
+       std::shared_ptr<router::IShardRouter> shardRouter)
+        : TcpServerBase(config, ioThreadPool, workerThreadPool, shardRouter) {
     auto cfg = std::atomic_load(&m_config);
 
     m_tcp_fsm = std::make_shared<TraditionalImapsFsm<TcpConnection>>(
