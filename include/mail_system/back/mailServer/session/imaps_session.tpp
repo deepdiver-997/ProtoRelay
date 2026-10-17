@@ -46,10 +46,10 @@ namespace {
 // ====================================================================
 template <typename ConnectionType>
 ImapsSession<ConnectionType>::ImapsSession(
-    ServerBase* server,
+    pr::ServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm)
-    : SessionBase<ConnectionType>(std::move(connection), server)
+    : pr::SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
     , state_(ImapState::INIT)
     , next_event_(ImapEvent::CONNECT)
@@ -62,10 +62,10 @@ ImapsSession<ConnectionType>::ImapsSession(
 // ====================================================================
 template <typename ConnectionType>
 void ImapsSession<ConnectionType>::start(std::shared_ptr<ImapsSession> self) {
-    SessionBase<ConnectionType>::do_handshake(
+    pr::SessionBase<ConnectionType>::do_handshake(
         self,
         boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_SESSION_ERROR("IMAP handshake failed: {}", ec.message());
                 return;
@@ -79,10 +79,10 @@ void ImapsSession<ConnectionType>::start(std::shared_ptr<ImapsSession> self) {
 
 template <typename ConnectionType>
 void ImapsSession<ConnectionType>::start_after_starttls(std::shared_ptr<ImapsSession> self) {
-    SessionBase<ConnectionType>::do_handshake(
+    pr::SessionBase<ConnectionType>::do_handshake(
         self,
         boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_SESSION_ERROR("IMAP STARTTLS handshake failed: {}", ec.message());
                 return;
@@ -288,14 +288,14 @@ template <typename ConnectionType>
 bool ImapsSession<ConnectionType>::has_buffered_input() const {
     if (awaiting_literal_)
         return !this->command_read_buffer_.empty();
-    return SessionBase<ConnectionType>::has_buffered_input();
+    return pr::SessionBase<ConnectionType>::has_buffered_input();
 }
 
 template <typename ConnectionType>
 std::string ImapsSession<ConnectionType>::extract_one_line() {
     if (awaiting_literal_)
         return this->take_buffered_input();  // literal 数据按 chunk 返回
-    return SessionBase<ConnectionType>::extract_one_line();
+    return pr::SessionBase<ConnectionType>::extract_one_line();
 }
 
 // ====================================================================

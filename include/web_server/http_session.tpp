@@ -47,10 +47,10 @@ static void http_sendfile_worker(int in_fd, int out_fd, int64_t length) {
 // 生命周期
 // ================================================================
 template <typename ConnectionType>
-HttpSession<ConnectionType>::HttpSession(mail_system::ServerBase* server,
+HttpSession<ConnectionType>::HttpSession(pr::ServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<HttpFsm<ConnectionType>> fsm)
-    : mail_system::SessionBase<ConnectionType>(std::move(connection), server)
+    : pr::SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
 {}
 
@@ -339,7 +339,7 @@ void HttpSession<ConnectionType>::send_simple(int status, std::string body, bool
     std::string resp = head + body;
     auto self = self_ptr();
     this->do_async_write(resp,
-        [self, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+        [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
                       const boost::system::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->finish_response(!close);
@@ -362,7 +362,7 @@ void HttpSession<ConnectionType>::stream_file_body(
     auto self = self_ptr();
     int64_t next = remaining - got;
     this->do_async_write(*data,
-        [self, ifs, next, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+        [self, ifs, next, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
                                  const boost::system::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->rearm(kBodyTimeout);       // 每写完一块续命（慢客户端存活，真停则回收）
@@ -391,7 +391,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
                     std::istreambuf_iterator<char>());   // 一次 append 读到 head 之后，零额外拷贝
         this->rearm(kBodyTimeout);
         this->do_async_write(resp,
-            [self, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+            [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
                           const boost::system::error_code& ec) mutable {
                 if (ec) { self->handle_error(ec); return; }
                 self->finish_response(!close);
@@ -401,9 +401,9 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
 
 #ifdef __linux__
     // 零拷贝兜底：明文 TCP + 拿到原生 fd + 有 worker 池才走 sendfile。
-    // `if constexpr` 保证 TLS(SslConnection) 与普通读流绝不经此路径——
-    // sendfile 写裸 fd 会绕过 SSL 加密，只能用于 TcpConnection。
-    if constexpr (std::is_same_v<ConnectionType, mail_system::TcpConnection>) {
+    // `if constexpr` 保证 TLS(pr::SslConnection) 与普通读流绝不经此路径——
+    // sendfile 写裸 fd 会绕过 SSL 加密，只能用于 pr::TcpConnection。
+    if constexpr (std::is_same_v<ConnectionType, pr::TcpConnection>) {
         int sock_fd = this->get_connection().native_handle();
         auto pool = this->get_server() ? this->get_server()->m_workerThreadPool : nullptr;
         if (sock_fd >= 0 && pool) {
@@ -415,7 +415,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
 
     if (head_only || length == 0) {
         this->do_async_write(head,
-            [self, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+            [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
                           const boost::system::error_code& ec) mutable {
                 if (ec) { self->handle_error(ec); return; }
                 self->finish_response(!close);
@@ -425,7 +425,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
     auto ifs = std::make_shared<std::ifstream>(full_path, std::ios::binary);
     if (!ifs || !ifs->is_open()) { send_simple(404, "Not Found", close); return; }
     this->do_async_write(head,
-        [self, ifs, length, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+        [self, ifs, length, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
                                    const boost::system::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->stream_file_body(ifs, length, close);
@@ -436,7 +436,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
 template <typename ConnectionType>
 void HttpSession<ConnectionType>::serve_file_sendfile(const std::string& full_path,
     int64_t length, bool close, bool head_only, int sock_fd,
-    std::shared_ptr<mail_system::ThreadPoolBase> pool)
+    std::shared_ptr<pr::ThreadPoolBase> pool)
 {
     std::filesystem::path fp(full_path);
     std::string ctype = mime_for_extension(fp.extension().string());
@@ -444,7 +444,7 @@ void HttpSession<ConnectionType>::serve_file_sendfile(const std::string& full_pa
     auto self = self_ptr();
     if (head_only || length == 0) {
         this->do_async_write(head,
-            [self, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+            [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
                           const boost::system::error_code& ec) mutable {
                 if (ec) { self->handle_error(ec); return; }
                 self->finish_response(!close);
@@ -454,7 +454,7 @@ void HttpSession<ConnectionType>::serve_file_sendfile(const std::string& full_pa
     auto exec = this->get_connection().get_executor();   // 复制 io 执行器，用于 post 回 io
     this->do_async_write(head,
         [self, full_path, length, close, sock_fd, pool, exec](
-            std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+            std::shared_ptr<pr::SessionBase<ConnectionType>> s,
             const boost::system::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             int in_fd = ::open(full_path.c_str(), O_RDONLY);
@@ -496,7 +496,7 @@ void HttpSession<ConnectionType>::send_error_and_close(int status) {
 }
 
 // ================================================================
-// SessionBase 覆写（桥）
+// pr::SessionBase 覆写（桥）
 // ================================================================
 template <typename ConnectionType>
 std::chrono::milliseconds HttpSession<ConnectionType>::compute_reply_delay() const {

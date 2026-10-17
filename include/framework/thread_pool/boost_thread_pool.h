@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_BOOST_THREAD_POOL_H
-#define MAIL_SYSTEM_BOOST_THREAD_POOL_H
+#ifndef PR_FRAMEWORK_BOOST_THREAD_POOL_H
+#define PR_FRAMEWORK_BOOST_THREAD_POOL_H
 
 #include "thread_pool_base.h"
 #include <boost/asio/thread_pool.hpp>
@@ -16,7 +16,7 @@
 #include <memory>
 #include <stdexcept>
 
-namespace mail_system {
+namespace pr {
 
 /**
  * @brief 基于Boost的线程池实现
@@ -93,6 +93,6 @@ private:
     std::atomic<uint64_t> m_exceptions_total{0};    ///< 任务边界捕获的异常累计（见 exceptions_total）
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // MAIL_SYSTEM_BOOST_THREAD_POOL_H
+#endif // PR_FRAMEWORK_BOOST_THREAD_POOL_H

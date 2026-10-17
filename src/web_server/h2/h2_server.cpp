@@ -8,10 +8,10 @@ namespace h2 {
 
 H2Server::H2Server(const mail_system::ServerConfig& config,
                    std::string doc_root,
-                   std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
-                   std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
+                   std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
+                   std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
                    std::shared_ptr<mail_system::router::IShardRouter> shardRouter)
-    : mail_system::TcpServerBase<TcpH2Session, SslH2Session>(
+    : pr::TcpServerBase<TcpH2Session, SslH2Session>(
           config, ioThreadPool, workerThreadPool, shardRouter)
     , doc_root_(std::move(doc_root))
 {
@@ -19,7 +19,7 @@ H2Server::H2Server(const mail_system::ServerConfig& config,
 }
 
 std::shared_ptr<TcpH2Session> H2Server::make_tcp_session(
-    std::unique_ptr<mail_system::TcpConnection> conn,
+    std::unique_ptr<pr::TcpConnection> conn,
     const mail_system::ListenerConfig& /*lc*/)
 {
     auto s = std::make_shared<TcpH2Session>(this, std::move(conn));
@@ -28,7 +28,7 @@ std::shared_ptr<TcpH2Session> H2Server::make_tcp_session(
 }
 
 std::shared_ptr<SslH2Session> H2Server::make_ssl_session(
-    std::unique_ptr<mail_system::SslConnection> conn,
+    std::unique_ptr<pr::SslConnection> conn,
     const mail_system::ListenerConfig& /*lc*/)
 {
     auto s = std::make_shared<SslH2Session>(this, std::move(conn));

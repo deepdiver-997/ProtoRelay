@@ -1,6 +1,6 @@
-// MetricsServer 核心 API 语义测试 — counter/gauge/histogram 三类的不变量
+// pr::MetricsServer 核心 API 语义测试 — counter/gauge/histogram 三类的不变量
 //
-// 故事背景：2026-08-27 发现 ServerBase::increment_* 三个 helper 把 fetch_add
+// 故事背景：2026-08-27 发现 pr::ServerBase::increment_* 三个 helper 把 fetch_add
 // 返回的累计值 v (1, 2, 3, ...) 当 inc_counter 的 delta 传入 → counter map
 // 累加 1+2+...+N = N*(N+1)/2 三角形数，/metrics 渲染出错的数字。
 //
@@ -23,7 +23,7 @@
 
 namespace {
 
-using mail_system::MetricsServer;
+using pr::MetricsServer;
 
 int g_pass = 0, g_fail = 0;
 void expect_true(bool c, const char* what) {
@@ -59,7 +59,7 @@ int main() {
     //    这是 2026-08-27 修复的 bug 的不变量回归测试。
     {
         boost::asio::io_context io;
-        MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(io, 0, "127.0.0.1");
         // 不调 start()：本测试只验内部 map 渲染（scrape_text），不启 HTTP。
         for (int i = 0; i < 100; ++i) {
             m.inc_counter("mails_accepted_total", {}, 1);
@@ -71,7 +71,7 @@ int main() {
     // 1b. counter 多 label：按 label 维度独立累加
     {
         boost::asio::io_context io;
-        MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(io, 0, "127.0.0.1");
         m.inc_counter("outbound_attempts_total", {{"domain", "a.local"}}, 1);
         m.inc_counter("outbound_attempts_total", {{"domain", "a.local"}}, 1);
         m.inc_counter("outbound_attempts_total", {{"domain", "b.local"}}, 1);
@@ -85,7 +85,7 @@ int main() {
     // 2. gauge：后写覆盖前写（瞬时值语义）
     {
         boost::asio::io_context io;
-        MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(io, 0, "127.0.0.1");
         m.set_gauge("active_connections", {}, 1);
         m.set_gauge("active_connections", {}, 2);
         m.set_gauge("active_connections", {}, 5);
@@ -96,7 +96,7 @@ int main() {
     // 3. histogram：sum 累加，count 累加 1（输出 _sum / _count 两行）
     {
         boost::asio::io_context io;
-        MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(io, 0, "127.0.0.1");
         m.observe("request_latency_ms", {}, 2.0);
         m.observe("request_latency_ms", {}, 3.0);
         m.observe("request_latency_ms", {}, 5.0);

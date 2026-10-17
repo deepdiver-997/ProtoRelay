@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_STORAGE_S3_STORAGE_PROVIDER_H
-#define MAIL_SYSTEM_STORAGE_S3_STORAGE_PROVIDER_H
+#ifndef PR_FRAMEWORK_STORAGE_S3_STORAGE_PROVIDER_H
+#define PR_FRAMEWORK_STORAGE_S3_STORAGE_PROVIDER_H
 
 #include "framework/storage/i_storage_provider.h"
 
@@ -95,4 +95,4 @@ private:
 } // namespace storage
 } // namespace pr
 
-#endif // MAIL_SYSTEM_STORAGE_S3_STORAGE_PROVIDER_H
+#endif // PR_FRAMEWORK_STORAGE_S3_STORAGE_PROVIDER_H

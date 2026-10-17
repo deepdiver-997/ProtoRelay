@@ -2,7 +2,7 @@
 //
 // 目标：为入站校验/FSM 的异步路径（MAIL FROM SPF / RCPT user_exists / DATA_END verify_all）
 // 建立真实多线程时序测试：
-//   - session 的常规命令处理跑在 IOThreadPool 的 io_context 线程上；
+//   - session 的常规命令处理跑在 pr::IOThreadPool 的 io_context 线程上；
 //   - DNS/DB 异步回调由测试线程手动触发（模拟 c-ares / DB worker 线程）；
 //   - 验证跨线程的 paused/resume、shared_ptr 保活（回调晚于 session 逻辑结束不悬垂）。
 // 配合 TSan（-fsanitize=thread）可检测 session 状态竞争。
@@ -41,8 +41,8 @@ namespace pq = persist_storage;
 // 与 smtps_fsm_test 一致：必须派生自 SmtpsServer（SmtpsSession 构造用 static_cast 读 m_persistentQueue）。
 struct TestServer : SmtpsServer {
     TestServer(const ServerConfig& c,
-               std::shared_ptr<ThreadPoolBase> io,
-               std::shared_ptr<ThreadPoolBase> w,
+               std::shared_ptr<pr::ThreadPoolBase> io,
+               std::shared_ptr<pr::ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
         : SmtpsServer(c, io, w, std::move(r)) {}
     void start() override {}
@@ -66,8 +66,8 @@ struct SessionHandle {
 };
 
 struct ConcurrencyTestFixture {
-    std::shared_ptr<IOThreadPool> io_pool;
-    std::shared_ptr<BoostThreadPool> worker_pool;
+    std::shared_ptr<pr::IOThreadPool> io_pool;
+    std::shared_ptr<pr::BoostThreadPool> worker_pool;
     std::shared_ptr<test::MockDnsResolver> dns;
     std::shared_ptr<test::MockDbPool> db_pool;
     std::shared_ptr<router::StaticShardRouter> router;
@@ -80,8 +80,8 @@ struct ConcurrencyTestFixture {
         Logger::get_instance().init("smtps_fsm_concurrency_test.log", 0, 1, spdlog::level::off, false, false);
         // 连接级异步 I/O 由 MockConnection 内部 MockIoContext 线程驱动（还原 asio 投递语义）。
         // io_pool 保留仅为满足 SmtpsServer/FSM 构造签名，不参与连接读写。
-        io_pool     = std::make_shared<IOThreadPool>(1);
-        worker_pool = std::make_shared<BoostThreadPool>(2);
+        io_pool     = std::make_shared<pr::IOThreadPool>(1);
+        worker_pool = std::make_shared<pr::BoostThreadPool>(2);
         io_pool->start();
         worker_pool->start();
 

@@ -13,7 +13,7 @@
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 
-// 纯 DI（2026-10-18）：ServerBase 三件套缺一不可。web 静态服务器不用邮件业务
+// 纯 DI（2026-10-18）：pr::ServerBase 三件套缺一不可。web 静态服务器不用邮件业务
 // 资源，显式传 null-object（空 router），不悄悄自建。
 static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
     return std::make_shared<mail_system::router::StaticShardRouter>(
@@ -58,9 +58,9 @@ int main(int argc, char* argv[]) {
         config.storage.local.mail_path = "config/h2storage/mail";
         config.storage.local.attachment_path = "config/h2storage/attachments";
 
-        auto io_pool = std::make_shared<mail_system::IOThreadPool>(config.io_thread_count);
+        auto io_pool = std::make_shared<pr::IOThreadPool>(config.io_thread_count);
         io_pool->start();
-        auto wk_pool = std::make_shared<mail_system::BoostThreadPool>(config.worker_thread_count);
+        auto wk_pool = std::make_shared<pr::BoostThreadPool>(config.worker_thread_count);
         wk_pool->start();
         g_server = std::make_unique<web_server::h2::H2Server>(config, doc_root, io_pool, wk_pool, make_null_router());
         g_server->start();

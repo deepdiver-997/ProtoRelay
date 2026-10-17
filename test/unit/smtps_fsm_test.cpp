@@ -31,22 +31,22 @@ namespace pq = persist_storage;
 
 // ========== 测试夹具 ==========
 
-// 注意：必须派生自 SmtpsServer 而非 ServerBase。
+// 注意：必须派生自 SmtpsServer 而非 pr::ServerBase。
 // SmtpsSession 构造函数通过 `static_cast<SmtpsServer*>(server)->m_persistentQueue`
 // 读取持久化队列；若 server 不是真正的 SmtpsServer，该向下转型是未定义行为，
 // 会在构造时读越界垃圾指针（曾导致间歇性 SIGBUS/SIGSEGV）。
 struct TestServer : SmtpsServer {
     TestServer(const ServerConfig& c,
-               std::shared_ptr<ThreadPoolBase> io,
-               std::shared_ptr<ThreadPoolBase> w,
+               std::shared_ptr<pr::ThreadPoolBase> io,
+               std::shared_ptr<pr::ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
         : SmtpsServer(c, io, w, std::move(r)) {}
     void start() override {}
 };
 
 struct FsmTestFixture {
-    std::shared_ptr<IOThreadPool> io_pool;
-    std::shared_ptr<BoostThreadPool> worker_pool;
+    std::shared_ptr<pr::IOThreadPool> io_pool;
+    std::shared_ptr<pr::BoostThreadPool> worker_pool;
     std::shared_ptr<router::StaticShardRouter> router;
     std::shared_ptr<pq::PersistentQueue> persist_q;
     std::shared_ptr<TestServer> server;
@@ -55,8 +55,8 @@ struct FsmTestFixture {
 
     FsmTestFixture() {
         Logger::get_instance().init("smtps_fsm_test.log", 0, 1, spdlog::level::debug, false, true);
-        io_pool     = std::make_shared<IOThreadPool>(1);
-        worker_pool = std::make_shared<BoostThreadPool>(2);
+        io_pool     = std::make_shared<pr::IOThreadPool>(1);
+        worker_pool = std::make_shared<pr::BoostThreadPool>(2);
         io_pool->start();
         worker_pool->start();
 

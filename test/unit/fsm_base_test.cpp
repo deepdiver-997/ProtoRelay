@@ -1,6 +1,6 @@
-// FsmBase 分发语义测试。
+// pr::FsmBase 分发语义测试。
 //
-// FsmBase 是 std::map 版本的协议无关状态机基类（fast_fsm_base 是数组版）。
+// pr::FsmBase 是 std::map 版本的协议无关状态机基类（fast_fsm_base 是数组版）。
 // SMTP/IMAP 的真实 FSM 都继承它，但 dispatch 的分支（terminal 关闭、
 // 非法转换、缺 handler、pre_dispatch 顺序）此前只被协议级测试间接覆盖。
 // 这里用最小枚举 + TestSession 直接打透 dispatch 的每一条路径。
@@ -17,15 +17,15 @@
 namespace {
 
 using mail_system::MockConnection;
-using mail_system::SessionBase;
+using pr::SessionBase;
 using mail_system::TestSession;
 
 enum class St : int { INIT = 0, AUTH = 1, DATA = 2, DONE = 3, COUNT = 4 };
 enum class Ev : int { HELO = 0, AUTH = 1, QUIT = 2, COUNT = 3 };
 
-using Fsm = mail_system::FsmBase<MockConnection, St, Ev>;
+using Fsm = pr::FsmBase<MockConnection, St, Ev>;
 using Handler = Fsm::Handler;
-using SessionPtr = std::shared_ptr<SessionBase<MockConnection>>;
+using SessionPtr = std::shared_ptr<pr::SessionBase<MockConnection>>;
 
 struct TestFsm : Fsm {
     int invalid_calls = 0;

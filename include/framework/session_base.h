@@ -1,5 +1,5 @@
-#ifndef SESSION_BASE_H
-#define SESSION_BASE_H
+#ifndef PR_FRAMEWORK_SESSION_BASE_H
+#define PR_FRAMEWORK_SESSION_BASE_H
 
 #include "framework/log/log_macros.h"
 #include "framework/connection/i_connection.h"
@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-namespace mail_system {
+namespace pr {
 
 class ServerBase;
 class TcpConnection;
@@ -258,6 +258,6 @@ protected:
     void trace_maybe_save();
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // SESSION_BASE_H
+#endif // PR_FRAMEWORK_SESSION_BASE_H

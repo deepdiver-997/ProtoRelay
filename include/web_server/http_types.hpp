@@ -4,7 +4,7 @@
 // HTTP/1.1 静态文件服务器 — 类型定义
 //
 // 设计对齐 mail_system 框架：状态/事件用带 COUNT 哨兵的枚举，喂给
-// FastFsmBase（O(1) 数组派发）。HttpRequest 即 Session 的 context——
+// pr::FastFsmBase（O(1) 数组派发）。HttpRequest 即 Session 的 context——
 // smtps 的 SmtpsContext 是自有 struct，这里直接用一个可复用的请求对象。
 // ──────────────────────────────────────────────────────────────────
 #include <cstdint>
@@ -15,7 +15,7 @@
 namespace web_server {
 
 // ================================================================
-// 状态机枚举（必须带 COUNT 哨兵供 FastFsmBase 定长数组使用）
+// 状态机枚举（必须带 COUNT 哨兵供 pr::FastFsmBase 定长数组使用）
 // ================================================================
 enum class HttpState {
     WAIT_REQUEST_LINE = 0,   // 读请求行

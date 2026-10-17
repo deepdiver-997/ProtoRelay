@@ -1,4 +1,4 @@
-// SessionBase 生命周期单元测试（协议无关基座的核心）。
+// pr::SessionBase 生命周期单元测试（协议无关基座的核心）。
 //
 // 用 TestSession + MockConnection（同步模式内联投递）驱动：
 //   - 异步读：完整行/流水线/残缺行/缓冲上限/读错误
@@ -19,8 +19,8 @@
 namespace {
 
 using mail_system::MockConnection;
-using mail_system::SessionBase;
-using mail_system::SessionError;
+using pr::SessionBase;
+using pr::SessionError;
 using mail_system::TestSession;
 
 int g_pass = 0, g_fail = 0;
@@ -264,18 +264,18 @@ int main() {
     // ── 错误码 / 错误消息映射 ────────────────────────────────
     {
         auto s = make_session();
-        s->set_error(SessionError::AuthFailed, "bad credentials");
-        expect_true(s->get_error() == SessionError::AuthFailed, "get_error");
+        s->set_error(pr::SessionError::AuthFailed, "bad credentials");
+        expect_true(s->get_error() == pr::SessionError::AuthFailed, "get_error");
         expect_true(s->get_error_detail() == "bad credentials", "get_error_detail");
-        expect_true(s->error_message(SessionError::AuthFailed) == "Authentication failed",
+        expect_true(s->error_message(pr::SessionError::AuthFailed) == "Authentication failed",
                     "error_message AuthFailed");
-        expect_true(s->error_message(SessionError::InvalidCommand) == "Invalid command",
+        expect_true(s->error_message(pr::SessionError::InvalidCommand) == "Invalid command",
                     "error_message InvalidCommand");
-        expect_true(s->error_message(SessionError::Timeout) == "Connection timeout",
+        expect_true(s->error_message(pr::SessionError::Timeout) == "Connection timeout",
                     "error_message Timeout");
-        expect_true(s->error_message(SessionError::Internal) == "Internal server error",
+        expect_true(s->error_message(pr::SessionError::Internal) == "Internal server error",
                     "error_message Internal");
-        expect_true(s->error_message(SessionError::None).empty(), "error_message None empty");
+        expect_true(s->error_message(pr::SessionError::None).empty(), "error_message None empty");
     }
 
     // ── 认证失败计数（无 server → 上限 3）────────────────────
@@ -291,9 +291,9 @@ int main() {
         auto s = make_session();
         int hs_calls = 0;
         bool hs_ok = false;
-        SessionBase<MockConnection>::do_handshake(
+        pr::SessionBase<MockConnection>::do_handshake(
             s, boost::asio::ssl::stream_base::client,
-            [&](std::shared_ptr<SessionBase<MockConnection>>,
+            [&](std::shared_ptr<pr::SessionBase<MockConnection>>,
                 const boost::system::error_code& ec) { hs_calls++; hs_ok = !ec; });
         expect_true(hs_calls == 1 && hs_ok, "handshake completes without error on mock");
     }

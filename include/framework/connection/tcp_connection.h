@@ -1,11 +1,11 @@
-#ifndef TCP_CONNECTION_H
-#define TCP_CONNECTION_H
+#ifndef PR_FRAMEWORK_TCP_CONNECTION_H
+#define PR_FRAMEWORK_TCP_CONNECTION_H
 
 #include "i_connection.h"
 #include <boost/asio.hpp>
 #include <memory>
 
-namespace mail_system {
+namespace pr {
 
 // TCP 连接实现
 class TcpConnection : public IConnection {
@@ -88,6 +88,6 @@ private:
     std::unique_ptr<boost::asio::ip::tcp::socket> socket_;
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // TCP_CONNECTION_H
+#endif // PR_FRAMEWORK_TCP_CONNECTION_H

@@ -11,28 +11,28 @@
 
 namespace mail_system {
 
-class SmtpsServer : public TcpServerBase<SmtpsSession<TcpConnection>,
-                                          SmtpsSession<SslConnection>> {
+class SmtpsServer : public pr::TcpServerBase<SmtpsSession<pr::TcpConnection>,
+                                          SmtpsSession<pr::SslConnection>> {
 public:
     SmtpsServer(const ServerConfig& config,
-         std::shared_ptr<ThreadPoolBase> ioThreadPool,
-         std::shared_ptr<ThreadPoolBase> workerThreadPool,
+         std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
+         std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
          std::shared_ptr<router::IShardRouter> shardRouter);
     virtual ~SmtpsServer() override;
 
 protected:
-    void stop(ServerState state = ServerState::Pausing) override;
+    void stop(pr::ServerState state = pr::ServerState::Pausing) override;
     bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const override;
 
-    // TcpServerBase 工厂
-    std::shared_ptr<SmtpsSession<TcpConnection>> make_tcp_session(
-        std::unique_ptr<TcpConnection> conn, const ListenerConfig& lc) override;
-    std::shared_ptr<SmtpsSession<SslConnection>> make_ssl_session(
-        std::unique_ptr<SslConnection> conn, const ListenerConfig& lc) override;
+    // pr::TcpServerBase 工厂
+    std::shared_ptr<SmtpsSession<pr::TcpConnection>> make_tcp_session(
+        std::unique_ptr<pr::TcpConnection> conn, const ListenerConfig& lc) override;
+    std::shared_ptr<SmtpsSession<pr::SslConnection>> make_ssl_session(
+        std::unique_ptr<pr::SslConnection> conn, const ListenerConfig& lc) override;
 
 private:
-    std::shared_ptr<TraditionalSmtpsFsm<TcpConnection>> m_tcp_fsm;
-    std::shared_ptr<TraditionalSmtpsFsm<SslConnection>> m_ssl_fsm;
+    std::shared_ptr<TraditionalSmtpsFsm<pr::TcpConnection>> m_tcp_fsm;
+    std::shared_ptr<TraditionalSmtpsFsm<pr::SslConnection>> m_ssl_fsm;
 
 public:
     std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;

@@ -29,19 +29,19 @@ using namespace mail_system;
 
 // ========== 测试夹具 ==========
 
-struct TestServer : ServerBase {
+struct TestServer : pr::ServerBase {
     TestServer(const ServerConfig& c,
-               std::shared_ptr<ThreadPoolBase> io,
-               std::shared_ptr<ThreadPoolBase> w,
+               std::shared_ptr<pr::ThreadPoolBase> io,
+               std::shared_ptr<pr::ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : ServerBase(c, io, w, std::move(r)) {}
+        : pr::ServerBase(c, io, w, std::move(r)) {}
     void start() override {}
     bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };
 
 struct FsmTestFixture {
-    std::shared_ptr<IOThreadPool> io_pool;
-    std::shared_ptr<BoostThreadPool> worker_pool;
+    std::shared_ptr<pr::IOThreadPool> io_pool;
+    std::shared_ptr<pr::BoostThreadPool> worker_pool;
     std::shared_ptr<router::StaticShardRouter> router;
     std::shared_ptr<TestServer> server;
     std::shared_ptr<TraditionalImapsFsm<MockConnection>> fsm;
@@ -49,8 +49,8 @@ struct FsmTestFixture {
 
     FsmTestFixture() {
         Logger::get_instance().init("imaps_fsm_test.log", 0, 1, spdlog::level::off, false, false);
-        io_pool     = std::make_shared<IOThreadPool>(1);
-        worker_pool = std::make_shared<BoostThreadPool>(2);
+        io_pool     = std::make_shared<pr::IOThreadPool>(1);
+        worker_pool = std::make_shared<pr::BoostThreadPool>(2);
         io_pool->start();
         worker_pool->start();
 
@@ -372,8 +372,8 @@ TEST(fetch_full_path_with_storage) {
     // 覆盖重写后的续作链：mock DB 提供邮件行 + LocalFileStorageProvider
     // 提供正文；本地 provider 的 async_* 内联执行，响应应同步产出。
     // 断言 size/正文/BODY 字面量/tagged OK —— 这是 FETCH 热路径的形状。
-    auto io = std::make_shared<IOThreadPool>(1); io->start();
-    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);   // 同步模式：sq 桥立即拿到注入的行
     namespace st = mail_system::storage;
@@ -447,8 +447,8 @@ TEST(fetch_full_path_with_storage) {
 // 89449fa 引入的 substr off-by-one 把闭合 ']' 带进节号（"2]"→非数字→节号恒 0），
 // 服务器对 BODY[n] 一律不返回正文 → 客户端"content 为空"无限重试（2026-09-28）。
 TEST(fetch_body_part_number) {
-    auto io = std::make_shared<IOThreadPool>(1); io->start();
-    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
@@ -561,8 +561,8 @@ TEST(fetch_body_part_number) {
 // 旧实现 fetch_drive 逐封真递归 → 大邮箱 >~200 封栈溢出 SIGSEGV。
 // 修复后应循环展开（inline 回调外层 continue），400 封正常完成。
 TEST(fetch_many_mails_no_stack_overflow) {
-    auto io = std::make_shared<IOThreadPool>(1); io->start();
-    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
@@ -1032,8 +1032,8 @@ TEST(uidnext_advance_read) {
     // 剧情：SELECT/STATUS 报告 UIDNEXT。新实现 = 原子推进高水位(advance,写)
     // + 读(advance 后的 mailbox_uidnext 行)。mock 同步模式下 advance 的
     // async_execute 不消耗结果，read 的 async_query 弹出一个 uidnext 值。
-    auto io = std::make_shared<IOThreadPool>(1); io->start();
-    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);   // 同步模式
     auto router = std::make_shared<router::StaticShardRouter>(
@@ -1072,8 +1072,8 @@ TEST(stats_flight_dedup_concurrent) {
     // 剧情：两个连接并发 SELECT 同一邮箱，缓存 miss。single-flight 应只让一个
     // 查询链在途（第二个挂到等待列表，不再发查询），owner 完成后两者都拿到结果
     // —— 防 N 连接各自查库打爆数据库，也防等待者永久挂起。
-    auto io = std::make_shared<IOThreadPool>(1); io->start();
-    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(true);   // 延迟模式：查询挂起，手动触发
     auto router = std::make_shared<router::StaticShardRouter>(
@@ -1137,8 +1137,8 @@ TEST(stats_flight_concurrent_threads) {
     // 剧情：两个 OS 线程同时 miss 同一邮箱 key（模拟两个连接并发 SELECT）。
     // single-flight 保证只发一次查询链（谁拿 owner 不定），另一个挂等待列表，
     // 两个线程都拿到结果。TSan 下验证 flight 锁无数据竞争。
-    auto io = std::make_shared<IOThreadPool>(1); io->start();
-    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(true);
     auto router = std::make_shared<router::StaticShardRouter>(

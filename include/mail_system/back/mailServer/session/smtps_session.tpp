@@ -6,30 +6,30 @@ namespace mail_system {
 
 template <typename ConnectionType>
 SmtpsSession<ConnectionType>::SmtpsSession(
-    ServerBase* server,
+    pr::ServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm
-) : SessionBase<ConnectionType>(std::move(connection), server)
+) : pr::SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
     , next_event_(SmtpsEvent::CONNECT)
     , ignore_current_command_(false)
     , context_()
     // TODO: `static_cast<SmtpsServer*>(server)` 假定 server 一定是 SmtpsServer。
-    // 传非 SmtpsServer（如测试里的 ServerBase 派生类）会在 server+0x228 处越界读堆垃圾，
+    // 传非 SmtpsServer（如测试里的 pr::ServerBase 派生类）会在 server+0x228 处越界读堆垃圾，
     // 构造野 shared_ptr 导致间歇性 SIGBUS/SIGSEGV（smtps_fsm_test 曾 ~70% 崩溃）。
     // 加固选项（任选，勿再裸转型）：
     //   1) dynamic_cast<SmtpsServer*>(server) + null 兜底（需 RTTI，本项目已启用）
-    //   2) ServerBase 加虚访问器 get_persistent_queue()，SmtpsServer 覆写返回 m_persistentQueue
+    //   2) pr::ServerBase 加虚访问器 get_persistent_queue()，SmtpsServer 覆写返回 m_persistentQueue
     //      （会向传输无关基类引入 SMTP 专属语义，抽象污染）
     //   3) 构造函数显式接收 shared_ptr<PersistentQueue> 参数（最纯，但需改 make_tcp_session 调用点）
     , persistent_queue_(static_cast<SmtpsServer*>(server)->m_persistentQueue) {}
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
-    SessionBase<ConnectionType>::do_handshake(
+    pr::SessionBase<ConnectionType>::do_handshake(
         self,
         boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("Handshake failed: {}", ec.message()); return; }
             s->rearm(s->config_read_timeout());   // 挂接看门狗：闲置/对端断电 over read_timeout 回收
             auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(s->get_fsm());
@@ -40,10 +40,10 @@ void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::start_after_starttls(std::shared_ptr<SmtpsSession> self) {
-    SessionBase<ConnectionType>::do_handshake(
+    pr::SessionBase<ConnectionType>::do_handshake(
         self,
         boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("STARTTLS handshake failed: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
             s->set_next_event(static_cast<int>(SmtpsEvent::TIMEOUT));

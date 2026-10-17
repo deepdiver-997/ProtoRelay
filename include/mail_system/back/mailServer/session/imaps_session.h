@@ -19,10 +19,10 @@
 namespace mail_system {
 
 template <typename ConnectionType>
-class ImapsSession : public SessionBase<ConnectionType> {
+class ImapsSession : public pr::SessionBase<ConnectionType> {
 public:
     ImapsSession(
-        ServerBase* server,
+        pr::ServerBase* server,
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm);
 
@@ -79,8 +79,8 @@ private:
     bool idle_done_received_ = false;
 };
 
-using TcpImapsSession = ImapsSession<TcpConnection>;
-using SslImapsSession = ImapsSession<SslConnection>;
+using TcpImapsSession = ImapsSession<pr::TcpConnection>;
+using SslImapsSession = ImapsSession<pr::SslConnection>;
 
 } // namespace mail_system
 

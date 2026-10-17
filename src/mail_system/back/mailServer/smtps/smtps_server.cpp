@@ -12,8 +12,8 @@
 namespace mail_system {
 
 SmtpsServer::SmtpsServer(const ServerConfig& config,
-     std::shared_ptr<ThreadPoolBase> ioThreadPool,
-      std::shared_ptr<ThreadPoolBase> wokerThreadPool,
+     std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
+      std::shared_ptr<pr::ThreadPoolBase> wokerThreadPool,
        std::shared_ptr<router::IShardRouter> shardRouter)
         : TcpServerBase(config, ioThreadPool, wokerThreadPool, shardRouter) {
     auto cfg = std::atomic_load(&m_config);
@@ -73,9 +73,9 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         LOG_SERVER_WARN("No database pool — SMTP outbound delivery disabled");
     }
 
-    m_tcp_fsm = std::make_shared<TraditionalSmtpsFsm<TcpConnection>>(
+    m_tcp_fsm = std::make_shared<TraditionalSmtpsFsm<pr::TcpConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
-    m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(
+    m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<pr::SslConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
 
     // DB 路径下 m_outboundServer 已被 wire 到 PersistentQueue；启动它开始拉 outbox
@@ -89,7 +89,7 @@ SmtpsServer::~SmtpsServer() {
     stop();
 }
 
-void SmtpsServer::stop(ServerState state) {
+void SmtpsServer::stop(pr::ServerState state) {
     if (m_outboundServer) { m_outboundServer->stop(); LOG_SERVER_INFO("OutboundServer stopped"); }
     if (m_persistentQueue) {
         m_persistentQueue->shutdown();
@@ -99,19 +99,19 @@ void SmtpsServer::stop(ServerState state) {
     TcpServerBase::stop(state);
 }
 
-std::shared_ptr<SmtpsSession<TcpConnection>> SmtpsServer::make_tcp_session(
-    std::unique_ptr<TcpConnection> conn, const ListenerConfig& lc)
+std::shared_ptr<SmtpsSession<pr::TcpConnection>> SmtpsServer::make_tcp_session(
+    std::unique_ptr<pr::TcpConnection> conn, const ListenerConfig& lc)
 {
-    auto session = std::make_shared<SmtpsSession<TcpConnection>>(
+    auto session = std::make_shared<SmtpsSession<pr::TcpConnection>>(
         this, std::move(conn), m_tcp_fsm);
     session->set_listener_config(lc);
     return session;
 }
 
-std::shared_ptr<SmtpsSession<SslConnection>> SmtpsServer::make_ssl_session(
-    std::unique_ptr<SslConnection> conn, const ListenerConfig& lc)
+std::shared_ptr<SmtpsSession<pr::SslConnection>> SmtpsServer::make_ssl_session(
+    std::unique_ptr<pr::SslConnection> conn, const ListenerConfig& lc)
 {
-    auto session = std::make_shared<SmtpsSession<SslConnection>>(
+    auto session = std::make_shared<SmtpsSession<pr::SslConnection>>(
         this, std::move(conn), m_ssl_fsm);
     session->set_listener_config(lc);
     return session;

@@ -17,17 +17,17 @@
 #include <fstream>
 #include <stdexcept>
 
-namespace mail_system {
+namespace pr {
 
-ServerBase::ServerBase(const ServerConfig& config,
+ServerBase::ServerBase(const mail_system::ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
       std::shared_ptr<ThreadPoolBase> workerThreadPool,
-       std::shared_ptr<router::IShardRouter> shardRouter)
+       std::shared_ptr<mail_system::router::IShardRouter> shardRouter)
     : m_ioThreadPool(std::move(ioThreadPool)),
       m_workerThreadPool(std::move(workerThreadPool)),
       m_shardRouter(std::move(shardRouter)),
       m_domain(config.system_domain.empty() ? std::string("example.com") : config.system_domain),
-      m_config(std::make_shared<ServerConfig>(config))
+      m_config(std::make_shared<mail_system::ServerConfig>(config))
 {
     // 纯 DI：资源必须齐备。静默容忍空指针曾让"谁负责建池"这笔账糊涂了三年
     // （构造函数里藏着一个 180 行的工厂，测试只能靠事后覆盖 m_shardRouter 绕开）。
@@ -171,7 +171,7 @@ void ServerBase::refresh_metrics() {
 
 bool ServerBase::reload_config(const std::string& json_file) {
     m_configFilePath = json_file;
-    ServerConfig new_cfg = *std::atomic_load(&m_config);
+    mail_system::ServerConfig new_cfg = *std::atomic_load(&m_config);
     if (!new_cfg.loadFromFile(json_file)) {
         LOG_SERVER_ERROR("Config reload failed: could not parse {}", json_file);
         return false;
@@ -189,11 +189,11 @@ bool ServerBase::reload_config(const std::string& json_file) {
             return false;
         }
     }
-    std::atomic_store(&m_config, std::make_shared<ServerConfig>(new_cfg));
+    std::atomic_store(&m_config, std::make_shared<mail_system::ServerConfig>(new_cfg));
     auto applied = std::atomic_load(&m_config);
     Logger::get_instance().set_level(Logger::string_to_level(applied->log_level));
     LOG_SERVER_INFO("Config reloaded: log_level={}, auth={}",
-                    applied->log_level, inbound_auth_policy_to_string(applied->inbound_auth_policy));
+                    applied->log_level, mail_system::inbound_auth_policy_to_string(applied->inbound_auth_policy));
     return true;
 }
 
@@ -201,4 +201,4 @@ bool ServerBase::reload_config(const std::string& json_file) {
 std::string ServerBase::build_metrics_response() const { return ""; }
 std::string ServerBase::build_status_response() const { return ""; }
 
-} // namespace mail_system
+} // namespace pr

@@ -8,7 +8,7 @@
 
 namespace web_server {
 
-template class HttpSession<mail_system::TcpConnection>;
-template class HttpSession<mail_system::SslConnection>;
+template class HttpSession<pr::TcpConnection>;
+template class HttpSession<pr::SslConnection>;
 
 } // namespace web_server

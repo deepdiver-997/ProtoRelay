@@ -89,13 +89,13 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_mails_sync(
 }
 
 template <typename ConnectionType>
-bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<SessionBase<ConnectionType>> session) {
+bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     auto* smtp_session = static_cast<SmtpsSession<ConnectionType>*>(session.get());
     std::string error;
     bool ok = persist_mails_sync(smtp_session, error);
     std::string reply = ok ? "221 Bye\r\n" : ("451 " + error + "\r\n");
     session->do_async_write(reply,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) LOG_SMTP_DETAIL_ERROR("Error sending QUIT reply: {}", ec.message());
             auto io_ctx = static_cast<SmtpsServer*>(s->get_server())->get_io_context();
             auto timer = std::make_shared<boost::asio::steady_timer>(*io_ctx);
@@ -113,7 +113,7 @@ void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
     this->add_transition(SmtpsState::INIT, SmtpsEvent::CONNECT, SmtpsState::GREETING);
     this->add_transition(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
     this->add_transition(SmtpsState::GREETING, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
-    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
+    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
         this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS, SmtpsState::INIT);
     this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_USERNAME);
     this->add_transition(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_PASSWORD);
@@ -197,7 +197,7 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
 // ========== 事件处理 ==========
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::process_event(
-    std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, SmtpsEvent event)
 {
     if constexpr (ENABLE_SMTP_DETAIL_DEBUG_LOG) {
         LOG_SMTP_DETAIL_DEBUG("Current State: {}, Event: {}",
@@ -215,18 +215,18 @@ bool TraditionalSmtpsFsm<ConnectionType>::is_terminal_state(SmtpsState s) const 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::on_invalid_transition(
     SmtpsState, SmtpsEvent,
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
-    session->set_error(SessionError::InvalidCommand);
+    session->set_error(pr::SessionError::InvalidCommand);
     session->do_async_write("500 Error: Invalid command sequence\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) return;
             s->do_async_read();
         });
 }
 
 template <typename ConnectionType>
-void TraditionalSmtpsFsm<ConnectionType>::auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session) {
+void TraditionalSmtpsFsm<ConnectionType>::auto_process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     process_event(session,
         static_cast<SmtpsEvent>(session->get_next_event()));
 }
@@ -235,11 +235,11 @@ void TraditionalSmtpsFsm<ConnectionType>::auto_process_event(std::shared_ptr<Ses
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_init_connect(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->set_current_state(static_cast<int>(SmtpsState::GREETING));
     session->do_async_write("220 SMTPS Server\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> self, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> self, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending greeting: {}", ec.message()); return; }
             self->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
             self->do_async_read();
@@ -248,7 +248,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_init_connect(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     LOG_SMTP_DETAIL_DEBUG("Received EHLO: {}", session->get_last_command_args());
     if (auto* ctx = static_cast<SmtpsContext*>(session->get_context()))
@@ -265,7 +265,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
         "250-8BITMIME\r\n";
     {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
-        if constexpr (!std::is_same_v<ConnectionType, SslConnection>) {
+        if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>) {
             if (ctx->listener_config.advertise_starttls)
                 response += "250-STARTTLS\r\n";
         }
@@ -275,7 +275,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     response += "250 SMTPUTF8\r\n";
 
     session->do_async_write(response,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending EHLO: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
             s->do_async_read();
@@ -284,20 +284,20 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     // 未通告的能力不得生效（RFC 3207 §4）：显式拒绝，会话保持在 WAIT_AUTH 可继续收信
     if (auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         !ctx->listener_config.advertise_starttls) {
         session->do_async_write("502 5.5.1 STARTTLS not supported\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
         return;
     }
     session->do_async_write("220 Ready to start TLS\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> self, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> self, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS: {}", ec.message()); return; }
             self->set_current_state(static_cast<int>(SmtpsState::INIT));
             auto server = static_cast<SmtpsServer*>(self->get_server());
@@ -309,7 +309,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
 
@@ -360,7 +360,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
         if (token.empty()) {
             ctx->plain_auth_expected = true;
             session->do_async_write("334 \r\n",
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                     if (ec) return;
                     s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                     s->do_async_read();
@@ -409,10 +409,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth_login(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->do_async_write("334 VXNlcm5hbWU6\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("AUTH username prompt: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH_USERNAME));
             s->do_async_read();
@@ -421,12 +421,12 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth_login(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_username(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     std::string decoded = mail_system::outbound::base64_decode(session->get_last_command_args());
     static_cast<SmtpsContext*>(session->get_context())->client_username = decoded;
     session->do_async_write("334 UGFzc3dvcmQ6\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("AUTH password prompt: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH_PASSWORD));
             s->do_async_read();
@@ -435,7 +435,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_username(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     std::string username = static_cast<SmtpsContext*>(session->get_context())->client_username;
     std::string password = mail_system::outbound::base64_decode(session->get_last_command_args());
@@ -469,7 +469,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     // AUTH policy check — 外部发件人是否需要认证：
     // - listener auth_policy=ON（465/587 提交端口）始终要求认证
@@ -499,7 +499,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
 
         if (require_auth && !ctx->is_authenticated) {
             session->do_async_write("530 5.7.1 Authentication required\r\n",
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                     if (ec) return;
                     s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                     s->do_async_read();
@@ -538,7 +538,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
             // SPF check — 异步（worker 线程池执行 DNS 查询，不阻塞 io_context）
             if (!need_spf) {
                 session->do_async_write("250 Ok\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                         s->do_async_read();
@@ -549,7 +549,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
             auto* dns = session->get_server()->get_dns_resolver().get();
             if (!dns) {
                 session->do_async_write("250 Ok\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                         s->do_async_read();
@@ -572,14 +572,14 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                         reject = "SPF hard-fail for " + sender;
                     if (!reject.empty()) {
                         session->do_async_write("550 5.7.1 SPF verification failed: " + reject + "\r\n",
-                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                                 if (ec) return;
                                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                                 s->do_async_read();
                             });
                     } else {
                         session->do_async_write("250 Ok\r\n",
-                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                                 if (ec) return;
                                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                                 s->drain_buffered_commands();
@@ -598,7 +598,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                     session->set_paused(false);
                     if (!allowed) {
                         session->do_async_write("550 5.7.0 Daily sending quota exceeded\r\n",
-                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                                 if (ec) return;
                                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                                 s->drain_buffered_commands();
@@ -613,7 +613,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         }
     } else {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                 s->do_async_read();
@@ -623,20 +623,20 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_mail_from_mail_from(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     handle_wait_auth_mail_from(session);
 }
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto addr_start = session->get_last_command_args().find('<');
     auto addr_end   = session->get_last_command_args().find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
     if (addr_start == std::string::npos || addr_end == std::string::npos) {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
@@ -647,7 +647,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1));
     if (recipient.empty()) {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
@@ -668,7 +668,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
             if (algorithm::to_lower(algorithm::trim(domain)) != algorithm::to_lower(cfg->system_domain)) {
                 LOG_SMTP_INFO("RCPT external delivery disabled: {}", recipient);
                 session->do_async_write("550 5.7.1 External delivery disabled\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                         s->do_async_read();
@@ -678,7 +678,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         }
         ctx->recipient_addresses.push_back(recipient);
         session->do_async_write("250 Ok\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                 s->do_async_read();
@@ -704,7 +704,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
                       recipient, session->get_client_ip());
         ctx->recipient_addresses.push_back(recipient);
         session->do_async_write("250 Ok\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                 s->drain_buffered_commands();
@@ -717,7 +717,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     if (algorithm::to_lower(domain) != algorithm::to_lower(cfg->system_domain)) {
         LOG_SMTP_INFO("RCPT relay denied: {} (domain {})", recipient, domain);
         session->do_async_write("550 5.7.1 Relay access denied\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
@@ -727,7 +727,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     // 本地域名但无本地部分 → 语法错误
     if (local.empty()) {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
@@ -742,7 +742,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
             if (!exists) LOG_SMTP_WARN("RCPT user unknown: {}", recipient);
             if (exists) c->recipient_addresses.push_back(recipient);
             session->do_async_write(resp,
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                     if (ec) return;
                     s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                     s->drain_buffered_commands();
@@ -753,13 +753,13 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_data_data(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (smtp_session) smtp_session->create_mail_on_data_command();
 
     session->do_async_write("354 Start mail input; end with <CRLF>.<CRLF>\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) return;
             s->set_current_state(static_cast<int>(SmtpsState::IN_MESSAGE));
             s->do_async_read();
@@ -768,21 +768,21 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_data_data(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->do_async_read();
 }
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
     std::string resp = ctx->abort_reason.empty() ? "552 Message size exceeds limit\r\n" : ctx->abort_reason + "\r\n";
     if (ctx->body_limit_exceeded) {
         cleanup_streamed_attachments(ctx);
         session->do_async_write(resp,
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         return;
     }
 
@@ -814,7 +814,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 session->do_async_write(retry
                         ? "451 4.3.0 Failed to store message, try again later\r\n"
                         : "550 5.3.0 Failed to store message\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
                         s->close();
                     });
                 return;
@@ -828,7 +828,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 // provider 线程）在这里续跑。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
@@ -872,7 +872,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
         auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
         if (smtp_s) smtp_s->discard_current_mail();
         session->do_async_write("451 Requested action aborted: local processing error\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         return;
     }
         finish_data_end_after_read(session);
@@ -900,7 +900,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
         auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
         if (smtp_s) smtp_s->discard_current_mail();
         session->do_async_write("451 Requested action aborted: local processing error\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         return;
     }
             finish_data_end_after_read(session);
@@ -911,7 +911,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
 // 只允许在持有 session 独占（IO 线程 handler 内 / pause 期间的回调）时调用。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::unique_ptr<storage::IReadStream> body_read)
 {
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
@@ -926,7 +926,7 @@ void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
 // MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
@@ -955,7 +955,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
             if (!submit_result.accepted) {
                 smtp_session->discard_current_mail();
                 session->do_async_write("451 Requested action aborted: insufficient storage or backend pressure\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
                 return;
             }
             const bool ack_after_enqueue =
@@ -965,7 +965,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                 smtp_session->reset_mail_state();
                 session->get_server()->increment_mails_accepted();
                 session->do_async_write("250 OK\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                         if (ec) return;
                         s->do_async_read();
                     });
@@ -989,7 +989,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                         smtp_s->reset_mail_state();
                         s->get_server()->increment_mails_accepted();
                         s->do_async_write("250 OK\r\n",
-                            [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code& ec) mutable {
+                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> ss, const boost::system::error_code& ec) mutable {
                                 if (ec) return;
                                 ss->do_async_read();
                             });
@@ -999,7 +999,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                         status == persist_storage::PersistStatus::CANCELLED) {
                         smtp_s->clear_pending_mail_submission();
                         s->do_async_write("451 Requested action aborted: local processing error\r\n",
-                            [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
+                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
                         return;
                     }
                     std::this_thread::sleep_for(backoff);
@@ -1008,13 +1008,13 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                 smtp_s->cancel_pending_mail_submission();
                 smtp_s->clear_pending_mail_submission();
                 s->do_async_write("451 Requested action aborted: local processing timeout\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
             });
         } catch (const std::exception& e) {
             LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
             if (smtp_session) smtp_session->discard_current_mail();
             session->do_async_write("451 Requested action aborted: local processing error\r\n",
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         }
     };
 
@@ -1049,17 +1049,17 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
         LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
         if (smtp_session) smtp_session->discard_current_mail();
         session->do_async_write("451 Requested action aborted: local processing error\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         return;
     }
 }
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->set_trace_clean_close();   // 正常 QUIT → 连接追踪丢弃
     session->do_async_write("221 Bye\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) LOG_SMTP_DETAIL_ERROR("QUIT reply error: {}", ec.message());
             if (s) s->close();
         });
@@ -1067,7 +1067,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_timeout(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->handle_read("");
     if (static_cast<SmtpsEvent>(session->get_next_event()) != SmtpsEvent::TIMEOUT) {
@@ -1079,7 +1079,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_timeout(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_error(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     LOG_SMTP_DETAIL_WARN("SMTP error: state={} session->get_last_command_args()=[{}] stay={}",
         TraditionalSmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
@@ -1089,7 +1089,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_error(
         session->close();
     } else {
         session->do_async_write("500 Error: " + session->get_last_command_args() + "\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
@@ -1145,7 +1145,7 @@ std::string TraditionalSmtpsFsm<ConnectionType>::get_event_name(SmtpsEvent event
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& mail_address,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     const std::string& password, AuthCallback cb)
 {
     if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); cb(false, 0); return; }
@@ -1223,7 +1223,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& mail_address,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     std::function<void(bool exists)> cb)
 {
     if (!session) { cb(false); return; }
@@ -1269,7 +1269,7 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
 // 与 user_exists_async 一致：短查询直接在调用线程内联执行，不做 worker 池转发。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     const std::string& mail_address,
     std::function<void(bool allowed)> cb)
 {

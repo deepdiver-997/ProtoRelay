@@ -1,7 +1,7 @@
 #ifndef WEB_SERVER_HTTP_FSM_H
 #define WEB_SERVER_HTTP_FSM_H
 // ──────────────────────────────────────────────────────────────────
-// HttpFsm — HTTP/1.1 状态机（FastFsmBase 派生的核心）
+// HttpFsm — HTTP/1.1 状态机（pr::FastFsmBase 派生的核心）
 //
 // 状态图（keep-alive 闭环）：
 //
@@ -14,11 +14,11 @@
 //   RESPOND          ──(写回调)──▶     WAIT_REQUEST_LINE  (keep-alive)
 //   任意            ──TIMEOUT/ERROR──▶ CLOSED    (终态)
 //
-// handler 与 SMTP 同一签名：void(std::shared_ptr<mail_system::SessionBase<...>>)。
-// "何时读"由 SessionBase 的 do_async_read + 覆写的 extract_one_line 决定；
+// handler 与 SMTP 同一签名：void(std::shared_ptr<pr::SessionBase<...>>)。
+// "何时读"由 pr::SessionBase 的 do_async_read + 覆写的 extract_one_line 决定；
 // "这一块怎么解析"在 HttpSession::handle_read；本类只做状态流转 + 触发响应。
 // ──────────────────────────────────────────────────────────────────
-#include "framework/session_base.h"   // 先于 fast_fsm_base.h：后者用未限定的 SessionBase
+#include "framework/session_base.h"   // 先于 fast_fsm_base.h：后者用未限定的 pr::SessionBase
 #include "framework/fast_fsm_base.h"
 #include "web_server/http_types.hpp"
 #include <memory>
@@ -29,8 +29,8 @@ template <typename ConnectionType>
 class HttpSession;   // 前向声明
 
 template <typename ConnectionType>
-class HttpFsm : public mail_system::FastFsmBase<ConnectionType, HttpState, HttpEvent> {
-    using Session = mail_system::SessionBase<ConnectionType>;
+class HttpFsm : public pr::FastFsmBase<ConnectionType, HttpState, HttpEvent> {
+    using Session = pr::SessionBase<ConnectionType>;
 public:
     explicit HttpFsm() { init_transitions(); init_handlers(); }
     ~HttpFsm() override = default;

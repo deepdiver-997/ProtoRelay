@@ -1,7 +1,7 @@
-#ifndef SESSION_BASE_TPP
-#define SESSION_BASE_TPP
+#ifndef PR_FRAMEWORK_SESSION_BASE_TPP
+#define PR_FRAMEWORK_SESSION_BASE_TPP
 
-namespace mail_system {
+namespace pr {
 
 // ================================================================
 // 1. 构造 / 析构
@@ -496,6 +496,6 @@ void SessionBase<ConnectionType>::trace_maybe_save() {
     m_trace_buf.clear();
 }
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // SESSION_BASE_TPP
+#endif // PR_FRAMEWORK_SESSION_BASE_TPP

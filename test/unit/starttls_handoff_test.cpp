@@ -43,8 +43,8 @@ struct RecordingSslSession {
     static void start_after_starttls(std::shared_ptr<RecordingSslSession>) {}
 };
 
-struct HandoffTestServer : TcpServerBase<FakeTcpSession, RecordingSslSession> {
-    using Base = TcpServerBase<FakeTcpSession, RecordingSslSession>;
+struct HandoffTestServer : pr::TcpServerBase<FakeTcpSession, RecordingSslSession> {
+    using Base = pr::TcpServerBase<FakeTcpSession, RecordingSslSession>;
     using Base::Base;
     bool ssl_session_created = false;
     ListenerConfig received_lc{};
@@ -53,11 +53,11 @@ struct HandoffTestServer : TcpServerBase<FakeTcpSession, RecordingSslSession> {
         return false;
     }
     std::shared_ptr<FakeTcpSession> make_tcp_session(
-        std::unique_ptr<TcpConnection>, const ListenerConfig&) override {
+        std::unique_ptr<pr::TcpConnection>, const ListenerConfig&) override {
         return nullptr;
     }
     std::shared_ptr<RecordingSslSession> make_ssl_session(
-        std::unique_ptr<SslConnection>, const ListenerConfig& lc) override {
+        std::unique_ptr<pr::SslConnection>, const ListenerConfig& lc) override {
         ssl_session_created = true;
         received_lc = lc;
         return std::make_shared<RecordingSslSession>();
@@ -80,16 +80,16 @@ ServerConfig make_cfg() {
     return cfg;
 }
 
-// 纯 DI：ServerBase 三件套缺一不可。本测试不触碰 DB/存储，显式传最小 null-object。
+// 纯 DI：pr::ServerBase 三件套缺一不可。本测试不触碰 DB/存储，显式传最小 null-object。
 struct DiResources {
-    std::shared_ptr<mail_system::IOThreadPool> io;
-    std::shared_ptr<mail_system::BoostThreadPool> worker;
+    std::shared_ptr<pr::IOThreadPool> io;
+    std::shared_ptr<pr::BoostThreadPool> worker;
     std::shared_ptr<mail_system::router::IShardRouter> router;
 };
 static DiResources make_resources() {
-    auto io = std::make_shared<mail_system::IOThreadPool>(1);
+    auto io = std::make_shared<pr::IOThreadPool>(1);
     io->start();
-    auto worker = std::make_shared<mail_system::BoostThreadPool>(1);
+    auto worker = std::make_shared<pr::BoostThreadPool>(1);
     worker->start();
     auto router = std::make_shared<mail_system::router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{}, 0,

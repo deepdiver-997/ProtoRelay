@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_METRICS_SERVER_H
-#define MAIL_SYSTEM_METRICS_SERVER_H
+#ifndef PR_FRAMEWORK_METRICS_SERVER_H
+#define PR_FRAMEWORK_METRICS_SERVER_H
 
 #include <boost/asio.hpp>
 #include <atomic>
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace mail_system {
+namespace pr {
 
 // 线程安全的指标存储 + HTTP 端点
 // 组件通过 push 接口提交指标，/metrics 和 /status 端点直接渲染存储数据
@@ -264,5 +264,6 @@ private:
     std::map<std::string, HistogramEntry> histograms_;
 };
 
-} // namespace mail_system
+} // namespace pr
+
 #endif

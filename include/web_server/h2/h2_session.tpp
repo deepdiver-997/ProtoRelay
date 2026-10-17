@@ -13,9 +13,9 @@ namespace h2 {
 // 生命周期
 // ================================================================
 template <typename ConnectionType>
-H2Session<ConnectionType>::H2Session(mail_system::ServerBase* server,
+H2Session<ConnectionType>::H2Session(pr::ServerBase* server,
                                      std::unique_ptr<ConnectionType> connection)
-    : mail_system::SessionBase<ConnectionType>(std::move(connection), server)
+    : pr::SessionBase<ConnectionType>(std::move(connection), server)
 {}
 
 template <typename ConnectionType>
@@ -93,7 +93,7 @@ void H2Session<ConnectionType>::process_read() {
         if (get_current_state() != static_cast<int>(ConnState::CLOSED))
             dispatch_frame(cur_frame_);
     }
-    // 关键：SessionBase::do_async_read 只发一次读、靠各协议续读。H2 用 send_frame
+    // 关键：pr::SessionBase::do_async_read 只发一次读、靠各协议续读。H2 用 send_frame
     // 队列发响应（不经 do_async_write 的续读钩子），且请求可能分多个 TCP 段到达——
     // 必须在本 "块" 处理完后重新 arm 读，否则只处理首段、连接挂死直到 watchdog 回收。
     // 若缓冲里还有完整帧，do_async_read() 内 has_buffered_input() 短路，不会叠读。
@@ -348,7 +348,7 @@ void H2Session<ConnectionType>::close_protocol(ErrorCode code) {
 }
 
 // ================================================================
-// 出站帧队列（串行发送；不依赖 SessionBase 请求-响应写缓冲）
+// 出站帧队列（串行发送；不依赖 pr::SessionBase 请求-响应写缓冲）
 // ================================================================
 template <typename ConnectionType>
 void H2Session<ConnectionType>::send_frame(const std::string& wire_frame) {

@@ -1,7 +1,7 @@
-// 线程池单元测试：BoostThreadPool（submit/post 真实执行）与
-// IOThreadPool（get_io_context 生产路径）。
+// 线程池单元测试：pr::BoostThreadPool（submit/post 真实执行）与
+// pr::IOThreadPool（get_io_context 生产路径）。
 //
-// ⚠️ IOThreadPool::submit()/post() 是死 API：post_impl 是空实现（注释掉了），
+// ⚠️ pr::IOThreadPool::submit()/post() 是死 API：post_impl 是空实现（注释掉了），
 //    提交的任务永远不会执行、future 永不完成 —— 若调用 submit 并阻塞 get 会挂死。
 //    生产代码从不走这条路（accept/session 直接用 asio 在 get_io_context 上 post），
 //    因此这里只测 get_io_context + asio::post 的真实用法，不调死 API。
@@ -20,8 +20,8 @@
 
 namespace {
 
-using mail_system::BoostThreadPool;
-using mail_system::IOThreadPool;
+using pr::BoostThreadPool;
+using pr::IOThreadPool;
 
 int g_pass = 0, g_fail = 0;
 void expect_true(bool c, const char* what) {
@@ -45,9 +45,9 @@ bool wait_until(F f, int timeout_ms = 3000) {
 int main() {
     std::printf("thread_pool_test\n");
 
-    // ── BoostThreadPool ──────────────────────────────────────────
+    // ── pr::BoostThreadPool ──────────────────────────────────────────
     {
-        BoostThreadPool pool(2);
+        pr::BoostThreadPool pool(2);
         expect_true(!pool.is_running(), "boost pool not running before start");
         pool.start();
         expect_true(pool.is_running(), "boost pool running after start");
@@ -80,7 +80,7 @@ int main() {
 
     // stop 后 submit 抛异常
     {
-        BoostThreadPool pool(1);
+        pr::BoostThreadPool pool(1);
         pool.start();
         pool.stop();
         bool threw = false;
@@ -95,14 +95,14 @@ int main() {
 
     // 未 start 直接 stop 安全
     {
-        BoostThreadPool pool(2);
+        pr::BoostThreadPool pool(2);
         pool.stop();
         expect_true(true, "boost stop before start is safe");
     }
 
-    // ── IOThreadPool ────────────────────────────────────────────
+    // ── pr::IOThreadPool ────────────────────────────────────────────
     {
-        IOThreadPool pool(2);
+        pr::IOThreadPool pool(2);
         expect_true(!pool.is_running(), "io pool not running before start");
         pool.start();
         expect_true(pool.is_running(), "io pool running after start");
@@ -128,7 +128,7 @@ int main() {
     // std::terminate 整进程；io 线程 run() 被 catch 后退出不重进 → 该 context 上
     // 全部连接静默僵死。修复后：任务边界捕获 + 计数，线程/context 继续服务。
     {
-        BoostThreadPool pool(1);
+        pr::BoostThreadPool pool(1);
         pool.start();
         std::atomic<bool> after{false};
         pool.post([] { throw std::runtime_error("boom-post"); });
@@ -150,7 +150,7 @@ int main() {
         pool.stop();
     }
     {
-        IOThreadPool pool(2);
+        pr::IOThreadPool pool(2);
         pool.start();
         auto& ctx = pool.get_io_context();
         std::atomic<bool> after{false};
@@ -165,7 +165,7 @@ int main() {
 
     // get_io_context 在 stop 后抛异常
     {
-        IOThreadPool pool(1);
+        pr::IOThreadPool pool(1);
         pool.start();
         pool.stop();
         bool threw = false;
@@ -179,7 +179,7 @@ int main() {
 
     // 未 start 直接 stop 安全
     {
-        IOThreadPool pool(2);
+        pr::IOThreadPool pool(2);
         pool.stop();
         expect_true(true, "io pool stop before start is safe");
     }

@@ -129,7 +129,7 @@ std::optional<std::uint64_t> query_available_memory_bytes() {
 
 PersistentQueue::PersistentQueue(
     std::shared_ptr<router::IShardRouter> shard_router,
-    std::shared_ptr<ThreadPoolBase> worker_pool
+    std::shared_ptr<pr::ThreadPoolBase> worker_pool
 ) : m_shardRouter(std::move(shard_router)),
     worker_pool_(std::move(worker_pool)),
     shutdown_(false) {

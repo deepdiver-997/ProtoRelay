@@ -1,11 +1,11 @@
-#ifndef MAIL_SYSTEM_IO_CONTEXT_REGISTRY_H
-#define MAIL_SYSTEM_IO_CONTEXT_REGISTRY_H
+#ifndef PR_FRAMEWORK_IO_CONTEXT_REGISTRY_H
+#define PR_FRAMEWORK_IO_CONTEXT_REGISTRY_H
 
 namespace boost::asio {
 class io_context;
 }
 
-namespace mail_system {
+namespace pr {
 
 // IO 线程的 io_context 注册表（thread_local）。
 //
@@ -20,6 +20,6 @@ namespace mail_system {
 boost::asio::io_context* current_io_context();
 void set_current_io_context(boost::asio::io_context* ctx);
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // MAIL_SYSTEM_IO_CONTEXT_REGISTRY_H
+#endif // PR_FRAMEWORK_IO_CONTEXT_REGISTRY_H

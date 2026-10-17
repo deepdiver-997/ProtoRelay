@@ -25,7 +25,7 @@ static void check(const char* name, bool cond) {
 static void test_fsm_construction() {
     SECTION("FSM construction and types");
 
-    auto fsm = std::make_shared<OutboundSmtpFsm<TcpConnection>>();
+    auto fsm = std::make_shared<OutboundSmtpFsm<pr::TcpConnection>>();
     check("fsm created", fsm != nullptr);
 }
 

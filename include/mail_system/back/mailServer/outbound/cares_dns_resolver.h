@@ -33,7 +33,7 @@ public:
 
     // 2026-08-27: 注入 metrics。weak_ptr 避免循环引用，析构后 push 自动失效。
     // 注入时机：OutboundServer::set_config 之后（与 set_metrics 同步注入）。
-    void set_metrics(std::weak_ptr<MetricsServer> m) { m_metrics_ = std::move(m); }
+    void set_metrics(std::weak_ptr<pr::MetricsServer> m) { m_metrics_ = std::move(m); }
 
 private:
     bool init_channel_locked();
@@ -50,7 +50,7 @@ private:
     // 递归锁：driver 线程在 ares_process 持锁期间回调用户代码，验证器会在回调内
     // 再次提交后续查询（MX→A 链）→ 同线程重入；跨线程（提交 vs 驱动）互斥照旧。
     std::recursive_mutex mutex_;
-    std::weak_ptr<MetricsServer> m_metrics_;
+    std::weak_ptr<pr::MetricsServer> m_metrics_;
 };
 
 } // namespace outbound

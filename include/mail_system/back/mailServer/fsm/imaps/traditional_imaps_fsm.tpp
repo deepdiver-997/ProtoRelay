@@ -21,11 +21,11 @@ using namespace imap_utils;
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::send_untagged(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     const std::string& data)
 {
     session->do_async_write("* " + data + "\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
             if (!ec) s->do_async_read();
         }
     );
@@ -33,13 +33,13 @@ void TraditionalImapsFsm<ConnectionType>::send_untagged(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::send_tagged(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     const std::string& tag,
     const std::string& status,
     const std::string& message)
 {
     session->do_async_write(tag + " " + status + " " + message + "\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
             if (!ec) s->do_async_read();
         }
     );
@@ -47,7 +47,7 @@ void TraditionalImapsFsm<ConnectionType>::send_tagged(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::send_continuation(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     const std::string& message)
 {
     session->do_async_write("+ " + message + "\r\n",
@@ -70,7 +70,7 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, ImapState::NOT_AUTHENTICATED);
     this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, ImapState::NOT_AUTHENTICATED);
     this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, ImapState::LOGOUT);
-    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
+    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
         this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, ImapState::NOT_AUTHENTICATED);
 
     // AUTHENTICATED
@@ -123,7 +123,7 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
 
     // NOT_AUTHENTICATED
     this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
-    if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
+    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
         this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, [this](auto session) { handle_starttls(session); });
     this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, [this](auto session) { handle_login(session); });
     this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, [this](auto session) { handle_authenticate(session); });
@@ -178,7 +178,7 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::process_event(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     ImapEvent event,
     const std::string& tag)
 {
@@ -206,7 +206,7 @@ bool TraditionalImapsFsm<ConnectionType>::is_terminal_state(ImapState s) const {
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::on_invalid_transition(
     ImapState, ImapEvent,
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Invalid command sequence");
@@ -215,7 +215,7 @@ void TraditionalImapsFsm<ConnectionType>::on_invalid_transition(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::on_handler_not_found(
     ImapState, ImapEvent,
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Unsupported command in current state");
@@ -223,8 +223,8 @@ void TraditionalImapsFsm<ConnectionType>::on_handler_not_found(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::invoke_handler(
-    typename FsmBase<ConnectionType, ImapState, ImapEvent>::Handler& h,
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    typename pr::FsmBase<ConnectionType, ImapState, ImapEvent>::Handler& h,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     try {
         h(session);
@@ -244,7 +244,7 @@ void TraditionalImapsFsm<ConnectionType>::invoke_handler(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::auto_process_event(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     if (!ctx) return;
@@ -272,13 +272,13 @@ void TraditionalImapsFsm<ConnectionType>::auto_process_event(
 // ---------- INIT → CONNECT → greeting ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_init_connect(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
 
     // 发送 IMAP 欢迎语
     session->do_async_write("* OK IMAP4rev1 Server Ready\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> self,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> self,
            const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending IMAP greeting: {}", ec.message());
@@ -293,14 +293,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_init_connect(
 // ---------- CAPABILITY ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_capability(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
     std::string caps = "* CAPABILITY IMAP4rev1";
     // 非 SSL 连接可以通告 STARTTLS
-    if constexpr (!std::is_same_v<ConnectionType, SslConnection>) {
+    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>) {
         caps += " STARTTLS";
     }
     caps += " IDLE UIDPLUS MOVE AUTH=PLAIN\r\n";
@@ -315,7 +315,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_capability(
 // ---------- LOGIN ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_login(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -353,7 +353,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
 // ---------- LOGIN/AUTHENTICATE 共用验证链 ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     const std::string& tag, std::string username, std::string password,
     const char* ok_text, const char* fail_text)
 {
@@ -419,7 +419,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
 // 无初始响应时发空挑战 "+ "，续行由 session handle_read 拦截后回到本 handler。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -473,7 +473,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
 // authzid 忽略（不做代理授权），以 authcid 为认证身份。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::verify_sasl_plain(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     const std::string& tag, const std::string& b64, const char* ok_text)
 {
     const std::string decoded = outbound::base64_decode(b64);
@@ -494,7 +494,7 @@ void TraditionalImapsFsm<ConnectionType>::verify_sasl_plain(
 // ---------- LOGOUT ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_logout(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string current_tag = ctx ? ctx->current_tag : "*";
@@ -507,7 +507,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
     response += current_tag + " OK LOGOUT completed\r\n";
 
     session->do_async_write(response,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
            const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending LOGOUT reply: {}", ec.message());
@@ -530,7 +530,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
 // ---------- SELECT ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_select(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -613,7 +613,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
 // ---------- EXAMINE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_examine(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -689,7 +689,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
 // ---------- LIST ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_list(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -747,7 +747,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
 // ---------- LSUB ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_lsub(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -793,7 +793,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_lsub(
 // ---------- STATUS ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_status(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -887,7 +887,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
 // ---------- FETCH ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_fetch(
-    std::shared_ptr<SessionBase<ConnectionType>> session, bool is_uid)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, bool is_uid)
 {
     LOG_IMAP_INFO("FETCH ENTER args=[{}]", session->get_last_command_args());
     auto* ctx = static_cast<ImapContext*>(session->get_context());
@@ -966,7 +966,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
 // DB 慢路径回调与列表缓存快路径共用的 FETCH 组装/驱动（原 handle_fetch 回调体）。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::string tag, bool is_uid,
     std::string seq_set, std::string attrs,
     std::vector<MailboxMailInfo> mails)
@@ -1198,7 +1198,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
 // 同步就绪并完成本封。
 template <typename ConnectionType>
 bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::shared_ptr<FetchContext> ctx,
     std::shared_ptr<std::atomic<bool>> alive)
 {
@@ -1266,7 +1266,7 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
 // 异步读共享，保证"最后完成本封的回调"恰好驱动/续作一次。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::fetch_continue(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::shared_ptr<FetchContext> ctx,
     std::shared_ptr<std::atomic<bool>> alive)
 {
@@ -1280,7 +1280,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_continue(
 // alive 每封一个共享标记，size 与 body 两个异步读共用，保证续作恰好一次。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::fetch_drive(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::shared_ptr<FetchContext> ctx)
 {
     for (;;) {
@@ -1345,14 +1345,14 @@ void TraditionalImapsFsm<ConnectionType>::fetch_drive(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::fetch_finalize(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::shared_ptr<FetchContext> ctx)
 {
     std::string response = std::move(ctx->response);
     response += ctx->tag + " OK FETCH completed\r\n";
 
     session->do_async_write(response,
-        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
             if (ec) return;
             // 异步链期间流水线被 pause：先排空缓冲，再视情况续读
             s->drain_buffered_commands();
@@ -1363,7 +1363,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_finalize(
 // ---------- STORE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_store(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1564,7 +1564,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
 // ---------- EXPUNGE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_expunge(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1626,7 +1626,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
 // ---------- CLOSE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_close(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1668,7 +1668,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
 // ---------- NOOP ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_noop(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1678,7 +1678,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_noop(
 // ---------- CHECK ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_check(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1688,7 +1688,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_check(
 // ---------- STARTTLS ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_starttls(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1696,7 +1696,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
     // STARTTLS only available on TCP connections (not already SSL)
     // Handoff logic: send OK, extract TCP socket, call server handoff
     session->do_async_write(tag + " OK Begin TLS negotiation now\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> self,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> self,
            const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending STARTTLS response: {}", ec.message());
@@ -1713,7 +1713,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
 // ---------- CREATE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_create(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1761,7 +1761,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
 // ---------- DELETE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_delete(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1834,7 +1834,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
 // ---------- RENAME ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_rename(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1903,7 +1903,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
 // ---------- SUBSCRIBE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_subscribe(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1914,7 +1914,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_subscribe(
 // ---------- UNSUBSCRIBE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_unsubscribe(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1925,7 +1925,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_unsubscribe(
 // ---------- APPEND ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_append(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2091,7 +2091,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
 // ---------- SEARCH ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_search(
-    std::shared_ptr<SessionBase<ConnectionType>> session, bool is_uid)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, bool is_uid)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2199,7 +2199,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
 // ---------- UID ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_uid(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2336,7 +2336,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
 // 把当前选中的邮箱中的一组邮件复制/移动到目标邮箱
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     bool is_move)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
@@ -2456,20 +2456,20 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_copy(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     handle_copy_move(session, false);
 }
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_move(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     handle_copy_move(session, true);
 }
 
 // ---------- IDLE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_idle(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2487,7 +2487,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
 
     // RFC 2177: send continuation
     session->do_async_write("+ idling\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
            const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending IDLE continuation: {}", ec.message());
@@ -2507,7 +2507,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
 // ---------- DONE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_done(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     if (!ctx) return;
@@ -2522,7 +2522,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_done(
 // ---------- ERROR ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_error(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2533,10 +2533,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_error(
 // ---------- TIMEOUT ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_timeout(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->do_async_write("* BYE TIMEOUT\r\n",
-        [](std::shared_ptr<SessionBase<ConnectionType>> s,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
            const boost::system::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending TIMEOUT BYE: {}", ec.message());

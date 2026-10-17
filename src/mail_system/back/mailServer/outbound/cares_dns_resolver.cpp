@@ -33,7 +33,7 @@ const char* ares_status_label(int status) {
 // 必须先于 push_dns_metrics 定义（C++ 模板/类型前向引用规则）。
 struct QueryContextBase {
     std::chrono::steady_clock::time_point start_time;
-    std::weak_ptr<MetricsServer> metrics;
+    std::weak_ptr<pr::MetricsServer> metrics;
 };
 template <typename Cb>
 struct QueryContext : QueryContextBase {
@@ -42,14 +42,14 @@ struct QueryContext : QueryContextBase {
 
 // 2026-08-27: 推 DNS metrics 的 helper。4 个 callback 复用，避免重复 5 行 push 代码。
 // 注意 c-ares 回调在 c-ares 内部线程跑（ARES_EVSYS_DEFAULT），不在 IO 线程；
-// MetricsServer 用 shared_mutex 保护 map，跨线程 push 安全。
+// pr::MetricsServer 用 shared_mutex 保护 map，跨线程 push 安全。
 void push_dns_metrics(QueryContextBase* base, int status, const char* qtype) {
     auto m = base->metrics.lock();
     if (!m) return;
     auto dur = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - base->start_time).count();
     const char* status_str = ares_status_label(status);
-    MetricsServer::LabelMap labels{{"qtype", qtype}, {"status", status_str}};
+    pr::MetricsServer::LabelMap labels{{"qtype", qtype}, {"status", status_str}};
     m->observe("protorelay_dns_query_duration_seconds", labels, dur);
     m->inc_counter("protorelay_dns_query_total", labels, 1);
 }

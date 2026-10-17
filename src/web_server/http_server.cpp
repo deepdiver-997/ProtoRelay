@@ -7,20 +7,20 @@ namespace web_server {
 
 HttpServer::HttpServer(const mail_system::ServerConfig& config,
                        std::string doc_root,
-                       std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
-                       std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
+                       std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
+                       std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
                        std::shared_ptr<mail_system::router::IShardRouter> shardRouter)
-    : mail_system::TcpServerBase<TcpHttpSession, SslHttpSession>(
+    : pr::TcpServerBase<TcpHttpSession, SslHttpSession>(
           config, ioThreadPool, workerThreadPool, shardRouter)
     , doc_root_(std::move(doc_root))
 {
-    m_tcp_fsm = std::make_shared<HttpFsm<mail_system::TcpConnection>>();
-    m_ssl_fsm = std::make_shared<HttpFsm<mail_system::SslConnection>>();
+    m_tcp_fsm = std::make_shared<HttpFsm<pr::TcpConnection>>();
+    m_ssl_fsm = std::make_shared<HttpFsm<pr::SslConnection>>();
     LOG_SERVER_INFO("HttpServer ready, doc_root={}", doc_root_);
 }
 
 std::shared_ptr<TcpHttpSession> HttpServer::make_tcp_session(
-    std::unique_ptr<mail_system::TcpConnection> conn,
+    std::unique_ptr<pr::TcpConnection> conn,
     const mail_system::ListenerConfig& /*lc*/)
 {
     auto session = std::make_shared<TcpHttpSession>(this, std::move(conn), m_tcp_fsm);
@@ -29,7 +29,7 @@ std::shared_ptr<TcpHttpSession> HttpServer::make_tcp_session(
 }
 
 std::shared_ptr<SslHttpSession> HttpServer::make_ssl_session(
-    std::unique_ptr<mail_system::SslConnection> conn,
+    std::unique_ptr<pr::SslConnection> conn,
     const mail_system::ListenerConfig& /*lc*/)
 {
     auto session = std::make_shared<SslHttpSession>(this, std::move(conn), m_ssl_fsm);

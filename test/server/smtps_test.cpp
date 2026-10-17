@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("Shutting down...");
         g_server->request_stop();
 
-        // request_stop + reset 触发 ServerBase 析构 → RAII 释放所有资源
+        // request_stop + reset 触发 pr::ServerBase 析构 → RAII 释放所有资源
         g_server.reset();
         
         // 等待所有后台线程完全退出（PersistentQueue worker、worker_pool 任务等）

@@ -7,8 +7,8 @@
 namespace web_server {
 namespace h2 {
 
-template class H2Session<mail_system::TcpConnection>;
-template class H2Session<mail_system::SslConnection>;
+template class H2Session<pr::TcpConnection>;
+template class H2Session<pr::SslConnection>;
 
 } // namespace h2
 } // namespace web_server

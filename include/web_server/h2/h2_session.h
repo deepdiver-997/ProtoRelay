@@ -3,14 +3,14 @@
 // ──────────────────────────────────────────────────────────────────
 // H2Session — HTTP/2 多流会话模型核心
 //
-// 结构断点：HTTP/1.1 是"一个 SessionBase 一个 FSM 串行"；本类把 SessionBase
+// 结构断点：HTTP/1.1 是"一个 pr::SessionBase 一个 FSM 串行"；本类把 pr::SessionBase
 // 的"读"改成**帧原子**（has_buffered_input/extract_one_line 按帧拆，不再按行），
 // 并在其上维护：
 //   连接级生命周期（preface→SETTINGS→OPEN→CLOSED）
 //   流注册表 std::map<int32_t, H2Stream>  —— N 条流复用一根连接
 //   帧按 stream_id 去复用：==0 走连接级，>0 路由到对应流的独立状态机
 // HPACK 解码是独立 codec：这里把原始 header block 存进流，解码落下一个组件。
-// 出站帧不依赖 SessionBase 的"请求-响应"写缓冲（那条会给 H2 造成响应挂起），
+// 出站帧不依赖 pr::SessionBase 的"请求-响应"写缓冲（那条会给 H2 造成响应挂起），
 // 用本连接专用 send_frame 队列串行发。
 // ──────────────────────────────────────────────────────────────────
 #include "framework/session_base.h"
@@ -40,16 +40,16 @@ enum class ConnState : int {
 };
 
 template <typename ConnectionType>
-class H2Session : public mail_system::SessionBase<ConnectionType> {
+class H2Session : public pr::SessionBase<ConnectionType> {
 public:
-    H2Session(mail_system::ServerBase* server,
+    H2Session(pr::ServerBase* server,
               std::unique_ptr<ConnectionType> connection);
     ~H2Session() override = default;
 
     static void start(std::shared_ptr<H2Session> self);
     static void start_after_starttls(std::shared_ptr<H2Session> self) { start(std::move(self)); }
 
-    // ── SessionBase 覆写：帧式读 ────────────────────────────────
+    // ── pr::SessionBase 覆写：帧式读 ────────────────────────────────
     void handle_read(const std::string& data) override;
     void process_read() override;
     bool has_buffered_input() const override;
@@ -67,7 +67,7 @@ public:
     // 静态根目录（工厂注入）
     void set_doc_root(std::string d) { doc_root_ = std::move(d); }
 
-    // 出站帧队列：串行发送，避免 SessionBase 请求-响应写缓冲把 H2 帧滞留。
+    // 出站帧队列：串行发送，避免 pr::SessionBase 请求-响应写缓冲把 H2 帧滞留。
     void send_frame(const std::string& wire_frame);
 
 private:
@@ -112,8 +112,8 @@ private:
     bool        out_flushing_ = false;
 };
 
-using TcpH2Session = H2Session<mail_system::TcpConnection>;
-using SslH2Session = H2Session<mail_system::SslConnection>;
+using TcpH2Session = H2Session<pr::TcpConnection>;
+using SslH2Session = H2Session<pr::SslConnection>;
 
 } // namespace h2
 } // namespace web_server

@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_TCP_SERVER_BASE_H
-#define MAIL_SYSTEM_TCP_SERVER_BASE_H
+#ifndef PR_FRAMEWORK_TCP_SERVER_BASE_H
+#define PR_FRAMEWORK_TCP_SERVER_BASE_H
 
 #include "framework/server_base.h"
 #include "framework/db/db_pool.h"
@@ -10,7 +10,7 @@
 #include <boost/asio/ssl.hpp>
 #include <csignal>
 
-namespace mail_system {
+namespace pr {
 
 // ================================================================
 // TcpServerBase — TCP/SSL 监听服务器模板
@@ -21,10 +21,10 @@ namespace mail_system {
 template <typename TcpSession, typename SslSession>
 class TcpServerBase : public ServerBase {
 public:
-    TcpServerBase(const ServerConfig& config,
+    TcpServerBase(const mail_system::ServerConfig& config,
                   std::shared_ptr<ThreadPoolBase> ioThreadPool,
                   std::shared_ptr<ThreadPoolBase> workerThreadPool,
-                  std::shared_ptr<router::IShardRouter> shardRouter);
+                  std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
     ~TcpServerBase() override;
 
     void start() override;
@@ -71,10 +71,10 @@ private:
 // ================================================================
 template <typename TcpSession, typename SslSession>
 TcpServerBase<TcpSession, SslSession>::TcpServerBase(
-    const ServerConfig& config,
+    const mail_system::ServerConfig& config,
     std::shared_ptr<ThreadPoolBase> ioThreadPool,
     std::shared_ptr<ThreadPoolBase> workerThreadPool,
-    std::shared_ptr<router::IShardRouter> shardRouter)
+    std::shared_ptr<mail_system::router::IShardRouter> shardRouter)
     : ServerBase(config, ioThreadPool, workerThreadPool, shardRouter)
     , m_sslContext(boost::asio::ssl::context::sslv23)
 {
@@ -318,6 +318,6 @@ void TcpServerBase<TcpSession, SslSession>::load_certificates(
     }
 }
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // MAIL_SYSTEM_TCP_SERVER_BASE_H
+#endif // PR_FRAMEWORK_TCP_SERVER_BASE_H

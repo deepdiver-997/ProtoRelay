@@ -29,7 +29,7 @@
 namespace mail_system {
 namespace bootstrap {
 
-// 前置声明（实现见下）：主 DB 池工厂，从原 ServerBase 构造函数原样搬来
+// 前置声明（实现见下）：主 DB 池工厂，从原 pr::ServerBase 构造函数原样搬来
 static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config);
 static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config);
 
@@ -41,7 +41,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     if (!out.io_pool) {
         if (config.io_thread_count <= 0)
             throw std::runtime_error("bootstrap: io_thread_count must be > 0");
-        out.io_pool = std::make_shared<IOThreadPool>(
+        out.io_pool = std::make_shared<pr::IOThreadPool>(
             static_cast<size_t>(config.io_thread_count));
         out.io_pool->start();
     }
@@ -49,7 +49,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     if (!out.worker_pool) {
         if (config.worker_thread_count <= 0)
             throw std::runtime_error("bootstrap: worker_thread_count must be > 0");
-        out.worker_pool = std::make_shared<BoostThreadPool>(
+        out.worker_pool = std::make_shared<pr::BoostThreadPool>(
             static_cast<size_t>(config.worker_thread_count));
         out.worker_pool->start();
     }
@@ -78,7 +78,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     // 读投递到 worker 线程池执行，io 线程不再被卡（调用点已按 pause 独占约定改造）。
     // 本地后端保持内联——stat/mmap/进 page cache 的写都是 µs 级，多一次线程跳转纯属浪费。
     // 纯 DI 红利：装配此刻 worker 池已就绪，直接捕获 shared_ptr，
-    // 不再需要原 ServerBase 版本的"惰性取池"间接层。
+    // 不再需要原 pr::ServerBase 版本的"惰性取池"间接层。
     const auto& sc = config.storage;
     if (sc.provider == "s3" || sc.provider == "hdfs_web") {
         auto worker = out.worker_pool;

@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
         g_server->request_stop();
         LOG_SERVER_INFO("IMAPS Server stopped");
 
-        // request_stop + reset 触发 ServerBase 析构 → RAII 释放所有资源
+        // request_stop + reset 触发 pr::ServerBase 析构 → RAII 释放所有资源
         g_server.reset();
 
         // 等待后台线程退出

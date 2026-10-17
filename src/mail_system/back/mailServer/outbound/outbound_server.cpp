@@ -23,7 +23,7 @@ namespace mail_system {
 namespace outbound {
 
 // ── 构造 / 析构 ────────────────────────────────────────────
-OutboundServer::OutboundServer(ServerBase* server,
+OutboundServer::OutboundServer(pr::ServerBase* server,
                                int max_per_mx,
                                int idle_timeout)
     : server_(server)
@@ -68,7 +68,7 @@ void OutboundServer::start() {
     server_->m_workerThreadPool->post([this]() { try_pull(); });
 
     // 空闲回收定时器
-    auto& io_ctx = static_cast<IOThreadPool*>(
+    auto& io_ctx = static_cast<pr::IOThreadPool*>(
         server_->m_ioThreadPool.get())->get_io_context();
     evict_timer_ = std::make_unique<boost::asio::steady_timer>(io_ctx);
     schedule_evict();
@@ -349,7 +349,7 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
 void OutboundServer::schedule_retry() {
     retry_delay_sec_ = std::min(retry_delay_sec_ * 2, MAX_RETRY_DELAY_SEC);
 
-    auto& io_ctx = static_cast<IOThreadPool*>(
+    auto& io_ctx = static_cast<pr::IOThreadPool*>(
         server_->m_ioThreadPool.get())->get_io_context();
     retry_timer_ = std::make_unique<boost::asio::steady_timer>(io_ctx);
     retry_timer_->expires_after(std::chrono::seconds(retry_delay_sec_));
@@ -407,7 +407,7 @@ OutboundServer::SessionPtr OutboundServer::acquire_session(const std::string& mx
 }
 
 OutboundServer::SessionPtr OutboundServer::create_session(const std::string& mx, int port) {
-    auto s = std::make_shared<OutboundSmtpSession<TcpConnection>>(server_, mx, port);
+    auto s = std::make_shared<OutboundSmtpSession<pr::TcpConnection>>(server_, mx, port);
     s->set_outbound_config(config_);
     if (completion_cb_) s->set_completion_cb(completion_cb_);
     return s;

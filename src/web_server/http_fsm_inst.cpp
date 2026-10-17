@@ -6,7 +6,7 @@
 
 namespace web_server {
 
-template class HttpFsm<mail_system::TcpConnection>;
-template class HttpFsm<mail_system::SslConnection>;
+template class HttpFsm<pr::TcpConnection>;
+template class HttpFsm<pr::SslConnection>;
 
 } // namespace web_server

@@ -1,4 +1,4 @@
-// dispatch_bench — 对比 FsmBase (std::map) vs 编译期数组 O(1) dispatch
+// dispatch_bench — 对比 pr::FsmBase (std::map) vs 编译期数组 O(1) dispatch
 // 不依赖项目任何头文件，纯粹的 map vs array 性能测试
 // 构建: cd build && make dispatch_bench
 // 用法: ./dispatch_bench [iterations]
@@ -15,7 +15,7 @@ enum E { e0,e1,e2,e3,e4,e5,e6,e7,e8,e9,e10, E_COUNT };
 using H = std::function<void()>;
 static auto noop = []{};
 
-// ── Map-based dispatch (当前的 FsmBase 实现) ──
+// ── Map-based dispatch (当前的 pr::FsmBase 实现) ──
 struct MapFsm {
     std::map<std::pair<S, E>, S> transitions;
     std::map<S, std::map<E, H>>  handlers;
@@ -35,7 +35,7 @@ struct MapFsm {
     }
 };
 
-// ── Array-based dispatch (FastFsmBase 实现) ──
+// ── Array-based dispatch (pr::FastFsmBase 实现) ──
 struct ArrayFsm {
     H  hs[S_COUNT][E_COUNT]{};
     S  ts[S_COUNT][E_COUNT]{};

@@ -8,28 +8,28 @@
 namespace mail_system {
 
 ImapsServer::ImapsServer(const ServerConfig& config,
-     std::shared_ptr<ThreadPoolBase> ioThreadPool,
-      std::shared_ptr<ThreadPoolBase> workerThreadPool,
+     std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
+      std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
        std::shared_ptr<router::IShardRouter> shardRouter)
         : TcpServerBase(config, ioThreadPool, workerThreadPool, shardRouter) {
     auto cfg = std::atomic_load(&m_config);
 
-    m_tcp_fsm = std::make_shared<TraditionalImapsFsm<TcpConnection>>(
+    m_tcp_fsm = std::make_shared<TraditionalImapsFsm<pr::TcpConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_shardRouter);
-    m_ssl_fsm = std::make_shared<TraditionalImapsFsm<SslConnection>>(
+    m_ssl_fsm = std::make_shared<TraditionalImapsFsm<pr::SslConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_shardRouter);
 
     auto stats_cache = std::make_shared<
-        TraditionalImapsFsm<TcpConnection>::MailboxStatsCache>(20000, std::chrono::seconds(8));
+        TraditionalImapsFsm<pr::TcpConnection>::MailboxStatsCache>(20000, std::chrono::seconds(8));
     m_tcp_fsm->set_mailbox_stats_cache(stats_cache);
     m_ssl_fsm->set_mailbox_stats_cache(stats_cache);
 
     // FETCH 邮箱列表缓存：TCP/SSL 两个 FSM 必须共享同一实例——写命令在任一
     // FSM 上失效，另一边的 FETCH 才能看见；分开建会出现跨监听器脏读。
     auto list_cache = std::make_shared<
-        TraditionalImapsFsm<TcpConnection>::MailboxListCache>(
-            TraditionalImapsFsm<TcpConnection>::kMailboxListCacheCapacity,
-            TraditionalImapsFsm<TcpConnection>::kMailboxListCacheTtl);
+        TraditionalImapsFsm<pr::TcpConnection>::MailboxListCache>(
+            TraditionalImapsFsm<pr::TcpConnection>::kMailboxListCacheCapacity,
+            TraditionalImapsFsm<pr::TcpConnection>::kMailboxListCacheTtl);
     m_tcp_fsm->set_mailbox_list_cache(list_cache);
     m_ssl_fsm->set_mailbox_list_cache(list_cache);
 
@@ -42,19 +42,19 @@ ImapsServer::~ImapsServer() {
     stop();
 }
 
-std::shared_ptr<ImapsSession<TcpConnection>> ImapsServer::make_tcp_session(
-    std::unique_ptr<TcpConnection> conn, const ListenerConfig& lc)
+std::shared_ptr<ImapsSession<pr::TcpConnection>> ImapsServer::make_tcp_session(
+    std::unique_ptr<pr::TcpConnection> conn, const ListenerConfig& lc)
 {
     (void)lc;
-    return std::make_shared<ImapsSession<TcpConnection>>(
+    return std::make_shared<ImapsSession<pr::TcpConnection>>(
         this, std::move(conn), m_tcp_fsm);
 }
 
-std::shared_ptr<ImapsSession<SslConnection>> ImapsServer::make_ssl_session(
-    std::unique_ptr<SslConnection> conn, const ListenerConfig& lc)
+std::shared_ptr<ImapsSession<pr::SslConnection>> ImapsServer::make_ssl_session(
+    std::unique_ptr<pr::SslConnection> conn, const ListenerConfig& lc)
 {
     (void)lc;
-    return std::make_shared<ImapsSession<SslConnection>>(
+    return std::make_shared<ImapsSession<pr::SslConnection>>(
         this, std::move(conn), m_ssl_fsm);
 }
 

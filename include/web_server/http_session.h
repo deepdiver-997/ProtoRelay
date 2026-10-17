@@ -1,7 +1,7 @@
 #ifndef WEB_SERVER_HTTP_SESSION_H
 #define WEB_SERVER_HTTP_SESSION_H
 // ──────────────────────────────────────────────────────────────────
-// HttpSession — HTTP/1.1 会话（覆写 SessionBase 的"读"为帧式）
+// HttpSession — HTTP/1.1 会话（覆写 pr::SessionBase 的"读"为帧式）
 //
 // 关键：SMTP 用的是"按行拆命令"，这里保持同一套 do_async_read 循环，
 // 只覆写 has_buffered_input/extract_one_line 让它按状态拆帧：
@@ -31,7 +31,7 @@ namespace web_server {
 template <typename ConnectionType> class HttpFsm;
 
 template <typename ConnectionType>
-class HttpSession : public mail_system::SessionBase<ConnectionType> {
+class HttpSession : public pr::SessionBase<ConnectionType> {
     friend class HttpFsm<ConnectionType>;
 
     // 单请求 body 上限（防内存膨胀，超过回 413）
@@ -48,18 +48,18 @@ static constexpr size_t kSmallFileThreshold = 64 * 1024;
     static constexpr std::chrono::milliseconds kBodyTimeout{60'000};
     static constexpr std::chrono::milliseconds kKeepAliveTimeout{30'000};
 
-    HttpSession(mail_system::ServerBase* server,
+    HttpSession(pr::ServerBase* server,
                 std::unique_ptr<ConnectionType> connection,
                 std::shared_ptr<HttpFsm<ConnectionType>> fsm);
     ~HttpSession() override = default;
 
     // 与 SmtpsSession::start 同型：接收入口，设初态 + 首次读
     static void start(std::shared_ptr<HttpSession> self);
-    // TcpServerBase 的 TLS 交接点需要该静态入口（HTTP 无 STARTTLS，永不触发，
+    // pr::TcpServerBase 的 TLS 交接点需要该静态入口（HTTP 无 STARTTLS，永不触发，
     // 仅为通过 handoff_starttls_socket 的编译检查而存在）。
     static void start_after_starttls(std::shared_ptr<HttpSession> self) { start(std::move(self)); }
 
-    // ── SessionBase 覆写 ────────────────────────────────────────
+    // ── pr::SessionBase 覆写 ────────────────────────────────────────
     void handle_read(const std::string& data) override;
     void process_read() override;
     bool has_buffered_input() const override;
@@ -88,7 +88,7 @@ static constexpr size_t kSmallFileThreshold = 64 * 1024;
     void send_error_and_close(int status);
 
 private:
-    // SessionBase 继承 enable_shared_from_this<SessionBase<...>>，shared_from_this()
+    // pr::SessionBase 继承 enable_shared_from_this<pr::SessionBase<...>>，shared_from_this()
     // 返回的是基类指针；这里下转回 HttpSession（实际对象就是它，static_pointer_cast
     // 合法），便于回调里调返回阶段/流式写等派生方法。
     std::shared_ptr<HttpSession<ConnectionType>> self_ptr() {
@@ -138,18 +138,18 @@ private:
     void stream_file_body(std::shared_ptr<std::ifstream> ifs, int64_t remaining, bool close);
 #ifdef __linux__
     // 零拷贝兜底：把文件 fd + socket fd 交给 worker 线程池跑纯 sendfile（阻塞
-    // 系统调用），完成后 post 回 io 线程复位 keep-alive。仅限明文 TcpConnection
+    // 系统调用），完成后 post 回 io 线程复位 keep-alive。仅限明文 pr::TcpConnection
     // （sendfile 绕过 TLS 加密）。逻辑见 send_file 的 if constexpr 门控。
     void serve_file_sendfile(const std::string& full_path, int64_t length,
                              bool close, bool head_only, int sock_fd,
-                             std::shared_ptr<mail_system::ThreadPoolBase> pool);
+                             std::shared_ptr<pr::ThreadPoolBase> pool);
 #endif
     // keep-alive / 断开收尾，在最后一次写完成后调用
     void finish_response(bool keep_alive);
 };
 
-using TcpHttpSession = HttpSession<mail_system::TcpConnection>;
-using SslHttpSession = HttpSession<mail_system::SslConnection>;
+using TcpHttpSession = HttpSession<pr::TcpConnection>;
+using SslHttpSession = HttpSession<pr::SslConnection>;
 
 } // namespace web_server
 

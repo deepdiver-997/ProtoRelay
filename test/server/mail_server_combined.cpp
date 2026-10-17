@@ -114,8 +114,8 @@ std::shared_ptr<DBPool> create_db_pool(const ServerConfig& config) {
 // 全局共享资源
 // ====================================================================
 struct SharedServerResources {
-    std::shared_ptr<ThreadPoolBase> io_pool;
-    std::shared_ptr<ThreadPoolBase> work_pool;
+    std::shared_ptr<pr::ThreadPoolBase> io_pool;
+    std::shared_ptr<pr::ThreadPoolBase> work_pool;
     std::shared_ptr<DBPool> db_pool;
 };
 
@@ -202,11 +202,11 @@ int main(int argc, char* argv[]) {
         // 4. 创建共享基础设施
         //    线程池和数据库连接池在两个服务器间共享
         // ================================================================
-        auto io_pool = std::make_shared<IOThreadPool>(smtp_config.io_thread_count);
+        auto io_pool = std::make_shared<pr::IOThreadPool>(smtp_config.io_thread_count);
         io_pool->start();
         LOG_SERVER_INFO("Shared IO thread pool started ({} threads)", smtp_config.io_thread_count);
 
-        auto work_pool = std::make_shared<BoostThreadPool>(smtp_config.worker_thread_count);
+        auto work_pool = std::make_shared<pr::BoostThreadPool>(smtp_config.worker_thread_count);
         work_pool->start();
         LOG_SERVER_INFO("Shared worker thread pool started ({} threads)", smtp_config.worker_thread_count);
 

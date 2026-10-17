@@ -5,7 +5,7 @@
 // login successful / UID subcmd done），但响应永远不出 wire，客户端超时
 // 退出。单命令逐条发（真实监控脚本）完全正常。
 //
-// 本测试在 SessionBase 层复刻该模式：每条命令 handle_read 时 pause，
+// 本测试在 pr::SessionBase 层复刻该模式：每条命令 handle_read 时 pause，
 // 测试扮演 worker 在"完成"时 do_async_write(响应) + drain_buffered_commands()
 // —— 与 traditional_imaps_fsm.tpp 的 handle_login/handle_select/handle_search
 // 完成路径相同的调用序列。断言：全部响应最终出现在 wire 上。
@@ -22,10 +22,10 @@ namespace mail_system {
 
 // IMAP 式延迟完成会话：LOGIN/SELECT/SEARCH 在 handle_read 里 pause（响应由
 // 测试驱动的"worker 完成"补发），LOGOUT 立即响应并关连接。
-class DeferrableSession : public SessionBase<MockConnection> {
+class DeferrableSession : public pr::SessionBase<MockConnection> {
 public:
-    explicit DeferrableSession(std::unique_ptr<MockConnection> conn, ServerBase* server = nullptr)
-        : SessionBase<MockConnection>(std::move(conn), server) {}
+    explicit DeferrableSession(std::unique_ptr<MockConnection> conn, pr::ServerBase* server = nullptr)
+        : pr::SessionBase<MockConnection>(std::move(conn), server) {}
 
     std::vector<std::string> read_lines;
 
@@ -48,7 +48,7 @@ public:
             set_paused(true);   // 响应由 worker 完成回调补发（本测试手动驱动）
         } else if (line.find("LOGOUT") != std::string::npos) {
             do_async_write("* BYE\r\nLOGOUT OK\r\n",
-                [](std::shared_ptr<SessionBase<MockConnection>> s,
+                [](std::shared_ptr<pr::SessionBase<MockConnection>> s,
                    const boost::system::error_code& ec) {
                     if (!ec) s->close();
                 });
@@ -80,7 +80,7 @@ void expect_true(bool c, const char* what) {
 // 模拟 worker 完成：响应 + drain（与 IMAP FSM 完成回调相同的调用序列）
 void worker_complete(const std::shared_ptr<DeferrableSession>& s, const char* resp) {
     s->do_async_write(resp,
-        [](std::shared_ptr<mail_system::SessionBase<MockConnection>> s2,
+        [](std::shared_ptr<pr::SessionBase<MockConnection>> s2,
            const boost::system::error_code& ec) {
             if (!ec) s2->do_async_read();
         });

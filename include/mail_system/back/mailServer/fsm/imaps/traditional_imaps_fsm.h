@@ -51,7 +51,7 @@ struct MailboxListEntry {
 };
 
 template <typename ConnectionType>
-class TraditionalImapsFsm : public FsmBase<ConnectionType, ImapState, ImapEvent> {
+class TraditionalImapsFsm : public pr::FsmBase<ConnectionType, ImapState, ImapEvent> {
 public:
     using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
     using MailboxListCache = LruCache<std::string, MailboxListEntry>;
@@ -64,8 +64,8 @@ public:
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
 
 protected:
-    std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
-    std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
+    std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
+    std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
     std::shared_ptr<MailboxListCache> m_mailboxListCache;
@@ -80,8 +80,8 @@ protected:
 
 public:
     TraditionalImapsFsm(
-        std::shared_ptr<ThreadPoolBase> io_thread_pool,
-        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+        std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
+        std::shared_ptr<pr::ThreadPoolBase> worker_thread_pool,
         std::shared_ptr<router::IShardRouter> shard_router
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
@@ -116,12 +116,12 @@ public:
 
     // 事件处理入口
     void process_event(
-        std::shared_ptr<SessionBase<ConnectionType>> session,
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session,
         ImapEvent event,
         const std::string& tag);
 
     // 自动处理（从 session 获取当前 pending 事件）
-    void auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void auto_process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // ========== 状态/事件名称查询 ==========
     static std::string get_state_name(ImapState state) {
@@ -284,13 +284,13 @@ public:
                                               std::function<void(bool)> cb);
 
     // 通用 IMAP 响应写回
-    void send_untagged(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& data);
+    void send_untagged(std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& data);
     // static：只触碰 session，可在无 this 的回调（worker/异步续作）里调用
-    static void send_tagged(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void send_tagged(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                             const std::string& tag,
                             const std::string& status,
                             const std::string& message);
-    void send_continuation(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void send_continuation(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                            const std::string& message);
 
 private:
@@ -298,43 +298,43 @@ private:
     void init_transition_table();
     void init_state_handlers();
 
-    // FsmBase hooks
-    using BaseFsm = FsmBase<ConnectionType, ImapState, ImapEvent>;
+    // pr::FsmBase hooks
+    using BaseFsm = pr::FsmBase<ConnectionType, ImapState, ImapEvent>;
     using Handler = typename BaseFsm::Handler;
     bool is_terminal_state(ImapState s) const override;
     void on_invalid_transition(ImapState s, ImapEvent e,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override;
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
     void on_handler_not_found(ImapState s, ImapEvent e,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override;
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
     void invoke_handler(Handler& h,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override;
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
 
     // ========== 状态处理器 ==========
-    void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_capability(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_login(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_authenticate(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_capability(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_login(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_authenticate(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     // LOGIN 与 AUTHENTICATE PLAIN 共用的验证链：auto-domain 后 pause，把
     // 「查 DB/缓存 + bcrypt 验密码」整体丢 worker 线程池，tagged 响应在回调补发
-    void start_auth_verify(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void start_auth_verify(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                            const std::string& tag,
                            std::string username, std::string password,
                            const char* ok_text, const char* fail_text);
     // 解码 SASL PLAIN（authzid NUL authcid NUL passwd）后走 start_auth_verify；
     // 解码失败/结构不对 → NO
-    void verify_sasl_plain(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void verify_sasl_plain(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                            const std::string& tag, const std::string& b64,
                            const char* ok_text);
-    void handle_logout(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_select(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_examine(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_list(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_status(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_fetch(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void handle_logout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_select(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_examine(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_list(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_status(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_fetch(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                       bool is_uid = false);
     // 拿到邮件列表后的 FETCH 组装/驱动（DB 慢路径回调与列表缓存快路径共用）。
     // 原为 handle_fetch 回调体内联代码，提取成函数让缓存命中路径零改动复用。
-    void fetch_from_mails(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void fetch_from_mails(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                           std::string tag, bool is_uid,
                           std::string seq_set, std::string attrs,
                           std::vector<MailboxMailInfo> mails);
@@ -347,45 +347,45 @@ private:
     // 帧仍在）→ 外层循环 continue；deferred 回调（外层已返回）→ 由回调驱动下一封。
     // 避免本地 storage 内联回调导致的逐封栈递归（大邮箱 >~200 封爆栈）。
     struct FetchContext;
-    static void fetch_drive(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void fetch_drive(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                             std::shared_ptr<FetchContext> ctx);
     // 完成本封剩余 item 后的续作：inline 时外层循环续，deferred 时驱动下一封
-    static void fetch_continue(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void fetch_continue(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                std::shared_ptr<FetchContext> ctx,
                                std::shared_ptr<std::atomic<bool>> alive);
     // 本封的 envelope + 正文阶段。返回 true = 已发起异步正文读取（回调里 fetch_continue）；
     // false = 正文已同步就绪并完成本封。
-    static bool fetch_after_size(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static bool fetch_after_size(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                  std::shared_ptr<FetchContext> ctx,
                                  std::shared_ptr<std::atomic<bool>> alive);
     // 用已就绪的正文完成当前邮件剩余 item（纯数据推进，不触碰 session）
     static void fetch_complete_mail_with_body(FetchContext& ctx,
                                               std::string body_content);
-    static void fetch_finalize(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void fetch_finalize(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                std::shared_ptr<FetchContext> ctx);
-    void handle_store(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_expunge(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_close(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_noop(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_check(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_create(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_delete(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_rename(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_subscribe(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_unsubscribe(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_lsub(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_append(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_search(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void handle_store(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_expunge(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_close(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_noop(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_check(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_create(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_delete(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_rename(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_subscribe(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_unsubscribe(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_lsub(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_append(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_search(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                        bool is_uid = false);
-    void handle_uid(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_starttls(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_copy(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_move(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_copy_move(std::shared_ptr<SessionBase<ConnectionType>> session, bool is_move);
-    void handle_idle(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_done(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_uid(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_starttls(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_copy(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_move(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_copy_move(std::shared_ptr<pr::SessionBase<ConnectionType>> session, bool is_move);
+    void handle_idle(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_done(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_error(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_timeout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // 辅助函数
 };

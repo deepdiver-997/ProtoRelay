@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_SERVER_BASE_H
-#define MAIL_SYSTEM_SERVER_BASE_H
+#ifndef PR_FRAMEWORK_SERVER_BASE_H
+#define PR_FRAMEWORK_SERVER_BASE_H
 
 #include <atomic>
 #include <memory>
@@ -17,13 +17,14 @@
 #include <string>
 #include <map>
 
-namespace mail_system {
+// 应用层类型只前向声明（include 泄漏清理，2026-10-17）。必须放在 namespace pr
+// 之外：它们就是 mail_system 命名空间的应用层类型，放进 pr 会变成
+// pr::mail_system::* 假类型（2026-10-18 命名空间翻转时的教训）。成员是
+// shared_ptr，拷贝/析构都不需要完整类型；解引用方自己 include 真头。
+namespace mail_system { class IMailboxCache; }
+namespace mail_system { namespace router { class IShardRouter; } }
 
-// 应用层类型只前向声明：框架头不允许 include 应用层头（include 泄漏清理，
-// 2026-10-17）。成员是 shared_ptr，拷贝/析构都不需要完整类型；解引用方
-// （各 server / FSM）自己 include 真头。
-class IMailboxCache;
-namespace router { class IShardRouter; }
+namespace pr {
 
 enum class ServerState { Stopped, Running, Pausing, Paused };
 
@@ -47,10 +48,10 @@ public:
     // 纯依赖注入（2026-10-18）：只接受现成资源，任一为空/未 start → 抛
     // std::invalid_argument 响亮报错，绝不悄悄自建。装配（DB 池/存储/路由的
     // 具体工厂）在 mail_system::bootstrap::assemble —— 框架不认识任何具体驱动。
-    ServerBase(const ServerConfig& config,
+    ServerBase(const mail_system::ServerConfig& config,
          std::shared_ptr<ThreadPoolBase> ioThreadPool,
          std::shared_ptr<ThreadPoolBase> workerThreadPool,
-         std::shared_ptr<router::IShardRouter> shardRouter);
+         std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
     virtual ~ServerBase();
 
     ServerBase(const ServerBase&) = delete;
@@ -76,18 +77,18 @@ public:
     // ── 共享成员（所有协议共用） ──────────────────────────────
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
-    std::shared_ptr<router::IShardRouter> m_shardRouter;
+    std::shared_ptr<mail_system::router::IShardRouter> m_shardRouter;
     std::shared_ptr<pr::IDnsResolver> m_dnsResolver;
 
-    void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
-    std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
-    std::shared_ptr<router::IShardRouter> get_shard_router() const { return m_shardRouter; }
+    void set_mailbox_cache(std::shared_ptr<mail_system::IMailboxCache> cache) { m_mailboxCache = cache; }
+    std::shared_ptr<mail_system::IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
+    std::shared_ptr<mail_system::router::IShardRouter> get_shard_router() const { return m_shardRouter; }
     std::shared_ptr<pr::IDnsResolver> get_dns_resolver() const { return m_dnsResolver; }
 
-    std::shared_ptr<IMailboxCache> m_mailboxCache;
+    std::shared_ptr<mail_system::IMailboxCache> m_mailboxCache;
     std::string m_domain;
     std::string m_configFilePath;
-    std::shared_ptr<ServerConfig> m_config;
+    std::shared_ptr<mail_system::ServerConfig> m_config;
 
     // ── 连接计数 ──────────────────────────────────────────────
     std::atomic<size_t> active_connections_{0};
@@ -146,6 +147,6 @@ protected:
     std::atomic<ServerState> m_state{ServerState::Stopped};
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // MAIL_SYSTEM_SERVER_BASE_H
+#endif // PR_FRAMEWORK_SERVER_BASE_H

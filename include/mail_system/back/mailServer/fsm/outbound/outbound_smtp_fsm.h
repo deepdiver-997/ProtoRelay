@@ -12,15 +12,15 @@ namespace outbound {
 // OutboundSmtpFsm — 出站 SMTP 客户端状态机
 // ================================================================
 template <typename ConnectionType>
-class OutboundSmtpFsm : public FsmBase<ConnectionType, OutboundSmtpState, OutboundSmtpEvent> {
+class OutboundSmtpFsm : public pr::FsmBase<ConnectionType, OutboundSmtpState, OutboundSmtpEvent> {
 public:
     OutboundSmtpFsm() { init_transition_table(); }
 
     // 2026-08-26 fix: 之前硬编码 OutboundSmtpState::CONNECTED 绕过整个 transition table，
     // 导致 (CONNECTED, CONNECTED) / (CONNECTED, EHLO_250) 等全部 on_invalid_transition → close。
     // 现在读 session 的真 current_state（参考 smtps_session.tpp:108-110 + smtps_fsm.tpp:213）。
-    // 注：FsmBase::process_event 不是 virtual，所以这里"覆写"是 name hiding 形式（不写 override）。
-    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, OutboundSmtpEvent event) {
+    // 注：pr::FsmBase::process_event 不是 virtual，所以这里"覆写"是 name hiding 形式（不写 override）。
+    void process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session, OutboundSmtpEvent event) {
         auto cur = static_cast<OutboundSmtpState>(session->get_current_state());
         this->dispatch(session, cur, event);
         // 派发后按 transition_table 自动推进状态。替代 smtps 那种"handler 末尾手动 set_current_state"
@@ -65,7 +65,7 @@ private:
     }
 
     void on_invalid_transition(OutboundSmtpState, OutboundSmtpEvent,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override
     {
         LOG_SMTP_WARN("Outbound invalid transition, closing");
         session->close();

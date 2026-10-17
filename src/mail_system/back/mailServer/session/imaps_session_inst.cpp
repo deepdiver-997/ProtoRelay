@@ -6,7 +6,7 @@
 
 namespace mail_system {
 
-template class ImapsSession<TcpConnection>;
-template class ImapsSession<SslConnection>;
+template class ImapsSession<pr::TcpConnection>;
+template class ImapsSession<pr::SslConnection>;
 
 } // namespace mail_system

@@ -28,13 +28,13 @@
 namespace mail_system {
 
 template <typename ConnectionType>
-class SmtpsSession : public SessionBase<ConnectionType> {
+class SmtpsSession : public pr::SessionBase<ConnectionType> {
     friend class TraditionalSmtpsFsm<ConnectionType>;
     static constexpr size_t MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 public:
     SmtpsSession(
-        ServerBase* server,
+        pr::ServerBase* server,
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm);
 
@@ -61,7 +61,7 @@ public:
     int get_next_event() const override;
     std::string get_last_command_args() const override;
 
-    // ── Mail 实体管理（已从 SessionBase 下放到此）──────────────
+    // ── Mail 实体管理（已从 pr::SessionBase 下放到此）──────────────
     mail* get_mail() { return mail_.get(); }
     std::unique_ptr<mail> get_mail_ptr() { return std::move(mail_); }
 
@@ -127,8 +127,8 @@ private:
     std::unique_ptr<mail> mail_;
 };
 
-using TcpSmtpsSession = SmtpsSession<TcpConnection>;
-using SslSmtpsSession = SmtpsSession<SslConnection>;
+using TcpSmtpsSession = SmtpsSession<pr::TcpConnection>;
+using SslSmtpsSession = SmtpsSession<pr::SslConnection>;
 
 } // namespace mail_system
 

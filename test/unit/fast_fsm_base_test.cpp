@@ -1,4 +1,4 @@
-// FastFsmBase 分发语义测试（O(1) 数组版状态机基类）。
+// pr::FastFsmBase 分发语义测试（O(1) 数组版状态机基类）。
 //
 // 与 fsm_base_test 互补：这里验证数组版特有的 fallback 优先级——
 // 专用 handler > fallback handler > on_invalid_transition，以及
@@ -9,7 +9,7 @@
 #include <memory>
 #include <string>
 
-// 注意：fast_fsm_base.h 不自包含（用了 SessionBase 却没 include session_base.h，
+// 注意：fast_fsm_base.h 不自包含（用了 pr::SessionBase 却没 include session_base.h，
 // 生产里靠 include 顺序侥幸编译）。此处先引入 test_session.h（含 session_base.h）。
 #include "test_session.h"
 #include "mock_connection.h"
@@ -18,15 +18,15 @@
 namespace {
 
 using mail_system::MockConnection;
-using mail_system::SessionBase;
+using pr::SessionBase;
 using mail_system::TestSession;
 
 enum class St : int { INIT = 0, AUTH = 1, DONE = 2, COUNT = 3 };
 enum class Ev : int { HELO = 0, AUTH = 1, QUIT = 2, COUNT = 3 };
 
-using Fsm = mail_system::FastFsmBase<MockConnection, St, Ev>;
+using Fsm = pr::FastFsmBase<MockConnection, St, Ev>;
 using Handler = Fsm::Handler;
-using SessionPtr = std::shared_ptr<SessionBase<MockConnection>>;
+using SessionPtr = std::shared_ptr<pr::SessionBase<MockConnection>>;
 
 struct TestFsm : Fsm {
     int invalid_calls = 0;

@@ -43,7 +43,7 @@ public:
     static constexpr int MIN_RETRY_DELAY_SEC = 5;
     static constexpr int MAX_RETRY_DELAY_SEC = 60;
 
-    OutboundServer(ServerBase* server,
+    OutboundServer(pr::ServerBase* server,
                    int max_per_mx = DEFAULT_MAX_SESSIONS_PER_MX,
                    int idle_timeout = DEFAULT_IDLE_TIMEOUT_SEC);
 
@@ -75,7 +75,7 @@ public:
     // 2026-08-27: metrics 注入。weak_ptr 避免循环引用；未注入时 push no-op。
     // 注入时机：SmtpsServer 启动后调 inject_metrics_to_outbound()
     // （与 SmtpsServer::m_persistentQueue 注入同模式）。
-    void set_metrics(std::weak_ptr<MetricsServer> m) { m_metrics = m; }
+    void set_metrics(std::weak_ptr<pr::MetricsServer> m) { m_metrics = m; }
 
 private:
     // 端口解析：static_routes[domain] > ports[0] > 25
@@ -88,9 +88,9 @@ private:
     // 存到会话的 MX failover 池，connect 逐个尝试。静态/默认路由命中时返回空（不走 MX）。
     std::vector<std::string> resolve_mx_pool(const std::string& domain) const;
 
-    using SessionPtr = std::shared_ptr<OutboundSmtpSession<TcpConnection>>;
+    using SessionPtr = std::shared_ptr<OutboundSmtpSession<pr::TcpConnection>>;
     using SessionList = std::vector<SessionPtr>;
-    using CompletionCb = OutboundSmtpSession<TcpConnection>::CompletionCb;
+    using CompletionCb = OutboundSmtpSession<pr::TcpConnection>::CompletionCb;
 
     // ── DB 拉取（发送到 worker 线程池） ───────────────────────
     void do_claim_batch();
@@ -110,7 +110,7 @@ private:
     static std::string extract_domain(const std::string& addr);
 
     // ── 成员 ──────────────────────────────────────────────────
-    ServerBase* server_;
+    pr::ServerBase* server_;
     int max_sessions_per_mx_;
     int idle_timeout_sec_;
     std::string worker_id_;
@@ -131,7 +131,7 @@ private:
     std::unique_ptr<boost::asio::steady_timer> retry_timer_;
 
     // 2026-08-27: weak_ptr 持 metrics，outbound_server 析构后自动失效。
-    std::weak_ptr<MetricsServer> m_metrics;
+    std::weak_ptr<pr::MetricsServer> m_metrics;
 };
 
 } // namespace outbound

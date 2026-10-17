@@ -39,12 +39,12 @@ static std::string build_pipeline_msg(int idx) {
 }
 
 // 最小 SmtpsServer — 仅提供 config + persistent_queue，不启动监听。
-// 必须派生自 SmtpsServer（而非 ServerBase）：SmtpsSession 构造函数会
+// 必须派生自 SmtpsServer（而非 pr::ServerBase）：SmtpsSession 构造函数会
 // `static_cast<SmtpsServer*>(server)->m_persistentQueue`，否则向下转型为 UB。
 struct BenchServer : SmtpsServer {
     BenchServer(const ServerConfig& c,
-                std::shared_ptr<ThreadPoolBase> io,
-                std::shared_ptr<ThreadPoolBase> w,
+                std::shared_ptr<pr::ThreadPoolBase> io,
+                std::shared_ptr<pr::ThreadPoolBase> w,
                 std::shared_ptr<router::IShardRouter> r,
                 std::shared_ptr<pq::PersistentQueue> q)
         : SmtpsServer(c, io, w, std::move(r)) {
@@ -89,8 +89,8 @@ int main(int argc, char* argv[]) {
     }
 
     Logger::get_instance().init("fsm_bench.log", 0, 1, spdlog::level::off, false, false);
-    auto io_pool     = std::make_shared<IOThreadPool>(thread_count);
-    auto worker_pool = std::make_shared<BoostThreadPool>(2);
+    auto io_pool     = std::make_shared<pr::IOThreadPool>(thread_count);
+    auto worker_pool = std::make_shared<pr::BoostThreadPool>(2);
     io_pool->start();
     worker_pool->start();
 

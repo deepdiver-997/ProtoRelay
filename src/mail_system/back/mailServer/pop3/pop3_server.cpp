@@ -14,13 +14,13 @@ constexpr int kLockSweepIntervalSeconds = 300;
 } // namespace
 
 Pop3Server::Pop3Server(const ServerConfig& config,
-     std::shared_ptr<ThreadPoolBase> ioThreadPool,
-      std::shared_ptr<ThreadPoolBase> workerThreadPool,
+     std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
+      std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
        std::shared_ptr<router::IShardRouter> shardRouter)
         : TcpServerBase(config, ioThreadPool, workerThreadPool, shardRouter) {
-    m_tcp_fsm = std::make_shared<TraditionalPop3Fsm<TcpConnection>>(
+    m_tcp_fsm = std::make_shared<TraditionalPop3Fsm<pr::TcpConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_shardRouter);
-    m_ssl_fsm = std::make_shared<TraditionalPop3Fsm<SslConnection>>(
+    m_ssl_fsm = std::make_shared<TraditionalPop3Fsm<pr::SslConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_shardRouter);
     LOG_SERVER_INFO("POP3 server initialized, SSL fsm={}, TCP fsm={}",
                   m_ssl_fsm ? "ready" : "null",
@@ -32,23 +32,23 @@ Pop3Server::~Pop3Server() {
 }
 
 void Pop3Server::start() {
-    TcpServerBase<Pop3Session<TcpConnection>, Pop3Session<SslConnection>>::start();
+    pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>>::start();
     start_lock_sweeper();
 }
 
-void Pop3Server::stop(ServerState state) {
-    // 先取消 sweeper 定时器再停 io/worker 池（TcpServerBase::stop 会停池）
+void Pop3Server::stop(pr::ServerState state) {
+    // 先取消 sweeper 定时器再停 io/worker 池（pr::TcpServerBase::stop 会停池）
     if (m_sweep_timer) {
         m_sweep_timer->cancel();
         m_sweep_timer.reset();
     }
     m_sweep_tick = {};
-    TcpServerBase<Pop3Session<TcpConnection>, Pop3Session<SslConnection>>::stop(state);
+    pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>>::stop(state);
 }
 
 void Pop3Server::start_lock_sweeper() {
     if (m_sweep_timer) return;
-    auto io_pool = std::dynamic_pointer_cast<IOThreadPool>(m_ioThreadPool);
+    auto io_pool = std::dynamic_pointer_cast<pr::IOThreadPool>(m_ioThreadPool);
     if (!io_pool) return;
     boost::asio::io_context& io_ctx = io_pool->get_io_context();
     m_sweep_timer = std::make_shared<boost::asio::steady_timer>(io_ctx);
@@ -64,7 +64,7 @@ void Pop3Server::start_lock_sweeper() {
         auto router = m_shardRouter;
         if (router && m_workerThreadPool) {
             m_workerThreadPool->post([router]() {
-                TraditionalPop3Fsm<TcpConnection>::sweep_expired_locks(router);
+                TraditionalPop3Fsm<pr::TcpConnection>::sweep_expired_locks(router);
             });
         }
     };
@@ -74,19 +74,19 @@ void Pop3Server::start_lock_sweeper() {
     LOG_SERVER_INFO("POP3 lock sweeper started (every {}s)", kLockSweepIntervalSeconds);
 }
 
-std::shared_ptr<Pop3Session<TcpConnection>> Pop3Server::make_tcp_session(
-    std::unique_ptr<TcpConnection> conn, const ListenerConfig& lc)
+std::shared_ptr<Pop3Session<pr::TcpConnection>> Pop3Server::make_tcp_session(
+    std::unique_ptr<pr::TcpConnection> conn, const ListenerConfig& lc)
 {
     (void)lc;
-    return std::make_shared<Pop3Session<TcpConnection>>(
+    return std::make_shared<Pop3Session<pr::TcpConnection>>(
         this, std::move(conn), m_tcp_fsm);
 }
 
-std::shared_ptr<Pop3Session<SslConnection>> Pop3Server::make_ssl_session(
-    std::unique_ptr<SslConnection> conn, const ListenerConfig& lc)
+std::shared_ptr<Pop3Session<pr::SslConnection>> Pop3Server::make_ssl_session(
+    std::unique_ptr<pr::SslConnection> conn, const ListenerConfig& lc)
 {
     (void)lc;
-    return std::make_shared<Pop3Session<SslConnection>>(
+    return std::make_shared<Pop3Session<pr::SslConnection>>(
         this, std::move(conn), m_ssl_fsm);
 }
 

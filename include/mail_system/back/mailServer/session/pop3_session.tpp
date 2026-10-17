@@ -7,10 +7,10 @@ namespace mail_system {
 
 template <typename ConnectionType>
 Pop3Session<ConnectionType>::Pop3Session(
-    ServerBase* server,
+    pr::ServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalPop3Fsm<ConnectionType>> fsm)
-    : SessionBase<ConnectionType>(std::move(connection), server)
+    : pr::SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
     , next_event_(Pop3Event::CONNECT)
     , context_()
@@ -28,7 +28,7 @@ void Pop3Session<ConnectionType>::start(std::shared_ptr<Pop3Session> self) {
 
 template <typename ConnectionType>
 void Pop3Session<ConnectionType>::start_after_starttls(std::shared_ptr<Pop3Session> self) {
-    // POP3 v1 不支持 STARTTLS（v2 再加）。TcpServerBase 会调这个钩子；
+    // POP3 v1 不支持 STARTTLS（v2 再加）。pr::TcpServerBase 会调这个钩子；
     // 这里走和 start() 一样的路径，发 +OK banner。
     start(self);
 }
@@ -54,7 +54,7 @@ void Pop3Session<ConnectionType>::close() {
                                      {{"result", label}}, 1);
         }
     }
-    SessionBase<ConnectionType>::close();
+    pr::SessionBase<ConnectionType>::close();
 }
 
 template <typename ConnectionType>

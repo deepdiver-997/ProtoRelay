@@ -8,7 +8,7 @@
 #include <atomic>
 #include <nlohmann/json.hpp>
 
-namespace mail_system {
+namespace pr {
 
 struct IpRecord {
     int      failed_count = 0;
@@ -189,4 +189,4 @@ private:
     std::unordered_map<std::string, IpRecord> m_records;
 };
 
-} // namespace mail_system
+} // namespace pr

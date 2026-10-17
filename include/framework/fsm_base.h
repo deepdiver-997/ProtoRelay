@@ -1,12 +1,12 @@
-#ifndef MAIL_SYSTEM_FSM_BASE_H
-#define MAIL_SYSTEM_FSM_BASE_H
+#ifndef PR_FRAMEWORK_FSM_BASE_H
+#define PR_FRAMEWORK_FSM_BASE_H
 
 #include "framework/session_base.h"
 #include <functional>
 #include <map>
 #include <memory>
 
-namespace mail_system {
+namespace pr {
 
 template <typename ConnectionType, typename State, typename Event>
 class FsmBase {
@@ -77,6 +77,6 @@ protected:
     }
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // MAIL_SYSTEM_FSM_BASE_H
+#endif // PR_FRAMEWORK_FSM_BASE_H

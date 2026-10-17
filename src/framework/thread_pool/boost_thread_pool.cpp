@@ -1,7 +1,7 @@
 #include "framework/thread_pool/boost_thread_pool.h"
 #include "framework/log/log_macros.h"
 
-namespace mail_system {
+namespace pr {
 
 BoostThreadPool::BoostThreadPool(size_t thread_count)
     : m_thread_count(thread_count), m_running(false) {

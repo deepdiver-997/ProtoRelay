@@ -25,13 +25,13 @@ namespace mail_system {
 
 template <typename ConnectionType>
 Pop3Context* TraditionalPop3Fsm<ConnectionType>::ctx_of(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     return static_cast<Pop3Context*>(session->get_context());
 }
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::send_line(
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& line) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& line) {
     if (!session) return;
     std::string out = line;
     if (out.empty() || (out.back() != '\n')) out += "\r\n";
@@ -275,9 +275,9 @@ bool TraditionalPop3Fsm<ConnectionType>::sweep_expired_locks(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
     std::shared_ptr<router::IShardRouter> router,
-    std::shared_ptr<ThreadPoolBase> worker,
+    std::shared_ptr<pr::ThreadPoolBase> worker,
     std::chrono::milliseconds interval)
 {
     if (!session || !router || !worker) return;
@@ -286,7 +286,7 @@ void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
     if (ctx->heartbeat_timer) return;   // 幂等：已有心跳
 
     auto* srv = session->get_server();
-    auto io_pool = srv ? std::dynamic_pointer_cast<IOThreadPool>(srv->m_ioThreadPool) : nullptr;
+    auto io_pool = srv ? std::dynamic_pointer_cast<pr::IOThreadPool>(srv->m_ioThreadPool) : nullptr;
     if (!io_pool) return;
     boost::asio::io_context& io_ctx = io_pool->get_io_context();
 
@@ -302,7 +302,7 @@ void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
     // handler 只持 weak_self/weak_timer/weak_tick（弱）→ 无环，session 析构
     // 即释放定时器与回调。tick 本体由 session 持有（heartbeat_handler），
     // 每次 re-arm 通过 weak_tick 重新锁定。
-    auto weak_self = std::weak_ptr<SessionBase<ConnectionType>>(session);
+    auto weak_self = std::weak_ptr<pr::SessionBase<ConnectionType>>(session);
     auto weak_timer = std::weak_ptr<boost::asio::steady_timer>(timer);
     auto tick = std::make_shared<std::function<void(const boost::system::error_code&)>>();
     ctx->heartbeat_handler = tick;
@@ -443,21 +443,21 @@ bool TraditionalPop3Fsm<ConnectionType>::is_terminal_state(Pop3State s) const {
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::on_invalid_transition(
-    Pop3State, Pop3Event, std::shared_ptr<SessionBase<ConnectionType>> session) {
+    Pop3State, Pop3Event, std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session || session->is_closed()) return;
     send_line(session, "-ERR Command not allowed in current state");
 }
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::on_handler_not_found(
-    Pop3State, Pop3Event, std::shared_ptr<SessionBase<ConnectionType>> session) {
+    Pop3State, Pop3Event, std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session || session->is_closed()) return;
     send_line(session, "-ERR Internal: handler missing");
 }
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::process_event(
-    std::shared_ptr<SessionBase<ConnectionType>> session, Pop3Event event)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session, Pop3Event event)
 {
     if (!session) return;
     Pop3State cur = static_cast<Pop3State>(session->get_current_state());
@@ -466,7 +466,7 @@ void TraditionalPop3Fsm<ConnectionType>::process_event(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::auto_process_event(
-    std::shared_ptr<SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     if (!session) return;
     process_event(session, static_cast<Pop3Event>(session->get_next_event()));
@@ -478,7 +478,7 @@ void TraditionalPop3Fsm<ConnectionType>::auto_process_event(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_init_connect(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     long now = static_cast<long>(time(nullptr));
     char ts[32];
@@ -489,7 +489,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_init_connect(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_capa(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     send_line(session, "+OK Capability list follows");
     send_line(session, "USER");
@@ -500,7 +500,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_capa(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_user(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -513,7 +513,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_user(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_pass(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -672,7 +672,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_stat(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -688,7 +688,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_stat(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_list(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -728,7 +728,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_list(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_uidl(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -761,7 +761,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_uidl(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_retr(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -842,7 +842,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_dele(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (!ctx) { send_line(session, "-ERR Internal: no context"); return; }
@@ -876,14 +876,14 @@ void TraditionalPop3Fsm<ConnectionType>::handle_dele(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_noop(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     send_line(session, "+OK");
 }
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_rset(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     auto* ctx = ctx_of(session);
     if (ctx) ctx->deleted.clear();
@@ -892,7 +892,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_rset(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_quit(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
     session->set_trace_clean_close();   // 正常 QUIT → 连接追踪丢弃
     auto* ctx = ctx_of(session);
@@ -956,7 +956,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_error(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session || session->is_closed()) return;
     // 未知命令/空行 → 回 -ERR，连接保持（用户在 AUTHORIZATION 可重试）
     send_line(session, "-ERR Unknown command");
@@ -964,7 +964,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_error(
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_timeout(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session || session->is_closed()) return;
     // 异常结束：释放 mailbox 锁再关（abrupt disconnect 的锁泄漏由 v2 sweeper 兜底）
     auto* ctx = ctx_of(session);

@@ -39,10 +39,10 @@ template <typename ConnectionType>
 class SmtpsSession;  // 前向声明
 
 template <typename ConnectionType>
-class TraditionalSmtpsFsm : public FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
+class TraditionalSmtpsFsm : public pr::FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
 protected:
-    std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
-    std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
+    std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
+    std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<IMailboxCache> m_mailboxCache;
     std::shared_ptr<mail_system::persist_storage::PersistentQueue> m_persistentQueue;
@@ -53,8 +53,8 @@ public:
     std::shared_ptr<AuthCache> m_recipientCache = std::make_shared<AuthCache>();
 
     TraditionalSmtpsFsm(
-        std::shared_ptr<ThreadPoolBase> io_thread_pool,
-        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+        std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
+        std::shared_ptr<pr::ThreadPoolBase> worker_thread_pool,
         std::shared_ptr<persist_storage::PersistentQueue> persistent_queue,
         std::shared_ptr<router::IShardRouter> shard_router
     ) : m_ioThreadPool(io_thread_pool),
@@ -80,8 +80,8 @@ public:
     }
 
     // 处理事件
-    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event);
-    void auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session, SmtpsEvent event);
+    void auto_process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // 获取状态名称
     static std::string get_state_name(SmtpsState state);
@@ -91,19 +91,19 @@ public:
 
     using AuthCallback = std::function<void(bool ok, int shard)>;
     // session 用 shared_ptr 保活：异步 DB 回调（真异步 worker 线程）期间 session 不会提前析构
-    void auth_user_async(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void auth_user_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                          const std::string& mail_address,
                          const std::string& password, AuthCallback cb);
 
     // RCPT TO 校验：异步检查本地收件人是否存在（回调 exists=true 表示存在且 status=1）
-    void user_exists_async(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void user_exists_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                            const std::string& mail_address,
                            std::function<void(bool exists)> cb);
 
     // 每日发信配额：认证账号 MAIL FROM 时原子占用今日一个配额（条件 UPDATE + ROW_COUNT）。
     // 回调 allowed=true 表示占用成功（或配额关闭/DB 故障 fail-open）；false = 超限。
     // 调用方负责 session pause 语义（与 SPF 检查一致：前置 set_paused(true)，回调起点恢复）。
-    void check_send_quota_async(std::shared_ptr<SessionBase<ConnectionType>> session,
+    void check_send_quota_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                 const std::string& mail_address,
                                 std::function<void(bool allowed)> cb);
 
@@ -129,42 +129,42 @@ private:
     static void cleanup_mail_files(mail* mail);
 
     bool persist_mails_sync(SmtpsSession<ConnectionType>* session, std::string& error);
-    bool persist_and_reply(std::shared_ptr<SessionBase<ConnectionType>> session);
+    bool persist_and_reply(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     void init_transition_table();
     void init_state_handlers();
 
     bool is_terminal_state(SmtpsState s) const override;
     void on_invalid_transition(SmtpsState s, SmtpsEvent e,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override;
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
 
-    void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_greeting_ehlo(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_starttls(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_auth(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_auth_login(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_username(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_password(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_mail_from(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_mail_from_mail_from(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_rcpt_to_rcpt_to(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_data_data(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_in_message_data(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_in_message_data_end(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_greeting_ehlo(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_auth_starttls(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_auth_auth(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_auth_auth_login(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_auth_username(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_auth_password(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_auth_mail_from(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_mail_from_mail_from(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_rcpt_to_rcpt_to(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_data_data(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_in_message_data(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_in_message_data_end(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // DATA_END 在 commit_body_async 回调（本地内联 / 远程 provider 线程）之后的
     // 收尾：MIME 预解析（异步读）→ 入站校验 → 入队 + 250/451。
-    static void finish_data_end_after_commit(std::shared_ptr<SessionBase<ConnectionType>> session);
+    static void finish_data_end_after_commit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // 在只读视图上做 MIME 预解析并写 sidecar。static：回调里无 this 可用。
-    static void parse_and_save_mime_tree(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void parse_and_save_mime_tree(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                          std::unique_ptr<storage::IReadStream> body_read);
 
     // MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
-    static void finish_data_end_after_read(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_quit_quit(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session);
+    static void finish_data_end_after_read(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_wait_quit_quit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_timeout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_error(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 };
 
 } // namespace mail_system

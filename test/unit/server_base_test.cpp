@@ -1,7 +1,7 @@
-// ServerBase 单元测试：生命周期状态、连接计数、入侵检测集成、配置热重载、
+// pr::ServerBase 单元测试：生命周期状态、连接计数、入侵检测集成、配置热重载、
 // DNS 注入、metrics 端到端。
 //
-// 用 NullStorageProvider + 0 线程池构造，免 DB/免真实存储/免线程（ServerBase ctor
+// 用 NullStorageProvider + 0 线程池构造，免 DB/免真实存储/免线程（pr::ServerBase ctor
 // 已把 NullDBPool / NullStorageProvider 接好）。必须链 COMMON_SRCS（同 FSM 测试）。
 #undef NDEBUG
 #include <arpa/inet.h>
@@ -51,21 +51,21 @@ std::filesystem::path tmp_dir() {
     return std::filesystem::temp_directory_path() / "protorelay_server_base_test";
 }
 
-// ServerBase 是抽象基类：实现纯虚接口的最小具体子类
-struct TestServerBase : ServerBase {
+// pr::ServerBase 是抽象基类：实现纯虚接口的最小具体子类
+struct TestServerBase : pr::ServerBase {
     TestServerBase(const ServerConfig& c,
-                   std::shared_ptr<ThreadPoolBase> io,
-                   std::shared_ptr<ThreadPoolBase> worker,
+                   std::shared_ptr<pr::ThreadPoolBase> io,
+                   std::shared_ptr<pr::ThreadPoolBase> worker,
                    std::shared_ptr<router::IShardRouter> router)
-        : ServerBase(c, io, worker, router) {}
+        : pr::ServerBase(c, io, worker, router) {}
     void start() override {}
     bool should_reject_connection(std::string& reason, const std::string&) const override {
         reason.clear();
         return false;
     }
     // 暴露 protected 启动方法供测试调
-    using ServerBase::start_metrics_server;
-    using ServerBase::stop_metrics_server;
+    using pr::ServerBase::start_metrics_server;
+    using pr::ServerBase::stop_metrics_server;
 };
 
 // 手写 HTTP GET：拼 HTTP/1.1 请求 + 解析 body。不用 libcurl。
@@ -124,9 +124,9 @@ ServerConfig make_cfg() {
 int main() {
     std::printf("server_base_test\n");
     // 纯 DI：全部用例共享一套最小资源（池已 start + 空 router）
-    auto io_pool = std::make_shared<IOThreadPool>(1);
+    auto io_pool = std::make_shared<pr::IOThreadPool>(1);
     io_pool->start();
-    auto wk_pool = std::make_shared<BoostThreadPool>(1);
+    auto wk_pool = std::make_shared<pr::BoostThreadPool>(1);
     wk_pool->start();
     auto null_router = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{}, 0,
@@ -152,7 +152,7 @@ int main() {
     // 1. 构造 + 生命周期状态
     {
         TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
-        expect_true(server.get_state() == ServerState::Paused,
+        expect_true(server.get_state() == pr::ServerState::Paused,
                     "ctor leaves server Paused");
         expect_true(server.m_domain == "test.local", "domain from config");
         expect_true(server.get_shard_router() != nullptr, "shard router built");
@@ -160,7 +160,7 @@ int main() {
         expect_true(server.get_mailbox_cache() == nullptr, "no mailbox cache by default");
 
         server.request_stop();
-        expect_true(server.get_state() == ServerState::Pausing,
+        expect_true(server.get_state() == pr::ServerState::Pausing,
                     "request_stop -> Pausing");
     }
 
@@ -295,7 +295,7 @@ int main() {
     {
         TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
         server.request_stop();
-        expect_true(server.get_state() == ServerState::Pausing, "stop requested");
+        expect_true(server.get_state() == pr::ServerState::Pausing, "stop requested");
         server.increment_connection_count();
         server.increment_mails_accepted();
         expect_true(server.active_connections_.load() == 1,
@@ -326,7 +326,7 @@ int main() {
         cfg.metrics_port        = 0;   // OS 自动分配
         cfg.metrics_bind_address = "127.0.0.1";
 
-        auto io_pool = std::make_shared<IOThreadPool>(1);
+        auto io_pool = std::make_shared<pr::IOThreadPool>(1);
         io_pool->start();
         std::thread io_thread([&] { io_pool->get_io_context().run(); });
 
@@ -380,8 +380,8 @@ int main() {
     //     未 increment 的计数——无符号 size_t 在 0 上 fetch_sub 下溢成 SIZE_MAX(≈18E18),
     //     使 `active >= maxConnections` 恒真 → 整机拒绝所有连接（2026-09-11 RackNerd 事故）。
     {
-        struct TestSession : SessionBase<TcpConnection> {
-            explicit TestSession(ServerBase* s) : SessionBase<TcpConnection>(nullptr, s) {}
+        struct TestSession : pr::SessionBase<pr::TcpConnection> {
+            explicit TestSession(pr::ServerBase* s) : pr::SessionBase<pr::TcpConnection>(nullptr, s) {}
             std::chrono::milliseconds compute_reply_delay() const override { return std::chrono::milliseconds(0); }
             void    handle_read(const std::string&) override {}
             void    process_read() override {}

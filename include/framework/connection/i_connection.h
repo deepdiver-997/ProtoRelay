@@ -1,5 +1,5 @@
-#ifndef I_CONNECTION_H
-#define I_CONNECTION_H
+#ifndef PR_FRAMEWORK_I_CONNECTION_H
+#define PR_FRAMEWORK_I_CONNECTION_H
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-namespace mail_system {
+namespace pr {
 
 template <typename ConnectionType>
 class SessionBase;
@@ -92,6 +92,6 @@ public:
     virtual int native_handle() const { return -1; }
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // I_CONNECTION_H
+#endif // PR_FRAMEWORK_I_CONNECTION_H

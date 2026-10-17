@@ -14,15 +14,15 @@
 namespace mail_system {
 
 template <typename ConnectionType>
-class TraditionalPop3Fsm : public FsmBase<ConnectionType, Pop3State, Pop3Event> {
+class TraditionalPop3Fsm : public pr::FsmBase<ConnectionType, Pop3State, Pop3Event> {
 public:
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
     // 锁心跳续约周期（默认 60s）。测试可改短以在有限时间内观察续约/失锁。
     std::chrono::milliseconds heartbeat_interval_{std::chrono::seconds(60)};
 
 protected:
-    std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
-    std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
+    std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
+    std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     // 每会话上下文。Pop3Context 是 per-session 状态，由 session 拥有；
     // FSM 通过 session->get_context() 获取裸指针。
@@ -30,8 +30,8 @@ protected:
 
 public:
     TraditionalPop3Fsm(
-        std::shared_ptr<ThreadPoolBase> io_thread_pool,
-        std::shared_ptr<ThreadPoolBase> worker_thread_pool,
+        std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
+        std::shared_ptr<pr::ThreadPoolBase> worker_thread_pool,
         std::shared_ptr<router::IShardRouter> shard_router
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
@@ -44,12 +44,12 @@ public:
 
     // ========== 事件派发入口（session 调） ==========
     void process_event(
-        std::shared_ptr<SessionBase<ConnectionType>> session,
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session,
         Pop3Event event);
 
     // 从 session 的 next_event_ 取事件后派发（仿 SMTP auto_process_event）
     void auto_process_event(
-        std::shared_ptr<SessionBase<ConnectionType>> session);
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // ── DB 访问（CPS：async_query/async_execute 链，结果经 cb 返回） ──
     // 仿 SMTP auth 的异步链写法。底层 MySQL async_* 目前是默认同步包装
@@ -106,13 +106,13 @@ public:
 
     // 写一行（带 CRLF）到 session，跨线程安全（通过 session->do_async_write）。
     // 协议规范：`+OK text\r\n` / `-ERR text\r\n`。
-    static void send_line(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void send_line(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                           const std::string& line);
 
     // 取 session 的 Pop3Context 裸指针（每个 session 自带 context_ 成员，
-    // 通过 get_context() 拿到 SessionBase 的协议层 context —— 但 SessionBase
+    // 通过 get_context() 拿到 pr::SessionBase 的协议层 context —— 但 pr::SessionBase
     // 接口是 void*，本 FSM 强转为 Pop3Context*）。
-    static Pop3Context* ctx_of(std::shared_ptr<SessionBase<ConnectionType>> session);
+    static Pop3Context* ctx_of(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // ========== 状态/事件名（调试 / 日志） ==========
     static std::string get_state_name(Pop3State s);
@@ -122,38 +122,38 @@ private:
     void init_transition_table();
     void init_state_handlers();
 
-    // FsmBase hooks
-    using BaseFsm = FsmBase<ConnectionType, Pop3State, Pop3Event>;
+    // pr::FsmBase hooks
+    using BaseFsm = pr::FsmBase<ConnectionType, Pop3State, Pop3Event>;
     using Handler = typename BaseFsm::Handler;
     bool is_terminal_state(Pop3State s) const override;
     void on_invalid_transition(Pop3State s, Pop3Event e,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override;
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
     void on_handler_not_found(Pop3State s, Pop3Event e,
-        std::shared_ptr<SessionBase<ConnectionType>> session) override;
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
 
     // ========== 锁心跳（v2） ==========
     // 在 io_context 上启动递归续约定时器；handler 只捕获 weak 引用打破自环，
     // 会话 close() 时取消。静态：不依赖 FSM 实例（router/worker/interval 显式传入）。
-    static void start_heartbeat(std::shared_ptr<SessionBase<ConnectionType>> session,
+    static void start_heartbeat(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                 std::shared_ptr<router::IShardRouter> router,
-                                std::shared_ptr<ThreadPoolBase> worker,
+                                std::shared_ptr<pr::ThreadPoolBase> worker,
                                 std::chrono::milliseconds interval);
 
     // ========== 状态处理器 ==========
-    void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_capa(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_user(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_pass(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_stat(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_list(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_uidl(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_retr(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_dele(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_noop(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_rset(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_quit(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_capa(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_user(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_pass(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_stat(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_list(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_uidl(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_retr(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_dele(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_noop(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_rset(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_quit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_error(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    void handle_timeout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 };
 
 } // namespace mail_system

@@ -1,12 +1,12 @@
-#ifndef SSL_CONNECTION_H
-#define SSL_CONNECTION_H
+#ifndef PR_FRAMEWORK_SSL_CONNECTION_H
+#define PR_FRAMEWORK_SSL_CONNECTION_H
 
 #include "i_connection.h"
 #include <boost/asio/ssl.hpp>
 #include <openssl/err.h>
 #include <memory>
 
-namespace mail_system {
+namespace pr {
 
 // SSL 连接实现
 class SslConnection : public IConnection {
@@ -130,6 +130,6 @@ private:
     std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> stream_;
 };
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // SSL_CONNECTION_H
+#endif // PR_FRAMEWORK_SSL_CONNECTION_H

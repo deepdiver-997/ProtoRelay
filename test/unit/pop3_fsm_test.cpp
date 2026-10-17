@@ -30,12 +30,12 @@ using namespace mail_system;
 
 // ========== 测试夹具 ==========
 
-struct TestServer : ServerBase {
+struct TestServer : pr::ServerBase {
     TestServer(const ServerConfig& c,
-               std::shared_ptr<ThreadPoolBase> io,
-               std::shared_ptr<ThreadPoolBase> w,
+               std::shared_ptr<pr::ThreadPoolBase> io,
+               std::shared_ptr<pr::ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : ServerBase(c, io, w, std::move(r)) {}
+        : pr::ServerBase(c, io, w, std::move(r)) {}
     void start() override {}
     bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };
@@ -44,8 +44,8 @@ struct FsmTestFixture {
     static constexpr const char* MAIL_DIR = "/tmp/pop3_fsm_test_mail";
     static constexpr const char* ATT_DIR  = "/tmp/pop3_fsm_test_att";
 
-    std::shared_ptr<IOThreadPool> io_pool;
-    std::shared_ptr<BoostThreadPool> worker_pool;
+    std::shared_ptr<pr::IOThreadPool> io_pool;
+    std::shared_ptr<pr::BoostThreadPool> worker_pool;
     std::shared_ptr<router::StaticShardRouter> router;
     std::shared_ptr<test::MockDbPool> db_pool;
     std::shared_ptr<test::MockDbConnection> db_conn;
@@ -56,8 +56,8 @@ struct FsmTestFixture {
 
     FsmTestFixture() {
         Logger::get_instance().init("pop3_fsm_test.log", 0, 1, spdlog::level::off, false, false);
-        io_pool     = std::make_shared<IOThreadPool>(1);
-        worker_pool = std::make_shared<BoostThreadPool>(2);
+        io_pool     = std::make_shared<pr::IOThreadPool>(1);
+        worker_pool = std::make_shared<pr::BoostThreadPool>(2);
         io_pool->start();
         worker_pool->start();
 

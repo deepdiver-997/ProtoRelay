@@ -6,7 +6,7 @@
 
 namespace mail_system {
 
-template class TraditionalImapsFsm<TcpConnection>;
-template class TraditionalImapsFsm<SslConnection>;
+template class TraditionalImapsFsm<pr::TcpConnection>;
+template class TraditionalImapsFsm<pr::SslConnection>;
 
 } // namespace mail_system

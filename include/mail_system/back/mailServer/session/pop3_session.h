@@ -13,17 +13,17 @@
 namespace mail_system {
 
 template <typename ConnectionType>
-class Pop3Session : public SessionBase<ConnectionType> {
+class Pop3Session : public pr::SessionBase<ConnectionType> {
 public:
     Pop3Session(
-        ServerBase* server,
+        pr::ServerBase* server,
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalPop3Fsm<ConnectionType>> fsm);
 
     ~Pop3Session() override = default;
 
     // 关闭时推送 protorelay_pop3_sessions_total{result=ok/err}，
-    // 再走 SessionBase::close()（其内会推通用 session_duration / record_session_end）。
+    // 再走 pr::SessionBase::close()（其内会推通用 session_duration / record_session_end）。
     void close() override;
 
     static void start(std::shared_ptr<Pop3Session> self);
@@ -55,8 +55,8 @@ private:
     Pop3Context context_;
 };
 
-using TcpPop3Session = Pop3Session<TcpConnection>;
-using SslPop3Session = Pop3Session<SslConnection>;
+using TcpPop3Session = Pop3Session<pr::TcpConnection>;
+using SslPop3Session = Pop3Session<pr::SslConnection>;
 
 } // namespace mail_system
 

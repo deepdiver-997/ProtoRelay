@@ -1,7 +1,7 @@
 #ifndef MOCK_CONNECTION_H
 #define MOCK_CONNECTION_H
 #include "framework/connection/i_connection.h"
-#include "framework/session_base.h"   // finish_session 需要 SessionBase 完整类型
+#include "framework/session_base.h"   // finish_session 需要 pr::SessionBase 完整类型
 #include "mock_io_context.h"
 
 #include <boost/asio/io_context.hpp>
@@ -26,7 +26,7 @@ namespace mail_system {
 //     - 线程模式（start() 后）：任务由独立工作线程执行 → 还原 asio 的
 //       completion 投递语义，供并发/异步测试（跨线程投递用户缓冲区）。
 // ================================================================
-class MockConnection : public IConnection {
+class MockConnection : public pr::IConnection {
 public:
     MockConnection() = default;
     ~MockConnection() { stop_executor(); }
@@ -38,7 +38,7 @@ public:
     bool wait_idle(int timeout_ms = 3000) { return ctx_.wait_idle(timeout_ms); }
 
     // ---- exec_ctx_(真实 io_context)后台运行 ----
-    // SessionBase 09-06 起 do_async_write/close 等发起都 post 到 get_executor()
+    // pr::SessionBase 09-06 起 do_async_write/close 等发起都 post 到 get_executor()
     // (= exec_ctx_)。不跑它,发起队列饿死:响应永远上不了 wire。线程模式测试
     // (start() 后)调用此方法让 executor 有人跑;析构自动停。
     void start_executor() {
@@ -148,7 +148,7 @@ public:
         if (h) h(boost::system::error_code(), 0);
     }
 
-    // --- IConnection impl ---
+    // --- pr::IConnection impl ---
     void async_read(boost::asio::mutable_buffer buf, ReadHandler h) override {
         bool defer = false;
         {
@@ -180,14 +180,14 @@ public:
     }
 
     boost::asio::any_io_executor get_executor() override {
-        // watchdog（SessionBase::rearm/disarm_timeout）与发起序列化（09-06）的
+        // watchdog（pr::SessionBase::rearm/disarm_timeout）与发起序列化（09-06）的
         // socket 发起都 post 到这里。返回真实 io_context executor（自定义内联
         // executor 不满足 any_io_executor 的属性要求）——post 进队但测试不
         // run()，需要观察发起效果的用例调用 pump_executor() 手动排空。
         return boost::asio::any_io_executor{exec_ctx_->get_executor()};
     }
 
-    // 排空发起队列：SessionBase 09-06 起 socket 发起经 post 串行化，单测
+    // 排空发起队列：pr::SessionBase 09-06 起 socket 发起经 post 串行化，单测
     // 无常驻 IO 线程，用例在 do_async_read/write 之后调用本方法驱动发起。
     //
     // 【会话收尾契约 — 违反即 LSan 报 indirect leak（CI asan-unit 全红）】
@@ -268,7 +268,7 @@ private:
     };
 
     // ── 双 context 职责契约（09-06 单元层全真 asio 化定稿）──
-    // exec_ctx_（真实 io_context）＝【调度语义层】：SessionBase 的发起/关闭
+    // exec_ctx_（真实 io_context）＝【调度语义层】：pr::SessionBase 的发起/关闭
     //   串行队列、watchdog 定时器。单元层测试用 pump_executor()（restart+poll）
     //   驱动，与生产 IO 线程的 run() 走完全相同的 scheduler 语义。
     // ctx_（MockIoContext）＝【完成投递层】：mock 的 async_read/write 把完成

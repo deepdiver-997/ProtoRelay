@@ -2,7 +2,7 @@
 #include "framework/thread_pool/io_context_registry.h"
 #include "framework/log/log_macros.h"
 
-namespace mail_system {
+namespace pr {
 
 IOThreadPool::IOThreadPool(size_t thread_count)
     : m_thread_count(thread_count), m_running(false) {

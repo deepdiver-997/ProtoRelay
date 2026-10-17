@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
-#define MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
+#ifndef PR_FRAMEWORK_STORAGE_I_STORAGE_PROVIDER_H
+#define PR_FRAMEWORK_STORAGE_I_STORAGE_PROVIDER_H
 
 #include "framework/storage/i_read_stream.h"
 #include "framework/storage/i_write_stream.h"
@@ -16,9 +16,9 @@
 namespace pr {
 namespace storage {
 
-// 向后兼容：通用流原语已上移到 framework/storage（namespace pr，与
-// framework/db 同层）。IStorageProvider 与邮件命名规则（build_mail_body_key
-// 等）留在应用层。
+// 本文件已整体位于 framework/storage（2026-10-18 从 mail_system/back/storage
+// 上移，与流原语同层）。方法名里的 mail/attachment 是历史命名（首个消费方是
+// 邮件正文/附件），语义上就是通用的对象键构造。应用旧路径经 shim 兼容。
 using pr::IReadStream;
 using pr::IWriteStream;
 using pr::BufferedReadStream;
@@ -203,4 +203,4 @@ inline bool IStorageProvider::object_size(const std::string& storage_key,
 } // namespace storage
 } // namespace pr
 
-#endif // MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
+#endif // PR_FRAMEWORK_STORAGE_I_STORAGE_PROVIDER_H

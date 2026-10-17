@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_FAST_FSM_BASE_H
-#define MAIL_SYSTEM_FAST_FSM_BASE_H
+#ifndef PR_FRAMEWORK_FAST_FSM_BASE_H
+#define PR_FRAMEWORK_FAST_FSM_BASE_H
 // ──────────────────────────────────────────────────────────────────
 // FastFsmBase — 编译期数组 O(1) 状态机基类
 //
@@ -22,7 +22,7 @@
 #include <memory>
 #include <type_traits>
 
-namespace mail_system {
+namespace pr {
 
 template <typename ConnectionType, typename State, typename Event>
 class FastFsmBase {
@@ -128,6 +128,6 @@ private:
 // 当前收益不大，需要时再实现。
 // ══════════════════════════════════════════════════════════════════
 
-} // namespace mail_system
+} // namespace pr
 
-#endif // MAIL_SYSTEM_FAST_FSM_BASE_H
+#endif // PR_FRAMEWORK_FAST_FSM_BASE_H

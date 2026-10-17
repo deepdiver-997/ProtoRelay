@@ -20,7 +20,8 @@
 #include <thread>
 #include <vector>
 
-namespace mail_system { class MetricsServer; }
+namespace pr { class MetricsServer; }
+namespace mail_system { using pr::MetricsServer; }
 
 namespace mail_system {
 namespace persist_storage {
@@ -62,7 +63,7 @@ class PersistentQueue {
 public:
     PersistentQueue(
         std::shared_ptr<router::IShardRouter> shard_router,
-        std::shared_ptr<ThreadPoolBase> worker_pool
+        std::shared_ptr<pr::ThreadPoolBase> worker_pool
     );
 
     ~PersistentQueue();
@@ -88,7 +89,7 @@ public:
     void shutdown();
     bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
 
-    void inject_metrics(std::weak_ptr<MetricsServer> m) { metrics_ = std::move(m); }
+    void inject_metrics(std::weak_ptr<pr::MetricsServer> m) { metrics_ = std::move(m); }
 
     // 持久化回调: void(bool success, std::string error)
     using PersistCallback = std::function<void(bool, std::string)>;
@@ -142,7 +143,7 @@ private:
 
     // ---- 成员变量 ----
     std::shared_ptr<router::IShardRouter> m_shardRouter;
-    std::shared_ptr<ThreadPoolBase> worker_pool_;
+    std::shared_ptr<pr::ThreadPoolBase> worker_pool_;
     std::shared_ptr<mail_system::outbound::OutboundServer> outbound_server_;
     std::string local_domain_{"example.com"};
     size_t max_attempts_{8};               // outbox 行 max_attempts（默认对齐 kDefaultMaxAttempts）
@@ -161,7 +162,7 @@ private:
 
     std::atomic<bool> shutdown_;
     std::thread worker_thread_;
-    std::weak_ptr<MetricsServer> metrics_;
+    std::weak_ptr<pr::MetricsServer> metrics_;
 };
 
 } // namespace persist_storage

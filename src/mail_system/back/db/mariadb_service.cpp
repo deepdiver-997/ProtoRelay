@@ -1004,7 +1004,7 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
 // 接管 fd 所有权（析构时 close），续作回调里必须 release() 归还 mariadb。
 void MariaDBConnection::AsyncStmtOp::schedule_async_wait(int mask) {
     auto& D = MariaDbDriver::instance();
-    boost::asio::io_context* ctx = current_io_context();
+    boost::asio::io_context* ctx = pr::current_io_context();
     int fd = 0;
     unsigned int timeout_ms = 0;
     {
@@ -1127,7 +1127,7 @@ void MariaDBConnection::AsyncStmtOp::run() {
             if (done) done(result, r.s == Step::Done && exec_ok);
             return;
         }
-        if (current_io_context()) {
+        if (pr::current_io_context()) {
             schedule_async_wait(r.mask);   // io 线程：交还事件循环
             return;
         }

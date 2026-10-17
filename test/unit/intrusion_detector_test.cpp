@@ -1,4 +1,4 @@
-// IntrusionDetector 单元测试：会话记录、私网过滤、封禁阈值、LRU 上限、持久化。
+// pr::IntrusionDetector 单元测试：会话记录、私网过滤、封禁阈值、LRU 上限、持久化。
 //
 // 生产里它跑在 server_base 的会话结束路径上，此前无直接测试。
 // 注意两点测试约束：
@@ -16,7 +16,7 @@
 
 namespace {
 
-using mail_system::IntrusionDetector;
+using pr::IntrusionDetector;
 
 int g_pass = 0, g_fail = 0;
 void expect_true(bool c, const char* what) {
@@ -38,7 +38,7 @@ int main() {
 
     // 1. 未 enable：record_session 不记录
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.record_session("8.8.8.8", false);
         expect_true(d.size() == 0, "disabled detector records nothing");
         expect_true(!d.is_enabled(), "disabled by default");
@@ -46,7 +46,7 @@ int main() {
 
     // 2. 空 IP：即便 enable 也不记录
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.set_enabled(true);
         d.record_session("", false);
         expect_true(d.size() == 0, "empty ip ignored");
@@ -54,7 +54,7 @@ int main() {
 
     // 3. 私网 IP 全部跳过，公网 IP 正常记录
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.set_enabled(true);
         const char* privates[] = {"127.0.0.1", "::1", "0.0.0.0",
                                   "10.1.2.3", "192.168.0.1",
@@ -70,7 +70,7 @@ int main() {
 
     // 4. 计数：total_connections 累加，failed_count 仅未认证时累加
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.set_enabled(true);
         d.record_session("8.8.8.8", false);
         d.record_session("8.8.8.8", false);
@@ -83,7 +83,7 @@ int main() {
 
     // 5. 封禁阈值：默认 0 永不放行；设阈值后达标放行
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.set_enabled(true);
         for (int i = 0; i < 5; i++) d.record_session("1.1.1.1", false);
         expect_true(!d.is_banned("1.1.1.1"), "ban_threshold=0 never bans");
@@ -93,7 +93,7 @@ int main() {
         expect_true(d.is_banned("1.1.1.1"), "failed_count>=threshold bans");
         expect_true(!d.is_banned("9.9.9.9"), "sub-threshold ip not banned");
 
-        IntrusionDetector d2;
+        pr::IntrusionDetector d2;
         d2.set_enabled(true);
         d2.set_ban_threshold(3);
         for (int i = 0; i < 2; i++) d2.record_session("2.2.2.2", false);
@@ -102,7 +102,7 @@ int main() {
 
     // 6. LRU 上限：超 max_records 后记录数有界
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.set_enabled(true);
         d.set_max_records(5);
         for (int i = 0; i < 50; i++)
@@ -115,13 +115,13 @@ int main() {
     {
         auto file = (dir / "detector.json").string();
         {
-            IntrusionDetector d(file);
+            pr::IntrusionDetector d(file);
             d.set_enabled(true);
             d.record_session("8.8.8.8", false);
             d.record_session("1.1.1.1", true);
             expect_true(d.persist(), "persist returns true");
         }
-        IntrusionDetector d2(file);
+        pr::IntrusionDetector d2(file);
         expect_true(d2.restore(), "restore returns true");
         expect_true(d2.size() == 2, "restored record count");
         expect_true(d2.query("8.8.8.8").failed_count == 1, "restored failed_count");
@@ -132,7 +132,7 @@ int main() {
     {
         auto file = (dir / "lazy.json").string();
         {
-            IntrusionDetector d(file);
+            pr::IntrusionDetector d(file);
             d.set_enabled(true);
             d.set_persist_dirty_threshold(2);
             d.set_persist_interval(0);
@@ -147,17 +147,17 @@ int main() {
 
     // 9. 空 data_file：persist/restore 返回 false
     {
-        IntrusionDetector d("");
+        pr::IntrusionDetector d("");
         d.set_enabled(true);
         d.record_session("8.8.8.8", false);
         expect_true(!d.persist(), "empty data_file persist -> false");
-        IntrusionDetector d2("");
+        pr::IntrusionDetector d2("");
         expect_true(!d2.restore(), "empty data_file restore -> false");
     }
 
     // 10. setter 生效
     {
-        IntrusionDetector d;
+        pr::IntrusionDetector d;
         d.set_max_records(7);
         d.set_ban_threshold(4);
         d.set_persist_interval(30);
