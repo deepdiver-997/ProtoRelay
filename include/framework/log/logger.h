@@ -7,40 +7,25 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <array>
+#include <map>
+#include <shared_mutex>
+#include <atomic>
 #include <iostream>
-#include <fstream>
+#include <cstdlib>
 #include <filesystem>
 
 namespace pr {
 
 // ================================================================
-// LogModule — 日志模块枚举
-// 应用层通过注册模块来扩展此枚举，框架只定义基本常量
-// ================================================================
-enum class LogModule {
-    SERVER,           // 服务器基础日志
-    NETWORK,          // 网络连接日志
-    DATABASE,         // 数据库连接池日志
-    DATABASE_QUERY,   // 数据库查询详细日志
-    SMTP,             // SMTP 协议日志
-    SMTP_DETAIL,      // SMTP 详细状态机日志
-    SESSION,          // 会话管理日志
-    PERSISTENT_QUEUE, // 持久化队列日志
-    OUTBOUND,         // 出站投递日志
-    INBOUND,          // 入站验证日志 (SPF/DKIM/DMARC)
-    THREAD_POOL,      // 线程池日志
-    FILE_IO,          // 文件 I/O 日志
-    AUTH,             // 认证日志
-    IMAP,             // IMAP 协议日志
-    IMAP_DETAIL       // IMAP 详细状态机日志
-};
-
-// ================================================================
-// Logger — 框架级日志系统管理类 (Meyer's Singleton)
+// Logger —— 字符串注册表式日志核心（2026-10-18 去枚举化）
 //
-// 管理 15 个模块级 spdlog logger，共享同一组 sink。
-// 初始化后所有模块可通过 pr::log(module) 获取对应 logger。
+// 以前：模块 = 框架里的 enum + 定长数组 + 应用层 90 个宏三处登记，新增一个
+// 业务模块要侵入框架改三处。现在：模块就是一个字符串标签，首次使用惰性
+// 注册（复用 init 装好的共享 sink），框架对模块名零知识——新增业务模块
+// 直接 LOG_AT("新模块", info, ...)，框架一行不改。
+//
+// 兼容：应用侧 LOG_<MODULE>_<LEVEL> 便利别名在 mail_system/back/common/logger.h，
+// 统一委托 LOG_AT；init/string_to_level/get_instance 签名不变。
 // ================================================================
 class Logger {
 public:
@@ -55,19 +40,18 @@ public:
               spdlog::level::level_enum level = spdlog::level::info,
               bool enable_console_sink = true,
               bool enable_file_sink = true) {
+        std::unique_lock<std::shared_mutex> lock(mu_);
         if (m_initialized) return;
 
         try {
             if (!enable_console_sink && !enable_file_sink)
                 enable_console_sink = true;
 
-            std::vector<spdlog::sink_ptr> sinks;
-
             if (enable_console_sink) {
                 auto cs = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
                 cs->set_level(level);
                 cs->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] [%n] %@  %v");
-                sinks.push_back(cs);
+                sinks_.push_back(cs);
             }
 
             if (enable_file_sink) {
@@ -78,46 +62,22 @@ public:
                     log_file, max_file_size, max_files);
                 fs->set_level(level);
                 fs->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%n] %@  %v");
-                sinks.push_back(fs);
+                sinks_.push_back(fs);
             }
 
-            struct { LogModule m; const char* name; } mods[] = {
-                {LogModule::SERVER,           "SERVER"},
-                {LogModule::NETWORK,          "NETWORK"},
-                {LogModule::DATABASE,         "DATABASE"},
-                {LogModule::DATABASE_QUERY,   "DB_QUERY"},
-                {LogModule::SMTP,             "SMTP"},
-                {LogModule::SMTP_DETAIL,      "SMTP_DETAIL"},
-                {LogModule::SESSION,          "SESSION"},
-                {LogModule::PERSISTENT_QUEUE, "PERSISTENT_QUEUE"},
-                {LogModule::OUTBOUND,         "OUTBOUND"},
-                {LogModule::INBOUND,          "INBOUND"},
-                {LogModule::THREAD_POOL,      "THREAD_POOL"},
-                {LogModule::FILE_IO,          "FILE_IO"},
-                {LogModule::AUTH,             "AUTH"},
-                {LogModule::IMAP,             "IMAP"},
-                {LogModule::IMAP_DETAIL,      "IMAP_DETAIL"},
-            };
-            for (auto& mod : mods) {
-                m_loggers[static_cast<size_t>(mod.m)] =
-                    std::make_shared<spdlog::logger>(mod.name, sinks.begin(), sinks.end());
-            }
-
-            spdlog::set_default_logger(m_loggers[static_cast<size_t>(LogModule::SERVER)]);
-            spdlog::set_level(level);
+            level_ = level;
             // E2E 测试模式（PR_E2E_FLUSH_LOGS=1）强制每条 info 立即 flush，
             // 让 Python 进程能实时读到 server.log。否则 spdlog 默认只在
             // warn/error 触发 flush，30s 等待期内写入会留在 buffer。
-            // 注意：spdlog::set_default_logger 只影响 spdlog::info() 静态 API，
-            // 真正的写入路径走 m_loggers[mod.name] 实例，每个 logger 需单独 flush_on。
             const char* e2e_env = std::getenv("PR_E2E_FLUSH_LOGS");
-            const auto flush_level = (e2e_env && std::string(e2e_env) == "1")
+            flush_level_ = (e2e_env && std::string(e2e_env) == "1")
                 ? spdlog::level::info : spdlog::level::warn;
-            for (auto& lg : m_loggers) {
-                if (lg) lg->flush_on(flush_level);
-            }
-            spdlog::flush_on(flush_level);
+
             m_initialized = true;
+            lock.unlock();
+
+            // 默认 logger = SERVER 模块（保持旧行为：spdlog::info 静态 API 落 SERVER）
+            spdlog::set_default_logger(get("SERVER"));
             spdlog::info("Logger initialized");
         } catch (const spdlog::spdlog_ex& ex) {
             std::cerr << "Log init failed: " << ex.what() << std::endl;
@@ -135,24 +95,45 @@ public:
         return spdlog::level::info;
     }
 
-    std::shared_ptr<spdlog::logger> get_logger(LogModule m) {
-        size_t i = static_cast<size_t>(m);
-        if (i < m_loggers.size() && m_loggers[i]) return m_loggers[i];
-        return spdlog::default_logger();
+    // 惰性注册：模块标签首次使用时创建并复用共享 sink；未 init（测试零配置）
+    // 返回 spdlog 默认 logger。string_view + 透明比较器：热路径查找零分配。
+    std::shared_ptr<spdlog::logger> get(std::string_view module) {
+        {
+            std::shared_lock<std::shared_mutex> lock(mu_);
+            if (!m_initialized) return spdlog::default_logger();
+            auto it = loggers_.find(module);
+            if (it != loggers_.end()) return it->second;
+        }
+        std::unique_lock<std::shared_mutex> lock(mu_);
+        // double-check：可能已被并发首次使用注册
+        auto it = loggers_.find(module);
+        if (it != loggers_.end()) return it->second;
+        auto lg = std::make_shared<spdlog::logger>(std::string(module),
+                                                   sinks_.begin(), sinks_.end());
+        lg->set_level(level_);
+        lg->flush_on(flush_level_);
+        loggers_.emplace(std::string(module), lg);
+        return lg;
     }
 
     void set_level(spdlog::level::level_enum lv) {
+        std::unique_lock<std::shared_mutex> lock(mu_);
+        level_ = lv;
+        for (auto& [name, lg] : loggers_) lg->set_level(lv);
+        lock.unlock();
         spdlog::set_level(lv);
-        for (auto& lg : m_loggers) if (lg) lg->set_level(lv);
     }
 
-    void set_module_level(LogModule m, spdlog::level::level_enum lv) {
-        size_t i = static_cast<size_t>(m);
-        if (i < m_loggers.size() && m_loggers[i]) m_loggers[i]->set_level(lv);
+    void set_module_level(std::string_view module, spdlog::level::level_enum lv) {
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        auto it = loggers_.find(module);
+        if (it != loggers_.end()) it->second->set_level(lv);
     }
 
     void flush() {
-        for (auto& lg : m_loggers) if (lg) lg->flush();
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        for (auto& [name, lg] : loggers_) lg->flush();
+        lock.unlock();
         spdlog::default_logger()->flush();
     }
 
@@ -165,19 +146,23 @@ private:
     Logger& operator=(const Logger&) = delete;
 
     bool m_initialized = false;
-    static constexpr size_t kModuleCount = 15;
-    std::array<std::shared_ptr<spdlog::logger>, kModuleCount> m_loggers;
+    std::vector<spdlog::sink_ptr> sinks_;
+    // 透明比较器：string_view 键查找免构造 std::string（热路径零分配）
+    std::map<std::string, std::shared_ptr<spdlog::logger>, std::less<>> loggers_;
+    spdlog::level::level_enum level_ = spdlog::level::info;
+    spdlog::level::level_enum flush_level_ = spdlog::level::warn;
+    mutable std::shared_mutex mu_;
 };
 
 // ---- 便捷函数 ----
-inline std::shared_ptr<spdlog::logger> log(LogModule m) {
-    return Logger::get_instance().get_logger(m);
+inline std::shared_ptr<spdlog::logger> log(std::string_view module) {
+    return Logger::get_instance().get(module);
 }
 inline void set_log_level(spdlog::level::level_enum lv) {
     Logger::get_instance().set_level(lv);
 }
-inline void set_module_log_level(LogModule m, spdlog::level::level_enum lv) {
-    Logger::get_instance().set_module_level(m, lv);
+inline void set_module_log_level(std::string_view module, spdlog::level::level_enum lv) {
+    Logger::get_instance().set_module_level(module, lv);
 }
 
 } // namespace pr
