@@ -40,6 +40,12 @@ public:
     // RST_STREAM：客户端主动掐流 → 清掉该流装配态（session 对齐清其流控态）
     void abort_stream(int32_t stream_id);
 
+    // 连接关闭（GOAWAY/close_protocol）：清全部装配态
+    void clear() { heads_.clear(); }
+
+    // ── 测试观测口 ──
+    size_t assembly_count() const { return heads_.size(); }
+
     // 对端 SETTINGS_HEADER_TABLE_SIZE → 配到解码器（session 只负责流控窗，透传此值）
     void apply_header_table_size(uint32_t n) { decoder_.set_header_table_size(n); }
 

@@ -28,6 +28,11 @@ int  static_table_find(const std::string& name, const std::string& value); // �
 // Huffman 解码（输入为 Huffman 编码字节，输出 ASCII）。失败返回 false。
 bool huffman_decode(const std::string& in, std::string& out);
 
+// 动态表容量上限：本端未广告更大表（不发 SETTINGS_HEADER_TABLE_SIZE → 协商默认
+// 4096）。对端经 SETTINGS 或解码块内的容量更新要求更大都钳到这里——不钳的话一条
+// 连接能把动态表撑到 ~4GB（内存 DoS；RFC 7541 §4.2 要求按解码错误处理）。
+inline constexpr uint32_t kMaxHeaderTableSize = 4096;
+
 // 连接级有状态解码器：每个 H2 连接一个实例
 class HeaderDecoder {
 public:

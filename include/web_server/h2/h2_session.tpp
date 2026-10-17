@@ -134,7 +134,13 @@ void H2Session<ConnectionType>::handle_connection_frame(const Frame& f) {
                    (uint32_t((uint8_t)f.payload[1]) << 16) |
                    (uint32_t((uint8_t)f.payload[2]) << 8) |
                    (uint32_t((uint8_t)f.payload[3]))) : 0;
-            if (inc) conn_send_window_ += (int32_t)inc;
+            // RFC 9113 §6.9：0 增量 = PROTOCOL_ERROR；窗口越过 2^31-1 = FLOW_CONTROL_ERROR
+            // （不校验的话 inc 累加会把 int32 算成负数 → 窗口永 0 → 发送侧静默停滞）
+            if (inc == 0) { close_protocol(ErrorCode::PROTOCOL_ERROR); break; }
+            if (inc > (uint32_t)((1u << 31) - 1) - (uint32_t)conn_send_window_) {
+                close_protocol(ErrorCode::FLOW_CONTROL_ERROR); break;
+            }
+            conn_send_window_ += (int32_t)inc;
             prune_streams();
             for (auto& kv : streams_) {
                 H2Stream& s = kv.second;
@@ -165,7 +171,15 @@ void H2Session<ConnectionType>::handle_stream_frame(const Frame& f) {
                (uint32_t((uint8_t)f.payload[1]) << 16) |
                (uint32_t((uint8_t)f.payload[2]) << 8) |
                (uint32_t((uint8_t)f.payload[3]))) : 0;
-        if (inc) it->second.send_window += (int32_t)inc;
+        // 流级窗口越界是流错误（RST_STREAM），不动整条连接（RFC 9113 §6.9）
+        if (inc == 0 || inc > (uint32_t)((1u << 31) - 1) - (uint32_t)it->second.send_window) {
+            send_frame(build_rst_stream(f.stream_id, inc == 0 ? ErrorCode::PROTOCOL_ERROR
+                                                              : ErrorCode::FLOW_CONTROL_ERROR));
+            codec_.abort_stream(f.stream_id);
+            streams_.erase(it);
+            return;
+        }
+        it->second.send_window += (int32_t)inc;
         if (!it->second.pending_body.empty()) drain_stream(it->second);
         return;
     }
@@ -179,13 +193,31 @@ void H2Session<ConnectionType>::handle_stream_frame(const Frame& f) {
     if (!cr.protocol_ok) { close_protocol(cr.error); return; }
 
     prune_streams();                                     // 安全点 GC 已完结流
+    // 并发流上限 = SETTINGS 广告值（此前只广告不强制：一条连接可开无限流，
+    // 配合无上限的 st.body 即内存 DoS）。超限按 RFC 9113 §5.1.2 拒流不断连。
+    if (f.type == FrameType::HEADERS &&
+        streams_.find(f.stream_id) == streams_.end() &&
+        streams_.size() >= kMaxConcurrentStreams) {
+        send_frame(build_rst_stream(f.stream_id, ErrorCode::REFUSED_STREAM));
+        codec_.abort_stream(f.stream_id);
+        return;
+    }
     auto& st = streams_[f.stream_id];                    // 惰性建【流控】流
     st.id = f.stream_id;
     if (st.state == StreamState::IDLE) {
         st.state = StreamState::OPEN;
         st.send_window = peer_stream_window_;            // 新流发送窗口 = 对端广告值
     }
-    if (f.type == FrameType::DATA) st.body += f.payload; // 静态 GET 无体，仅占位累积
+    if (f.type == FrameType::DATA) {
+        // 请求体上限：静态 GET/HEAD 无 body，超限 = 恶意或错联，掐流不断连
+        if (st.body.size() + f.payload.size() > kMaxRequestBodyBytes) {
+            send_frame(build_rst_stream(f.stream_id, ErrorCode::ENHANCE_YOUR_CALM));
+            codec_.abort_stream(f.stream_id);
+            streams_.erase(f.stream_id);
+            return;
+        }
+        st.body += f.payload;                            // 静态 GET 无体，仅占位累积
+    }
     if (cr.request && !st.served) {
         st.served = true;
         serve_stream(st, *cr.request);
@@ -311,6 +343,7 @@ void H2Session<ConnectionType>::close_protocol(ErrorCode code) {
     set_current_state(static_cast<int>(ConnState::CLOSED));
     send_frame(build_goaway(last_client_stream_, code));
     this->streams_.clear();
+    this->codec_.clear();                                // 装配态（heads_）同步回收
     this->close();
 }
 

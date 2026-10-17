@@ -101,6 +101,15 @@ std::string build_goaway(uint32_t last_stream, ErrorCode code) {
     return serialize_frame(FrameType::GOAWAY, 0, kNoStreamId, p);
 }
 
+std::string build_rst_stream(uint32_t stream_id, ErrorCode code) {
+    std::string p;
+    p += char((uint32_t(code) >> 24) & 0xff);
+    p += char((uint32_t(code) >> 16) & 0xff);
+    p += char((uint32_t(code) >> 8) & 0xff);
+    p += char(uint32_t(code) & 0xff);
+    return serialize_frame(FrameType::RST_STREAM, 0, stream_id, p);
+}
+
 std::string build_window_update(uint32_t stream_id, uint32_t increment) {
     std::string p;
     p += char((increment >> 24) & 0x7f);

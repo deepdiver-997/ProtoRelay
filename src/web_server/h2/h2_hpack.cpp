@@ -181,6 +181,8 @@ bool HeaderDecoder::read_string(const std::string& b, size_t& pos, std::string& 
 }
 
 bool HeaderDecoder::set_header_table_size(uint32_t n) {
+    // 钳制到 kMaxHeaderTableSize：SETTINGS 与解码块内的容量更新都过这里（单收口点）
+    if (n > kMaxHeaderTableSize) n = kMaxHeaderTableSize;
     capacity_ = n;
     trim();
     return true;

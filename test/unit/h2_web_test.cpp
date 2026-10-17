@@ -150,6 +150,65 @@ void test_codec_feed() {
           !bad.protocol_ok && bad.error == web_server::h2::ErrorCode::PROTOCOL_ERROR);
 }
 
+// ── H2 资源上限与回收（2026-10-18 修复的回归）─────────────────────
+// 修复前：heads_ 条目只在 RST/GOAWAY 清（每请求泄漏一份头块+解码结果）；
+//         头块/请求体/流数无上限（单连接内存 DoS）；HPACK 表容量不设限；
+//         PADDED+PRIORITY 同设时前缀剥离顺序错（RFC 7541 §6.2）。
+void test_h2_resource_limits() {
+    using FT = web_server::h2::FrameType;
+    using EC = web_server::h2::ErrorCode;
+    auto b = build_get_block("/idx.html");
+
+    // 1) PADDED+PRIORITY 同设：布局按 RFC 7541 §6.2 —— padlen 字节最前、其后 5B 优先级
+    {
+        web_server::codec::H2Codec c;
+        std::string payload;
+        payload += char(2);          // pad length
+        payload += "12345";          // 5B priority（依赖流 4B + 权重 1B）
+        payload += b;                // HPACK fragment
+        payload += "PP";             // padding
+        auto r = c.feed(1, FT::HEADERS, 0x2D /*END_STREAM|END_HEADERS|PADDED|PRIORITY*/, payload);
+        check("h2:PADDED+PRIORITY 剥离后产出请求",
+              r.protocol_ok && r.request && r.request->path == "/idx.html");
+        check("h2:请求产出后装配态即回收", c.assembly_count() == 0);
+        // 同流后续 DATA：装配态已回收，安全忽略（不崩、不产出）
+        auto d = c.feed(1, FT::DATA, 0x01, "xx");
+        check("h2:已回收流的 DATA 安全忽略", d.protocol_ok && !d.request);
+    }
+
+    // 2) 头块上限：HEADERS 32KB（无 END_HEADERS）+ CONTINUATION 40KB > 64KB → 掐
+    {
+        web_server::codec::H2Codec c;
+        auto r = c.feed(1, FT::HEADERS, 0x00, std::string(32 * 1024, '\x00'));
+        check("h2:头块前半未超限", r.protocol_ok && !r.request);
+        r = c.feed(1, FT::CONTINUATION, 0x04, std::string(40 * 1024, '\x00'));
+        check("h2:头块超 64KB → ENHANCE_YOUR_CALM",
+              !r.protocol_ok && r.error == EC::ENHANCE_YOUR_CALM);
+    }
+
+    // 3) HPACK 动态表容量钳制：SETTINGS 与解码块内更新都钳到 4096（本端未广告更大表）
+    {
+        web_server::h2::HeaderDecoder dec;
+        dec.set_header_table_size(1u << 30);
+        check("h2:SETTINGS 容量钳到 4096", dec.header_table_size() == 4096);
+
+        // 解码块内的容量更新指令（001 + 5 位前缀全 1 + varint 余量）
+        auto cap_upd = [](uint32_t v) {
+            std::string s(1, '\x3F');
+            uint32_t x = v - 31;
+            while (x >= 128) { s += char((x & 0x7f) | 0x80); x >>= 7; }
+            s += char(x);
+            return s;
+        };
+        std::vector<web_server::h2::Header> hdrs;
+        check("h2:解码块大容量更新解析成功", dec.decode(cap_upd(1u << 20), hdrs));
+        check("h2:解码块容量同样钳到 4096", dec.header_table_size() == 4096);
+
+        dec.set_header_table_size(4096);
+        check("h2:合法容量 4096 生效", dec.header_table_size() == 4096);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -158,6 +217,7 @@ int main() {
     test_framer_roundtrip();
     test_hpack_roundtrip();
     test_codec_feed();
+    test_h2_resource_limits();
     std::cerr << "h2_web_test  pass=" << g_pass << " fail=" << g_fail << '\n';
     std::cout << "pass=" << g_pass << " fail=" << g_fail << '\n';
     return g_fail == 0 ? 0 : 1;

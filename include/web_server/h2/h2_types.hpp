@@ -25,6 +25,12 @@ inline constexpr size_t kFrameHeaderSize = 9;   // len(24) + type(8) + flags(8) 
 inline constexpr uint32_t kDefaultWindow = 65535;   // 初始流/连接发送窗口
 inline constexpr uint32_t kNoStreamId   = 0;        // 连接级帧的 stream_id
 
+// ── 资源上限（2026-10-18：此前 H2 路径全部无上限，一条连接可打爆内存）──
+// 并发流上限 = 我们在 SETTINGS 里广告的 MAX_CONCURRENT_STREAMS（framer 同值）
+inline constexpr size_t kMaxConcurrentStreams = 128;
+// 单请求体上限：静态 GET/HEAD 无 body；webmail 表单/上传走分route再放宽
+inline constexpr size_t kMaxRequestBodyBytes  = 1024 * 1024;
+
 // ── 帧类型（RFC 9113 §6）─────────────────────────────────────────
 enum class FrameType : uint8_t {
     DATA = 0x0,

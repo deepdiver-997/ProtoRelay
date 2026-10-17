@@ -33,6 +33,7 @@ std::string build_headers(uint32_t stream_id, const std::string& block, bool end
 std::string build_headers_200(uint32_t stream_id, bool end_stream = false);
 std::string build_goaway(uint32_t last_stream, ErrorCode code);
 std::string build_window_update(uint32_t stream_id, uint32_t increment);
+std::string build_rst_stream(uint32_t stream_id, ErrorCode code);
 
 } // namespace h2
 } // namespace web_server
