@@ -42,12 +42,32 @@ void IOThreadPool::start() {
             // 注册 thread_local io_context：DB 非阻塞等待（mariadb async）据此
             // 决定用 io_context.async_wait（io 线程不阻塞）还是阻塞 poll。
             set_current_io_context(m_io_contexts[i].get());
-            try {
-                m_io_contexts[i]->run();
-            } catch (const std::exception& e) {
-                LOG_THREAD_POOL_ERROR("Exception in IO thread: {}", e.what());
-            } catch (...) {
-                LOG_THREAD_POOL_ERROR("Unknown exception in IO thread");
+            // handler 抛出的异常会穿出 run()。必须兜住并重进：不重进的后果是本线程
+            // 退出、work guard 仍挂着无人察觉，这个 io_context 从此再无线程服务——
+            // 轮询分到它的全部连接读/写/定时器永不完成，watchdog 同挂其上，进程活着
+            // 但 1/N 连接静默僵死（坏 CIDR 配置 + 任一入站 RCPT 即可远程触发，见
+            // 2026-10-17 stoi 系列修复）。重进后出事的那条会话由自己的 watchdog 超时
+            // 回收，爆炸半径收敛到单连接。
+            for (;;) {
+                try {
+                    m_io_contexts[i]->run();
+                    break;   // 正常返回 = stop() 已释放 work guard，线程退出
+                } catch (const std::exception& e) {
+                    const auto n =
+                        m_exceptions_total.fetch_add(1, std::memory_order_relaxed) + 1;
+                    LOG_THREAD_POOL_ERROR("Exception escaped handler in IO thread #{} "
+                                          "(total={}): {} — re-entering run(), context kept serving",
+                                          i, n, e.what());
+                } catch (...) {
+                    const auto n =
+                        m_exceptions_total.fetch_add(1, std::memory_order_relaxed) + 1;
+                    LOG_THREAD_POOL_ERROR("Non-standard exception escaped handler in IO "
+                                          "thread #{} (total={}) — re-entering run()", i, n);
+                }
+                // asio 语义：异常穿出 run() 时 stopped 标志不置位（只有正常返回/stop()
+                // 会停），本可直接再 run()。这里防御性判断一次；restart() 要求无线程
+                // 在 run 内——每 context 恰一线程且此刻在循环里，安全。
+                if (m_io_contexts[i]->stopped()) m_io_contexts[i]->restart();
             }
             set_current_io_context(nullptr);
         });

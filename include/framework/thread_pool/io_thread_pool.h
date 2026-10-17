@@ -7,6 +7,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/strand.hpp>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -68,7 +69,7 @@ public:
 
     /**
      * @brief 获取io_context
-     * 
+     *
      * @return std::shared_ptr<boost::asio::io_context> io_context的共享指针
      */
     boost::asio::io_context& get_io_context() {
@@ -76,6 +77,14 @@ public:
             throw std::runtime_error("IOThreadPool is stopped");
         size_t idx = m_id_counter.fetch_add(1, std::memory_order_relaxed) % m_thread_count;
         return *m_io_contexts[idx];
+    }
+
+    /**
+     * @brief handler 异常穿出 run() 后被线程循环捕获的累计次数（见 io_thread_pool.cpp
+     * 的重进循环）。正常时恒 0；持续增长 = 有 handler 在反复抛，该查日志定位了。
+     */
+    uint64_t exceptions_total() const {
+        return m_exceptions_total.load(std::memory_order_relaxed);
     }
 
 protected:
@@ -128,6 +137,7 @@ private:
     std::atomic<bool> m_running;                                 ///< 线程池是否运行中
     std::mutex m_mutex;                             ///< 互斥锁，保护线程池状态
     std::atomic<int> m_id_counter{0};                            ///< 任务ID计数器
+    std::atomic<uint64_t> m_exceptions_total{0};    ///< handler 异常穿出 run() 的累计（见 exceptions_total）
 };
 
 } // namespace mail_system

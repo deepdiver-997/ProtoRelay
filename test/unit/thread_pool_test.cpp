@@ -123,6 +123,46 @@ int main() {
         expect_true(!pool.is_running(), "io pool stopped");
     }
 
+    // ── 异常隔离（2026-10-17）────────────────────────────────────
+    // 修复前：boost::asio::thread_pool 工作线程不接异常 → post 的任务抛出 =
+    // std::terminate 整进程；io 线程 run() 被 catch 后退出不重进 → 该 context 上
+    // 全部连接静默僵死。修复后：任务边界捕获 + 计数，线程/context 继续服务。
+    {
+        BoostThreadPool pool(1);
+        pool.start();
+        std::atomic<bool> after{false};
+        pool.post([] { throw std::runtime_error("boom-post"); });
+        pool.post([&after] { after = true; });
+        expect_true(wait_until([&] { return after.load(); }),
+                    "boost pool survives a throwing post task");
+        expect_true(pool.exceptions_total() == 1, "boost post exception counted");
+
+        // submit：packaged_task 把异常存进 future，池不受伤，.get() 按原语义 rethrow
+        auto fut = pool.submit([]() -> int { throw std::runtime_error("boom-submit"); });
+        bool rethrew = false;
+        try { (void)fut.get(); } catch (const std::runtime_error&) { rethrew = true; }
+        expect_true(rethrew, "submit exception reaches the future");
+        expect_true(pool.exceptions_total() == 1, "submit exception not in post counter");
+        std::atomic<bool> still{false};
+        pool.post([&still] { still = true; });
+        expect_true(wait_until([&] { return still.load(); }),
+                    "boost pool alive after submit rethrow");
+        pool.stop();
+    }
+    {
+        IOThreadPool pool(2);
+        pool.start();
+        auto& ctx = pool.get_io_context();
+        std::atomic<bool> after{false};
+        boost::asio::post(ctx, [] { throw std::runtime_error("boom-handler"); });
+        boost::asio::post(ctx, [&after] { after = true; });
+        expect_true(wait_until([&] { return after.load(); }),
+                    "io context keeps serving after a handler threw");
+        expect_true(pool.exceptions_total() == 1, "io handler exception counted");
+        pool.stop();
+        expect_true(!pool.is_running(), "io pool stops cleanly after exception");
+    }
+
     // get_io_context 在 stop 后抛异常
     {
         IOThreadPool pool(1);
