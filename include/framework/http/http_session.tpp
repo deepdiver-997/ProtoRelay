@@ -479,6 +479,20 @@ void HttpSession<ConnectionType>::serve() {
     bool close = !req.keep_alive() || req.version == "HTTP/1.0";
     bool head_only = (req.method == "HEAD");
 
+    // 动态请求处理器（API 路由）：先停读再认领。异步完成的窗口内不消费流水线
+    //（认领后 complete → finish_response → drain_buffered_commands() 解开）；
+    // 同步完成时 complete 只是把响应排进 exec_ctx_，pause 依旧由 drain 收口。
+    // 未认领则解停落静态路径，与无 handler 时完全一致。
+    if (api_handler_) {
+        this->set_paused(true);
+        auto self = self_ptr();
+        auto complete = [self, close](HttpResponse r) mutable {
+            self->send_response(std::move(r), close);
+        };
+        if (api_handler_(req, std::move(complete))) return;
+        this->set_paused(false);
+    }
+
     // 路由/防穿越/定长/ctype 与 H2 共用同一份 MessageProcessor —— 避免两份重复。
     // 只有"体怎么送"按传输层区分：这里走 send_file（小文件合并写 / 大文件 sendfile）。
     pr::http::HttpResponse r = process_static_request(req, doc_root_);
@@ -487,6 +501,28 @@ void HttpSession<ConnectionType>::serve() {
         return;
     }
     send_file(r.full_path, r.content_type, r.content_length, close, head_only);
+}
+
+// API 响应：头字段齐全（Content-Type / extra_headers / Content-Length），
+// 体走内联合并写——API 体都是小 JSON，不值得 sendfile。
+template <typename ConnectionType>
+void HttpSession<ConnectionType>::send_response(HttpResponse r, bool close) {
+    std::string head = "HTTP/1.1 " + std::to_string(r.status) + " " +
+                       (r.status_text.empty() ? HttpResponse::reason_phrase(r.status)
+                                              : r.status_text) + "\r\n";
+    head += "Content-Type: " + r.content_type + "\r\n";
+    head += r.extra_headers;   // 逐条自带 CRLF（Set-Cookie / Cache-Control 等）
+    head += "Content-Length: " + std::to_string(r.body.size()) + "\r\n";
+    head += (close ? "Connection: close\r\n" : "Connection: keep-alive\r\n");
+    head += "\r\n";
+    auto self = self_ptr();
+    std::string resp = head + r.body;
+    this->do_async_write(resp,
+        [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
+                      const boost::system::error_code& ec) mutable {
+            if (ec) { self->handle_error(ec); return; }
+            self->finish_response(!close);
+        });
 }
 
 template <typename ConnectionType>

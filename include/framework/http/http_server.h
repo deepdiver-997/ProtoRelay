@@ -28,6 +28,10 @@ public:
 
     const std::string& doc_root() const { return doc_root_; }
 
+    // 动态请求处理器（API 路由，见 ApiHandler 契约）：start() 前设置一次，
+    // 工厂注入到每个新连接的 session。不设置 = 纯静态服务器（demo 默认）。
+    void set_api_handler(ApiHandler h) { api_handler_ = std::move(h); }
+
 protected:
     std::shared_ptr<TcpHttpSession> make_tcp_session(
         std::unique_ptr<pr::TcpConnection> conn,
@@ -42,6 +46,7 @@ private:
     std::shared_ptr<HttpFsm<pr::TcpConnection>> m_tcp_fsm;
     std::shared_ptr<HttpFsm<pr::SslConnection>> m_ssl_fsm;
     std::string doc_root_;
+    ApiHandler api_handler_;   // 业务 API 路由（可空），工厂转发给每个 session
 };
 
 } // namespace pr::http

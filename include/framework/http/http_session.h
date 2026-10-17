@@ -30,6 +30,16 @@ namespace pr::http {
 
 template <typename ConnectionType> class HttpFsm;
 
+// 认领式动态请求处理器（API 路由等业务钩子，framework 不解释其内容）：
+//   返回 true  = 本请求由 handler 负责。complete 恰好调用一次，可在任意线程
+//               （响应写经 exec_ctx_ 串行化）；延迟完成时 handler 必须按值拷贝
+//               所需请求数据——serve() 返回后 HttpRequest 引用即失效。
+//               认领后未调用 complete → 挂起至 watchdog 超时收尾。
+//   返回 false = 未认领，落静态文件路径。
+// 静态演示应用（webServer/h2web）不设置它，行为与从前完全一致。
+using ApiHandler =
+    std::function<bool(const HttpRequest&, std::function<void(HttpResponse)>)>;
+
 template <typename ConnectionType>
 class HttpSession : public pr::SessionBase<ConnectionType> {
     friend class HttpFsm<ConnectionType>;
@@ -77,6 +87,8 @@ static constexpr size_t kSmallFileThreshold = 64 * 1024;
     HttpRequest& request() { return request_; }
     // 由 HttpServer 工厂注入静态根目录
     void set_doc_root(std::string d) { doc_root_ = std::move(d); }
+    // 由 HttpServer 工厂注入动态请求处理器（业务 API 路由；可空）
+    void set_api_handler(ApiHandler h) { api_handler_ = std::move(h); }
 
     // header 结束是否还有 body 要读（由 determine_body_framing 决定）
     bool has_body_pending() const { return body_pending_; }
@@ -114,6 +126,7 @@ private:
 
     HttpRequest request_;
     std::string doc_root_;   // 静态根目录（工厂注入）
+    ApiHandler api_handler_;  // 动态请求处理器（工厂注入，可空）
     std::shared_ptr<HttpFsm<ConnectionType>> fsm_;
     std::atomic<int> state_{static_cast<int>(HttpState::WAIT_REQUEST_LINE)};
     HttpEvent next_event_{HttpEvent::REQUEST_LINE};
@@ -132,6 +145,9 @@ private:
                              const std::string& content_type, int64_t content_length,
                              bool has_body, bool close);
     void send_simple(int status, std::string body, bool close);
+    // API 响应（api_handler 的 complete 落点）：走 HttpResponse 全量字段——
+    // content_type=application/json、extra_headers（Set-Cookie 等）都进头。
+    void send_response(HttpResponse r, bool close);
     void send_file(const std::string& full_path, const std::string& content_type,
                    int64_t length, bool close, bool head_only);
     // 便携式分块读文件 → async_write（非零拷贝路径；Linux 见 sendfile 备注）

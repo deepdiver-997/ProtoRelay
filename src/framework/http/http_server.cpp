@@ -25,6 +25,7 @@ std::shared_ptr<TcpHttpSession> HttpServer::make_tcp_session(
 {
     auto session = std::make_shared<TcpHttpSession>(this, std::move(conn), m_tcp_fsm);
     session->set_doc_root(doc_root_);
+    session->set_api_handler(api_handler_);
     return session;
 }
 
@@ -34,6 +35,7 @@ std::shared_ptr<SslHttpSession> HttpServer::make_ssl_session(
 {
     auto session = std::make_shared<SslHttpSession>(this, std::move(conn), m_ssl_fsm);
     session->set_doc_root(doc_root_);
+    session->set_api_handler(api_handler_);
     return session;
 }
 

@@ -1,0 +1,24 @@
+{
+  "address": "0.0.0.0",
+  "system_name": "proto-relay-webmail",
+  "system_domain": "scut.email",
+  "listeners": [
+    { "type": "tcp", "port": 8081, "auth_policy": "off", "advertise_starttls": false }
+  ],
+  "use_database": true,
+  "db_config_file": "db_config.json",
+  "maxConnections": 10000,
+  "io_thread_count": 2,
+  "worker_thread_count": 2,
+  "perf_mode": true,
+  "log_level": "info",
+  "log_to_console": true,
+  "log_to_file": false,
+  "storage": {
+    "provider": "local",
+    "local": {
+      "mail_path": "config/storage/mail",
+      "attachment_path": "config/storage/attachments"
+    }
+  }
+}
