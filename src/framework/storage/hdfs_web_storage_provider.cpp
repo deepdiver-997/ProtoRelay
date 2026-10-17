@@ -1,4 +1,4 @@
-#include "mail_system/back/storage/hdfs_web_storage_provider.h"
+#include "framework/storage/hdfs_web_storage_provider.h"
 
 #include "framework/storage/buffered_upload_stream.h"
 
@@ -12,7 +12,7 @@
 #include <sstream>
 #include <string>
 
-namespace mail_system {
+namespace pr {
 namespace storage {
 
 namespace {
@@ -419,4 +419,4 @@ bool HdfsWebStorageProvider::webhdfs_delete(const std::string& relative_path, Io
 }
 
 } // namespace storage
-} // namespace mail_system
+} // namespace pr

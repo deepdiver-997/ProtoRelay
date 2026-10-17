@@ -3,6 +3,7 @@
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/boost_thread_pool.h"
 #include "framework/log/log_macros.h"
+#include "framework/storage/io_error.h"
 #include "mail_system/back/router/hash_shard_router.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/router/table_shard_router.h"
@@ -30,7 +31,7 @@ namespace bootstrap {
 
 // 前置声明（实现见下）：主 DB 池工厂，从原 ServerBase 构造函数原样搬来
 static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config);
-static std::shared_ptr<storage::IStorageProvider> build_main_storage(const ServerConfig& config);
+static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config);
 
 Assembled assemble(const ServerConfig& config, const Options& opts) {
     Assembled out;
@@ -67,7 +68,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     // ---- 3. 主存储 ----
     auto main_storage = build_main_storage(config);
     {
-        storage::IoError err;
+        pr::storage::IoError err;
         if (!main_storage->ensure_ready(err))
             throw std::runtime_error("Storage init failed: " + err.message);
     }
@@ -92,7 +93,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     // ---- 4. Shard Router ----
     auto& rc = config.router_config;
     std::vector<std::shared_ptr<pr::DBPool>> shard_db_pools;
-    std::vector<std::shared_ptr<storage::IStorageProvider>> shard_storages;
+    std::vector<std::shared_ptr<pr::storage::IStorageProvider>> shard_storages;
 
     if (!rc.shards.empty()) {
         for (size_t i = 0; i < rc.shards.size() && i < rc.shard_count; ++i) {
@@ -111,7 +112,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
             }
             shard_db_pools.push_back(sdb ? sdb : main_db_pool);
 
-            std::shared_ptr<storage::IStorageProvider> sst;
+            std::shared_ptr<pr::storage::IStorageProvider> sst;
             if (!se.storage_root.empty()) {
                 auto mail_dir = se.storage_root + "/mail";
                 auto att_dir  = se.storage_root + "/attachments";
@@ -182,13 +183,13 @@ static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config
     return nullptr;
 }
 
-static std::shared_ptr<storage::IStorageProvider> build_main_storage(const ServerConfig& config) {
+static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config) {
     const auto& sc = config.storage;
-    switch (storage::provider_type_from_string(sc.provider)) {
-    case storage::StorageProviderType::Distributed:
+    switch (pr::storage::provider_type_from_string(sc.provider)) {
+    case pr::storage::StorageProviderType::Distributed:
         return std::make_shared<storage::DistributedFileStorageProvider>(
             sc.distributed.roots, sc.distributed.replica_count);
-    case storage::StorageProviderType::HdfsWeb:
+    case pr::storage::StorageProviderType::HdfsWeb:
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
         return std::make_shared<storage::HdfsWebStorageProvider>(
             sc.hdfs.endpoint, sc.hdfs.base_path, sc.hdfs.user,
@@ -197,9 +198,9 @@ static std::shared_ptr<storage::IStorageProvider> build_main_storage(const Serve
 #else
         throw std::runtime_error("hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON");
 #endif
-    case storage::StorageProviderType::Null:
+    case pr::storage::StorageProviderType::Null:
         return std::make_shared<storage::NullStorageProvider>();
-    case storage::StorageProviderType::S3:
+    case pr::storage::StorageProviderType::S3:
 #ifdef ENABLE_S3_STORAGE
         return std::make_shared<storage::S3StorageProvider>(
             sc.s3.endpoint, sc.s3.bucket,
@@ -209,7 +210,7 @@ static std::shared_ptr<storage::IStorageProvider> build_main_storage(const Serve
 #else
         throw std::runtime_error("s3 requires ENABLE_S3_STORAGE=ON");
 #endif
-    case storage::StorageProviderType::Local:
+    case pr::storage::StorageProviderType::Local:
     default:
         if (!std::filesystem::exists(sc.local.mail_path))
             std::filesystem::create_directories(sc.local.mail_path);

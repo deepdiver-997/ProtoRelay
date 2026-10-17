@@ -287,8 +287,8 @@ set(COMMON_SRCS
     src/framework/thread_pool/io_thread_pool.cpp
     src/framework/thread_pool/io_context_registry.cpp
     src/mail_system/back/algorithm/snow.cpp
-    src/mail_system/back/storage/distributed_file_storage_provider.cpp
-    src/mail_system/back/storage/local_file_storage_provider.cpp
+    src/framework/storage/distributed_file_storage_provider.cpp
+    src/framework/storage/local_file_storage_provider.cpp
     src/framework/storage/local_file_write_stream.cpp
     src/mail_system/back/mailServer/outbound/outbox_repository.cpp
     src/mail_system/back/mailServer/outbound/outbound_utils.cpp
@@ -312,11 +312,11 @@ set(COMMON_SRCS
 )
 
 if(ENABLE_HDFS_WEB_STORAGE)
-    list(APPEND COMMON_SRCS src/mail_system/back/storage/hdfs_web_storage_provider.cpp)
+    list(APPEND COMMON_SRCS src/framework/storage/hdfs_web_storage_provider.cpp)
 endif()
 if(ENABLE_S3_STORAGE)
     add_compile_definitions(ENABLE_S3_STORAGE=1)
-    list(APPEND COMMON_SRCS src/mail_system/back/storage/s3_storage_provider.cpp)
+    list(APPEND COMMON_SRCS src/framework/storage/s3_storage_provider.cpp)
 endif()
 if(HAVE_MARIADB)
     list(APPEND COMMON_SRCS
@@ -523,7 +523,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(mail_body_writer_test
         test/unit/mail_body_writer_test.cpp
         src/framework/storage/local_file_write_stream.cpp
-        src/mail_system/back/storage/local_file_storage_provider.cpp
+        src/framework/storage/local_file_storage_provider.cpp
     )
     target_include_directories(mail_body_writer_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mail_body_writer_test)

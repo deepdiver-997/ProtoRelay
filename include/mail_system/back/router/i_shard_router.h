@@ -2,6 +2,7 @@
 #define MAIL_SYSTEM_I_SHARD_ROUTER_H
 
 #include "mail_system/back/db/db_pool.h"
+#include "framework/storage/i_storage_provider.h"
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -10,7 +11,10 @@
 namespace mail_system {
 
 namespace storage {
-class IStorageProvider;
+// 真类型的别名。此处曾是自造前向声明 `class IStorageProvider;` —— 它与
+// pr::storage::IStorageProvider 是两个不同类型，谁先 include shim 谁就撞出
+// 全仓库歧义（2026-10-18 storage 上移框架时现形）。
+using IStorageProvider = pr::storage::IStorageProvider;
 }
 
 namespace router {

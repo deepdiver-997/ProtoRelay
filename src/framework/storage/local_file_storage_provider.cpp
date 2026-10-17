@@ -1,4 +1,4 @@
-#include "mail_system/back/storage/local_file_storage_provider.h"
+#include "framework/storage/local_file_storage_provider.h"
 
 #include "framework/storage/local_file_read_stream.h"
 #include "framework/storage/local_file_write_stream.h"
@@ -8,7 +8,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace mail_system {
+namespace pr {
 namespace storage {
 
 LocalFileStorageProvider::LocalFileStorageProvider(std::string mail_root, std::string attachment_root)
@@ -169,4 +169,4 @@ std::string LocalFileStorageProvider::sanitize_filename(const std::string& name)
 }
 
 } // namespace storage
-} // namespace mail_system
+} // namespace pr

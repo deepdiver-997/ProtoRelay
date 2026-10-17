@@ -1,4 +1,4 @@
-#include "mail_system/back/storage/distributed_file_storage_provider.h"
+#include "framework/storage/distributed_file_storage_provider.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -6,7 +6,7 @@
 #include <functional>
 #include <sstream>
 
-namespace mail_system {
+namespace pr {
 namespace storage {
 
 DistributedFileStorageProvider::DistributedFileStorageProvider(std::vector<std::string> storage_roots,
@@ -206,4 +206,4 @@ std::vector<std::size_t> DistributedFileStorageProvider::pick_replica_indices(co
 }
 
 } // namespace storage
-} // namespace mail_system
+} // namespace pr

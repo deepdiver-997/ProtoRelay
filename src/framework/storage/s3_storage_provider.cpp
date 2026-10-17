@@ -1,4 +1,4 @@
-#include "mail_system/back/storage/s3_storage_provider.h"
+#include "framework/storage/s3_storage_provider.h"
 
 #include "framework/storage/buffered_upload_stream.h"
 
@@ -15,7 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace mail_system {
+namespace pr {
 namespace storage {
 
 // ========== libcurl helpers =================================================
@@ -502,4 +502,4 @@ bool S3StorageProvider::remove_object(const std::string& key, IoError& error) {
 }
 
 } // namespace storage
-} // namespace mail_system
+} // namespace pr
