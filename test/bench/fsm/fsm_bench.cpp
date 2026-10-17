@@ -47,8 +47,7 @@ struct BenchServer : SmtpsServer {
                 std::shared_ptr<ThreadPoolBase> w,
                 std::shared_ptr<router::IShardRouter> r,
                 std::shared_ptr<pq::PersistentQueue> q)
-        : SmtpsServer(c, io, w, nullptr) {
-        m_shardRouter = std::move(r);
+        : SmtpsServer(c, io, w, std::move(r)) {
         m_persistentQueue = std::move(q);
     }
     void start() override {}
