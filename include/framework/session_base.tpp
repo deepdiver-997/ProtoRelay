@@ -218,13 +218,19 @@ void SessionBase<ConnectionType>::do_async_read() {
                 }
 
                 // 流水线消费：paused 时停止消费，等待 DB 回调排空
+                bool dispatched_input = false;
                 while (self->has_buffered_input() && !self->is_paused()) {
                     std::string line = self->extract_one_line();
                     self->trace_append_inbound(line);   // 连接追踪：在"移除点"记录收到的行
                     self->handle_read(line);
+                    dispatched_input = true;
                     self->process_read();
                 }
-                if (self->auto_continue_read() && !self->is_paused() && !self->is_closed())
+                // 半行尚未交给协议处理，没有响应回调会恢复读取。TCP/TLS 分片
+                // （如 imaplib 分开发送 SASL 内容与 CRLF）必须继续读到完整输入。
+                // 已分发命令仍尊重协议的响应驱动模式，避免重复发起读。
+                if ((!dispatched_input || self->auto_continue_read()) &&
+                    !self->is_paused() && !self->is_closed())
                     self->do_async_read();
             });
     });

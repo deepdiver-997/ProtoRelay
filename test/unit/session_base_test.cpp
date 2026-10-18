@@ -7,6 +7,8 @@
 //   - trace：前缀记录/64KB 上限/干净关闭丢弃
 //   - 错误码、认证计数、握手、close/release
 // 无需 COMMON_SRCS（只链 framework 头 + mock）。
+// 2026-10-18：IMAP SASL 客户端分开发送认证内容与 CRLF 时卡住；见
+// docs/bugfixes/2026-10-18-session-fragmented-line-read.md。
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
@@ -90,6 +92,33 @@ int main() {
         s->get_connection().pump_executor();
         expect_true(s->read_lines.empty(), "incomplete line not processed");
         expect_true(s->buffered_size() == 6, "incomplete line stays buffered");
+    }
+
+    // ── do_async_read：认证响应与 CRLF 跨读取分片 ────────────
+    // IMAP 的命令内容、CR 和 LF 可以分别到达，未成行时必须继续读；
+    // 完整命令消费后仍由协议响应完成回调恢复读取，不能额外发起读。
+    {
+        auto s = make_session();
+        auto& conn = s->get_connection();
+        conn.set_deferred_read(true);
+        conn.set_read_data("dGVzdA==");
+        s->do_async_read();
+        conn.pump_executor();
+        expect_true(s->read_lines.empty() && conn.has_pending_read(),
+                    "partial SASL response waits for remaining bytes");
+        conn.trigger_deferred_read("\r");
+        conn.pump_executor();
+        expect_true(s->read_lines.empty() && conn.has_pending_read(),
+                    "split CRLF waits for LF");
+        conn.trigger_deferred_read("\n");
+        conn.pump_executor();
+        expect_true(s->read_lines.size() == 1 && s->read_lines[0] == "dGVzdA==\r\n",
+                    "fragmented response delivered exactly once");
+        expect_true(s->process_count == 1 && s->buffered_size() == 0,
+                    "fragmented response processed completely");
+        expect_true(!conn.has_pending_read(),
+                    "response-driven session does not read beyond completed command");
+        finish_session(s);
     }
 
     // ── do_async_read：读错误（EOF）→ handle_error → close ───
