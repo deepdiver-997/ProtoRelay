@@ -6,6 +6,8 @@
 //
 // 覆盖历史修复的 bug 类：multipart 格式、非 multipart 根 length、charset 不带引号、
 // folded header boundary、DKIM h= 误匹配、BODY[n] 空内容。
+// 2026-10-18：网易邮件大师不列附件，BODYSTRUCTURE 字段错位/缺 disposition；
+// 见 docs/bugfixes/2026-10-18-imap-attachment-bodystructure.md。
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
@@ -13,6 +15,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include "framework/storage/mapped_file.h"
 #include "mail_system/back/entities/mail.h"
@@ -345,6 +348,100 @@ static void test_encoded_word_name_case_preserved() {
                "encoded-word attachment name preserves case");
 }
 
+// 独立消费者：按 IMAP list/string/number/literal 语法读回响应，按 RFC 字段位置识别附件。
+static nlohmann::json read_structure(const std::string& s, size_t& pos) {
+    while (pos < s.size() && s[pos] == ' ') ++pos;
+    assert(pos < s.size());
+    if (s[pos] == '(') {
+        ++pos;
+        auto out = nlohmann::json::array();
+        while (pos < s.size() && s[pos] != ')') {
+            if (s[pos] == ' ') { ++pos; continue; }
+            out.push_back(read_structure(s, pos));
+        }
+        assert(pos < s.size()); ++pos; return out;
+    }
+    if (s[pos] == '"') {
+        ++pos; std::string out;
+        while (pos < s.size() && s[pos] != '"') {
+            if (s[pos] == '\\') ++pos;
+            assert(pos < s.size());out += s[pos++];
+        }
+        assert(pos < s.size());++pos;return out;
+    }
+    if (s[pos] == '{') {
+        auto end = s.find("}\r\n", ++pos);assert(end != std::string::npos);
+        auto n = std::stoull(s.substr(pos, end - pos));pos = end + 3;
+        assert(n <= s.size() - pos);auto out = s.substr(pos, n);pos += n;return out;
+    }
+    auto end = s.find_first_of(" )", pos);if (end == std::string::npos) end = s.size();
+    auto atom = s.substr(pos, end - pos);pos = end;
+    if (atom == "NIL") return nullptr;
+    return std::stoull(atom);
+}
+
+static void test_attachment_structure_consumer() {
+    const std::string raw =
+        "Content-Type: multipart/mixed; boundary=AttB\r\n\r\n"
+        "--AttB\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello\r\n"
+        "--AttB\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n"
+        "Content-Disposition: attachment;\r\n"
+        " filename*0*=UTF-8''%E9%99%84%E4%BB%B6;\r\n filename*1*=%E8%AF%B4%E6%98%8E.txt\r\n\r\naGk=\r\n"
+        "--AttB\r\nContent-Type: image/png\r\nContent-ID: <pic@example.test>\r\n"
+        "Content-Disposition: inline; filename=\"pic.png\"\r\n"
+        "Content-Transfer-Encoding: base64\r\n\r\naGk=\r\n--AttB--\r\n";
+    MimePart tree;parse_mime_tree(raw, tree);assert(tree.subs.size() == 3);
+    const auto response = imap_utils::build_bodystructure_tree(tree);size_t pos = 0;
+    const auto body = read_structure(response, pos);assert(pos == response.size());
+    expect_str(tree.subs[1].name, "附件说明.txt", "RFC2231 continuation filename");
+    expect_true(body[1][3].is_null(), "attachment name does not occupy body-id");
+    expect_true(body[1][9].is_array(), "text attachment disposition at RFC position");
+    if (body[1][9].is_array()) {
+        expect_str(body[1][9][0].get<std::string>(), "attachment", "attachment disposition");
+        expect_str(body[1][9][1][1].get<std::string>(), "附件说明.txt", "consumer filename");
+    }
+    expect_num(body[1].size(), 12, "text fields include line count and four extensions");
+    expect_num(body[2].size(), 11, "binary fields omit text line count");
+    expect_true(body[2][8].is_array(), "binary disposition at RFC position");
+    if (body[2][8].is_array()) {
+        expect_str(body[2][8][0].get<std::string>(), "inline", "inline disposition preserved");
+        expect_str(body[2][8][1][1].get<std::string>(), "pic.png", "inline filename");
+    }
+    expect_true(body[2][3].is_string(), "Content-ID is an nstring");
+    MimePart single;
+    parse_mime_tree("Content-Type: application/pdf\r\n"
+                    "Content-Disposition: attachment; filename*=utf-8''%E9%99%84%E4%BB%B6.pdf\r\n\r\nx", single);
+    expect_str(single.name, "附件.pdf", "RFC2231 single extended filename");
+    parse_mime_tree("Content-Type: image/png\r\n"
+                    "Content-Disposition: attachment; filename=\"pi\\\"c\\\\name.png\"\r\n\r\nx", single);
+    auto quoted = imap_utils::build_bodystructure_tree(single);pos = 0;
+    const auto decoded = read_structure(quoted, pos);
+    expect_str(decoded[8][1][1].get<std::string>(), "pi\"c\\name.png", "quoted-pair filename survives wire escaping");
+
+    // 老 sidecar 不含 disposition/RFC2231 名称，升级后必须从原 MIME 重建并回写。
+    const std::string path = "/tmp/mime_attachment_legacy.eml";
+    { std::ofstream f(path);f << raw; }
+    { std::ofstream f(path + ".mime");f << "{\"t\":\"multipart\",\"s\":\"mixed\",\"p\":[{\"t\":\"text\",\"s\":\"plain\"}]}"; }
+    MimePart unavailable;
+    expect_true(!ensure_mime_tree(path, "", unavailable), "old cache cannot be upgraded without source");
+    MimePart upgraded;expect_true(ensure_mime_tree(path, raw, upgraded), "legacy cache upgraded");
+    expect_num(upgraded.subs.size(), 3, "legacy cache does not hide attachments");
+    std::ifstream f(path + ".mime");const std::string cache((std::istreambuf_iterator<char>(f)), {});
+    expect_contains(cache, "\"v\":2", "upgraded MIME metadata version persisted");
+    std::filesystem::remove(path);std::filesystem::remove(path + ".mime");
+}
+
+static void test_repeated_boundary_is_bounded() {
+    const std::string header = "Content-Type: multipart/mixed; boundary=B\r\n\r\n";
+    std::string raw = header;
+    for (int i = 0; i < 24; ++i) raw += "--B\r\n" + header + "x\r\n";
+    raw += "--B--\r\n";
+    MimePart root;parse_mime_tree(raw, root);
+    expect_num(root.subs.size(), 24, "reused boundary has 24 siblings");
+    for (const auto& child : root.subs)
+        expect_true(child.subs.empty(), "sibling is not recursively treated as descendant");
+}
+
 // ========== sidecar 往返 / 回写 ==========
 
 // 临时目录下造一个正文文件，返回其路径
@@ -395,6 +492,9 @@ static void test_sidecar_round_trip() {
         expect_str(loaded.subs[i].subtype, original.subs[i].subtype, "sub subtype round-trips");
         expect_str(loaded.subs[i].encoding, original.subs[i].encoding, "sub encoding round-trips");
         expect_str(loaded.subs[i].charset, original.subs[i].charset, "sub charset round-trips");
+        expect_str(loaded.subs[i].disposition, original.subs[i].disposition, "sub disposition round-trips");
+        expect_str(loaded.subs[i].content_id, original.subs[i].content_id, "sub Content-ID round-trips");
+        expect_num(loaded.subs[i].metadata_version, kMimeMetadataVersion, "sub metadata version round-trips");
         expect_num(loaded.subs[i].offset, original.subs[i].offset, "sub offset round-trips");
         expect_num(loaded.subs[i].length, original.subs[i].length, "sub length round-trips");
     }
@@ -482,6 +582,9 @@ static void expect_same_tree(const MimePart& a, const MimePart& b, const char* w
     expect_str(a.encoding, b.encoding, what);
     expect_str(a.boundary, b.boundary, what);
     expect_str(a.name, b.name, what);
+    expect_str(a.disposition, b.disposition, what);
+    expect_str(a.content_id, b.content_id, what);
+    expect_num(a.metadata_version, b.metadata_version, what);
     expect_num(a.offset, b.offset, what);
     expect_num(a.length, b.length, what);
     expect_num(a.body_size, b.body_size, what);
@@ -567,6 +670,8 @@ int main() {
     test_malformed_headers_after_body();
     test_quoted_charset();
     test_content_disposition_name();
+    test_attachment_structure_consumer();
+    test_repeated_boundary_is_bounded();
     test_encoded_word_name_case_preserved();
     test_unquoted_boundary_with_quoted_to();
     test_sidecar_round_trip();

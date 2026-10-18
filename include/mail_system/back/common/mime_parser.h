@@ -1,5 +1,6 @@
 #pragma once
 #include "mail_system/back/entities/mail.h"
+#include "mail_system/back/common/mime_parameters.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -26,274 +27,41 @@ namespace mail_system {
 // ~10 层，64 层封顶后该 part 按不透明正文处理，长度信息仍由调用方修正。
 inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0,
                             size_t depth = 0) {
+    root = MimePart{};
+    root.metadata_version = kMimeMetadataVersion;
     // 找 header/body 分隔
     size_t sep = raw.find("\r\n\r\n", pos);
     std::string hdrs{(sep != std::string::npos) ? raw.substr(pos, sep - pos) : raw.substr(pos)};
     size_t body_start = (sep != std::string::npos) ? sep + 4 : raw.size();
 
-    // 解析 Content-Type
-    {
-        auto hdr_lower = hdrs;
-        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
-        size_t ct_pos = std::string::npos;
-        // 找行首的 content-type（避免 DKIM h= 标签干扰）
-        for (size_t p = 0; p < hdr_lower.size(); ) {
-            size_t f = hdr_lower.find("\ncontent-type:", p);
-            if (f == std::string::npos) {
-                // 检查第一行
-                if (p == 0 && hdr_lower.compare(0, 13, "content-type:") == 0) { ct_pos = 0; }
-                break;
-            }
-            ct_pos = f + 1; // 跳过 \n
-            break;
-        }
-        if (ct_pos == std::string::npos && hdr_lower.compare(0, 13, "content-type:") == 0)
-            ct_pos = 0;
-
-        if (ct_pos != std::string::npos) {
-            size_t ct_end = hdr_lower.find("\r\n", ct_pos);
-            // 展开 folded headers
-            while (ct_end != std::string::npos && ct_end + 2 < hdr_lower.size() &&
-                   (hdr_lower[ct_end + 2] == ' ' || hdr_lower[ct_end + 2] == '\t'))
-                ct_end = hdr_lower.find("\r\n", ct_end + 2);
-
-            std::string ct_line = (ct_end != std::string::npos)
-                ? hdr_lower.substr(ct_pos + 13, ct_end - ct_pos - 13)
-                : hdr_lower.substr(ct_pos + 13);
-
-            // unfold
-            std::string unfolded;
-            for (size_t i = 0; i < ct_line.size(); ++i) {
-                if (ct_line[i] == '\r' && i + 2 < ct_line.size() &&
-                    ct_line[i+1] == '\n' && ct_line[i+2] == '\t') { unfolded += ' '; i += 2; continue; }
-                if (ct_line[i] == '\r' && i + 1 < ct_line.size() &&
-                    ct_line[i+1] == '\n') { unfolded += ' '; i += 1; continue; }
-                unfolded += ct_line[i];
-            }
-            ct_line = unfolded;
-            ct_line.erase(0, ct_line.find_first_not_of(" \t"));
-            ct_line.erase(ct_line.find_last_not_of(" \t") + 1);
-
-            auto semi = ct_line.find(';');
-            if (semi != std::string::npos) {
-                std::string full_type = ct_line.substr(0, semi);
-                full_type.erase(full_type.find_last_not_of(" \t") + 1);
-                auto slash = full_type.find('/');
-                if (slash != std::string::npos) {
-                    root.type = full_type.substr(0, slash);
-                    root.subtype = full_type.substr(slash + 1);
-                }
-                std::string params = ct_line.substr(semi + 1);
-                // charset（支持带引号和不带引号，如 charset="utf-8" 或 charset=us-ascii）
-                auto cp = params.find("charset=");
-                if (cp != std::string::npos) {
-                    cp += 8;
-                    while (cp < params.size() && (params[cp] == ' ' || params[cp] == '\t')) cp++;
-                    if (cp < params.size() && params[cp] == '"') {
-                        cp++;
-                        auto ce = params.find('"', cp);
-                        if (ce != std::string::npos) root.charset = params.substr(cp, ce - cp);
-                    } else {
-                        auto ce = params.find_first_of(" \t;", cp);
-                        if (ce == std::string::npos) ce = params.size();
-                        root.charset = params.substr(cp, ce - cp);
-                    }
-                }
-                // boundary — 从原始 hdrs 提取（保留大小写）
-                // 注意：不带引号时不能 find('"') 向后搜，否则会误匹配后续 header 里的引号
-                // （如 To: "test3"），把 boundary 提取成错误值。
-                {
-                    std::string orig_hdrs{raw.substr(pos, sep - pos)};
-                    auto obp = orig_hdrs.find("boundary=");
-                    if (obp != std::string::npos) {
-                        size_t os = obp + 9; // "boundary=" 之后
-                        while (os < orig_hdrs.size() &&
-                               (orig_hdrs[os] == ' ' || orig_hdrs[os] == '\t'))
-                            os++;
-                        if (os < orig_hdrs.size() && orig_hdrs[os] == '"') {
-                            // 带引号：boundary="..."
-                            os++;
-                            size_t oe = orig_hdrs.find('"', os);
-                            if (oe != std::string::npos)
-                                root.boundary = orig_hdrs.substr(os, oe - os);
-                        } else {
-                            // 不带引号：boundary=值，到空白/换行/header 末尾为止
-                            size_t oe = orig_hdrs.find_first_of(" \t\r\n", os);
-                            if (oe == std::string::npos) oe = orig_hdrs.size();
-                            root.boundary = orig_hdrs.substr(os, oe - os);
-                        }
-                    }
-                }
-                // name (Content-Type name 或 Content-Disposition filename)
-                // 必须回原始 hdrs 提取（保留大小写）：文件名常是 RFC2047 encoded-word，
-                // 其 Base64 payload 大小写敏感，lowercase 后解码即损坏（实测 QQ 邮箱
-                // PDF 附件名在 sidecar 全小写，客户端解析失败）。与 boundary 同款做法：
-                // 小写副本定位，原始文本切片。
-                {
-                    std::string orig_hdrs{raw.substr(pos, sep - pos)};
-                    std::string orig_lower{orig_hdrs};
-                    std::transform(orig_lower.begin(), orig_lower.end(),
-                                   orig_lower.begin(), ::tolower);
-                    // 与 hdr_lower 相同的行首 content-type 定位语义
-                    size_t ocp = std::string::npos;
-                    for (size_t p = 0; p < orig_lower.size(); ) {
-                        size_t f = orig_lower.find("\ncontent-type:", p);
-                        if (f == std::string::npos) {
-                            if (p == 0 && orig_lower.compare(0, 13, "content-type:") == 0) ocp = 0;
-                            break;
-                        }
-                        ocp = f + 1;
-                        break;
-                    }
-                    if (ocp == std::string::npos && orig_lower.compare(0, 13, "content-type:") == 0)
-                        ocp = 0;
-                    if (ocp != std::string::npos) {
-                        size_t oct_end = orig_lower.find("\r\n", ocp);
-                        while (oct_end != std::string::npos && oct_end + 2 < orig_lower.size() &&
-                               (orig_lower[oct_end + 2] == ' ' || orig_lower[oct_end + 2] == '\t'))
-                            oct_end = orig_lower.find("\r\n", oct_end + 2);
-                        std::string o_line = (oct_end != std::string::npos)
-                            ? orig_hdrs.substr(ocp + 13, oct_end - ocp - 13)
-                            : orig_hdrs.substr(ocp + 13);
-                        // unfold（与小写侧同一规则：\r\n\t / \r\n 续行折为单空格）
-                        std::string o_unfolded;
-                        for (size_t i = 0; i < o_line.size(); ++i) {
-                            if (o_line[i] == '\r' && i + 2 < o_line.size() &&
-                                o_line[i+1] == '\n' && o_line[i+2] == '\t') { o_unfolded += ' '; i += 2; continue; }
-                            if (o_line[i] == '\r' && i + 1 < o_line.size() &&
-                                o_line[i+1] == '\n') { o_unfolded += ' '; i += 1; continue; }
-                            o_unfolded += o_line[i];
-                        }
-                        std::string o_lower_line{o_unfolded};
-                        std::transform(o_lower_line.begin(), o_lower_line.end(),
-                                       o_lower_line.begin(), ::tolower);
-                        auto np = o_lower_line.find("name=\"");
-                        if (np != std::string::npos) {
-                            np += 6;
-                            auto ne = o_unfolded.find('"', np);
-                            if (ne != std::string::npos)
-                                root.name = o_unfolded.substr(np, ne - np);
-                        }
-                    }
-                }
-            } else {
-                auto slash = ct_line.find('/');
-                if (slash != std::string::npos) {
-                    root.type = ct_line.substr(0, slash);
-                    root.subtype = ct_line.substr(slash + 1);
-                }
-            }
-        } else {
-            // 畸形邮件（header 在 body 之后，如部分 OpenAI 通知邮件）时，首段
-            // （第一个 \r\n\r\n 之前）没有 Content-Type。此时在整封消息里找
-            // 行首的 content-type:（避开 DKIM h= 标签），取最后一次匹配。
-            bool ct_found = false;
-            // 必须显式拷贝成 std::string：raw 现在是 string_view，可能指向只读的
-            // mmap 映射区，就地 tolower 会往 PROT_READ 的页里写。
-            // 这条是「Content-Type 出现在 body 之后」的畸形报文兜底路径，极少走到，
-            // 整封拷贝一次可以接受。
-            std::string whole_lower{raw};
-            std::transform(whole_lower.begin(), whole_lower.end(), whole_lower.begin(), ::tolower);
-            size_t ct_line_start = std::string::npos;
-            for (size_t p = 0; p < whole_lower.size(); ) {
-                size_t f = whole_lower.find("\ncontent-type:", p);
-                if (f == std::string::npos) {
-                    if (p == 0 && whole_lower.compare(0, 13, "content-type:") == 0)
-                        ct_line_start = 0;
-                    break;
-                }
-                ct_line_start = f + 1;   // 保留最后一次匹配
-                p = f + 1;
-            }
-            if (ct_line_start != std::string::npos && ct_line_start > 0) {
-                size_t ct_end = whole_lower.find("\r\n", ct_line_start);
-                while (ct_end != std::string::npos && ct_end + 2 < whole_lower.size() &&
-                       (whole_lower[ct_end + 2] == ' ' || whole_lower[ct_end + 2] == '\t'))
-                    ct_end = whole_lower.find("\r\n", ct_end + 2);
-                std::string ct_line = (ct_end != std::string::npos)
-                    ? whole_lower.substr(ct_line_start + 13, ct_end - ct_line_start - 13)
-                    : whole_lower.substr(ct_line_start + 13);
-                auto semi = ct_line.find(';');
-                std::string full_type = (semi != std::string::npos)
-                    ? ct_line.substr(0, semi) : ct_line;
-                full_type.erase(0, full_type.find_first_not_of(" \t"));
-                full_type.erase(full_type.find_last_not_of(" \t") + 1);
-                auto slash = full_type.find('/');
-                if (slash != std::string::npos) {
-                    root.type = full_type.substr(0, slash);
-                    root.subtype = full_type.substr(slash + 1);
-                    if (semi != std::string::npos) {
-                        std::string params = ct_line.substr(semi + 1);
-                        auto cp = params.find("charset=");
-                        if (cp != std::string::npos) {
-                            cp += 8;
-                            while (cp < params.size() && (params[cp] == ' ' || params[cp] == '\t')) cp++;
-                            if (cp < params.size() && params[cp] == '"') {
-                                cp++;
-                                auto ce = params.find('"', cp);
-                                if (ce != std::string::npos) root.charset = params.substr(cp, ce - cp);
-                            } else {
-                                auto ce = params.find_first_of(" \t;", cp);
-                                if (ce == std::string::npos) ce = params.size();
-                                root.charset = params.substr(cp, ce - cp);
-                            }
-                        }
-                    }
-                    ct_found = true;
-                }
-            }
-            if (!ct_found) {
-                // 默认 text/plain
-                root.type = "text";
-                root.subtype = "plain";
-            }
-        }
+    auto content_type = mime_header_value(hdrs, "content-type");
+    // 保留既有畸形通知邮件兼容：头在正文后时只认行首的最后一个 Content-Type，
+    // 不把 DKIM h= 中的名字当成 header，也不修改只读 mmap。
+    if (content_type.empty()) {
+        const auto whole_lower = mime_params_detail::lower(std::string(raw));
+        const auto last = whole_lower.rfind("\ncontent-type:");
+        if (last != std::string::npos)
+            content_type = mime_header_value(std::string(raw.substr(last + 1)), "content-type");
     }
-
-    // Content-Disposition filename
-    if (root.name.empty()) {
-        auto hdr_lower = hdrs;
-        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
-        size_t cd = hdr_lower.find("\ncontent-disposition:");
-        if (cd == std::string::npos && hdr_lower.compare(0, 20, "content-disposition:") == 0) cd = 0;
-        else if (cd != std::string::npos) cd++;
-        if (cd != std::string::npos) {
-            auto np = hdr_lower.find("filename=\"", cd);
-            if (np == std::string::npos) np = hdr_lower.find("filename=", cd);
-            if (np != std::string::npos) {
-                np = hdr_lower.find('"', np);
-                if (np == std::string::npos) np = hdr_lower.find('=', np);
-                if (np != std::string::npos) {
-                    np++;
-                    auto ne = hdr_lower.find('"', np);
-                    if (ne == std::string::npos)
-                        ne = hdr_lower.find_first_of(" \t\r\n", np);
-                    if (ne != std::string::npos)
-                        root.name = hdrs.substr(np, ne - np);
-                }
-            }
-        }
+    const auto disposition = mime_header_value(hdrs, "content-disposition");
+    const auto media = mime_params_detail::lower(mime_params_detail::trim(
+        content_type.substr(0, content_type.find(';'))));
+    const auto slash = media.find('/');
+    if (slash != std::string::npos) {
+        root.type = media.substr(0, slash);
+        root.subtype = media.substr(slash + 1);
+    } else {
+        root.type = "text";
+        root.subtype = "plain";
     }
-
-    // Content-Transfer-Encoding
-    {
-        auto hdr_lower = hdrs;
-        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
-        size_t cte = hdr_lower.find("\ncontent-transfer-encoding:");
-        if (cte == std::string::npos && hdr_lower.compare(0, 26, "content-transfer-encoding:") == 0) cte = 0;
-        else if (cte != std::string::npos) cte++;
-        if (cte != std::string::npos) {
-            size_t cte_end = hdr_lower.find("\r\n", cte);
-            // 冒号后没有任何字符（header 在冒号处截断）时 cte+27 越过 size，
-            // substr(pos) 直接抛 out_of_range（fuzz+ASan 实锤）。钳制到边界。
-            const size_t vpos = std::min<size_t>(cte + 27, hdr_lower.size());
-            root.encoding = (cte_end != std::string::npos && cte_end > vpos)
-                ? hdr_lower.substr(vpos, cte_end - vpos)
-                : hdr_lower.substr(vpos);
-            root.encoding.erase(0, root.encoding.find_first_not_of(" \t"));
-            root.encoding.erase(root.encoding.find_last_not_of(" \t") + 1);
-        }
-    }
+    root.charset = mime_params_detail::lower(mime_parameter(content_type, "charset"));
+    root.boundary = mime_parameter(content_type, "boundary");
+    root.name = mime_parameter(disposition, "filename");
+    if (root.name.empty()) root.name = mime_parameter(content_type, "name");
+    root.disposition = mime_params_detail::lower(mime_params_detail::trim(
+        disposition.substr(0, disposition.find(';'))));
+    root.content_id = mime_header_value(hdrs, "content-id");
+    root.encoding = mime_params_detail::lower(mime_header_value(hdrs, "content-transfer-encoding"));
     if (root.encoding.empty()) root.encoding = "7bit";
 
     // 记录 offset 和 length（length 覆盖整个 part：header + body）
@@ -332,7 +100,10 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
                              raw.substr(next + bdr.size(), 2) == "--");
 
             MimePart sub;
-            parse_mime_tree(raw, sub, search_from, depth + 1);
+            // 子 part 只能看到自己的区间；否则同名 boundary 的畸形兄弟 part
+            // 会被每层重复当作后代，深度虽封顶仍产生指数级解析工作。
+            // 保留从文件起点的前缀，树中 offset 仍是完整 MIME 的绝对偏移。
+            parse_mime_tree(raw.substr(0, next), sub, search_from, depth + 1);
             // 修正 sub 的 length 到 bdr 边界
             sub.length = next - search_from;
             while (sub.length > 0 && (raw[search_from + sub.length - 1] == '\r' ||
@@ -409,12 +180,14 @@ inline bool save_mime_tree(const std::string& body_path, const MimePart& root) {
 
             std::function<void(const MimePart&, std::ostream&)> write_part;
             write_part = [&](const MimePart& p, std::ostream& os) {
-                os << "{\"t\":\"" << mime_json_escape(p.type)
+                os << "{\"v\":" << p.metadata_version << ",\"t\":\"" << mime_json_escape(p.type)
                    << "\",\"s\":\"" << mime_json_escape(p.subtype) << "\"";
                 if (!p.charset.empty())  os << ",\"c\":\"" << mime_json_escape(p.charset) << "\"";
                 if (!p.encoding.empty()) os << ",\"e\":\"" << mime_json_escape(p.encoding) << "\"";
                 if (!p.boundary.empty()) os << ",\"b\":\"" << mime_json_escape(p.boundary) << "\"";
                 if (!p.name.empty())     os << ",\"n\":\"" << mime_json_escape(p.name) << "\"";
+                if (!p.disposition.empty()) os << ",\"d\":\"" << mime_json_escape(p.disposition) << "\"";
+                if (!p.content_id.empty()) os << ",\"i\":\"" << mime_json_escape(p.content_id) << "\"";
                 os << ",\"o\":" << p.offset << ",\"l\":" << p.length
                    << ",\"z\":" << p.body_size << ",\"ln\":" << p.lines;
                 if (!p.subs.empty()) {
@@ -458,9 +231,10 @@ inline bool load_mime_tree(const std::string& body_path, MimePart& root);
 inline bool ensure_mime_tree(const std::string& body_path,
                              const std::string& raw,
                              MimePart& root) {
-    if (load_mime_tree(body_path, root)) {
+    if (load_mime_tree(body_path, root) && root.metadata_version >= kMimeMetadataVersion) {
         return true;
     }
+    if (raw.empty()) { root = MimePart{};return false; }
     root = MimePart{};
     parse_mime_tree(raw, root);
     if (root.type.empty()) {
@@ -522,12 +296,15 @@ inline bool load_mime_tree(const std::string& body_path, MimePart& root) {
         pos++; // skip {
         while (pos < s.size() && s[pos] != '}') {
             std::string key = read_str(); pos++; // skip :
-            if (key == "t") p.type = read_str();
+            if (key == "v") p.metadata_version = static_cast<uint32_t>(read_uint());
+            else if (key == "t") p.type = read_str();
             else if (key == "s") p.subtype = read_str();
             else if (key == "c") p.charset = read_str();
             else if (key == "e") p.encoding = read_str();
             else if (key == "b") p.boundary = read_str();
             else if (key == "n") p.name = read_str();
+            else if (key == "d") p.disposition = read_str();
+            else if (key == "i") p.content_id = read_str();
             else if (key == "o") p.offset = read_uint();
             else if (key == "l") p.length = read_uint();
             else if (key == "z") p.body_size = read_uint();

@@ -333,27 +333,43 @@ std::string build_bodystructure(const std::string& raw) {
 }
 
 std::string build_bodystructure_tree(const MimePart& mp) {
+    // RFC 3501 string：非 ASCII/换行使用 literal，引用串转义引号与反斜杠。
+    const auto string = [](const std::string& value) {
+        if (std::any_of(value.begin(), value.end(), [](unsigned char c) {
+                return c >= 128 || c == '\r' || c == '\n';
+            })) return "{" + std::to_string(value.size()) + "}\r\n" + value;
+        std::string out = "\"";
+        for (char c : value) { if (c == '\\' || c == '"') out += '\\';out += c; }
+        return out + "\"";
+    };
+    const auto disposition = [&]() {
+        if (mp.disposition.empty()) return std::string("NIL");
+        return "(" + string(mp.disposition) + " " +
+            (mp.name.empty() ? "NIL" : "(\"FILENAME\" " + string(mp.name) + ")") + ")";
+    };
     if (mp.is_multipart()) {
         // RFC 3501 §7.4.2: multipart 子 part 在最前，subtype 在最后
         //   ((sub1)(sub2) "alternative" ("BOUNDARY" "...") NIL NIL NIL)
         std::string result = "(";
         for (const auto& sub : mp.subs)
             result += build_bodystructure_tree(sub);
-        result += " \"" + mp.subtype + "\"";
+        result += " " + string(mp.subtype);
         if (!mp.boundary.empty())
-            result += " (\"BOUNDARY\" \"" + mp.boundary + "\")";
+            result += " (\"BOUNDARY\" " + string(mp.boundary) + ")";
         else
             result += " NIL";
-        result += " NIL NIL NIL)";
+        result += " " + disposition() + " NIL NIL)";
         return result;
     }
-    std::string result = "(\"" + mp.type + "\" \"" + mp.subtype + "\"";
-    if (!mp.charset.empty()) result += " (\"CHARSET\" \"" + mp.charset + "\")";
-    else result += " NIL";
-    if (!mp.name.empty()) result += " (\"" + mp.name + "\")";
-    else result += " NIL";
-    result += " NIL \"" + mp.encoding + "\" " + std::to_string(mp.body_size);
-    result += " " + std::to_string(mp.lines) + " NIL NIL NIL NIL)";
+    std::string result = "(" + string(mp.type) + " " + string(mp.subtype);
+    std::string params;
+    if (!mp.charset.empty()) params += "\"CHARSET\" " + string(mp.charset);
+    if (!mp.name.empty()) { if (!params.empty()) params += " ";params += "\"NAME\" " + string(mp.name); }
+    result += params.empty() ? " NIL" : " (" + params + ")";
+    result += mp.content_id.empty() ? " NIL" : " " + string(mp.content_id);
+    result += " NIL " + string(mp.encoding) + " " + std::to_string(mp.body_size);
+    if (mp.type == "text") result += " " + std::to_string(mp.lines);
+    result += " NIL " + disposition() + " NIL NIL)";
     return result;
 }
 

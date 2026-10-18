@@ -1236,7 +1236,8 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
     // BODYSTRUCTURE 先试 sidecar（本地小文件，同步读即可）
     ctx->struct_sidecar_hit = false;
     if (ctx->want_body_struct) {
-        ctx->struct_sidecar_hit = load_mime_tree(mail_info.body_path, ctx->struct_tree);
+        ctx->struct_sidecar_hit = load_mime_tree(mail_info.body_path, ctx->struct_tree) &&
+                                  ctx->struct_tree.metadata_version >= kMimeMetadataVersion;
     }
     const bool need_body = !mail_info.body_path.empty() &&
         (ctx->want_body_header || ctx->want_body ||
