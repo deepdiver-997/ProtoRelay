@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <regex>
 #include <unordered_map>
 
 namespace mail_system {
@@ -979,7 +980,6 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
     bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
-    bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
     bool has_header_fields = attrs.find("HEADER.FIELDS") != std::string::npos;
     bool want_body_header = has_header_fields ||
         attrs.find("BODY.PEEK[HEADER]") != std::string::npos ||
@@ -995,23 +995,20 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
                 header_fields_filter = attrs.substr(lp + 1, rp - lp - 1);
         }
     }
-    int body_part_num = 0;
-    {
-        auto bracket = attrs.find('[');
-        if (bracket != std::string::npos) {
-            auto close = attrs.find(']', bracket);
-            if (close != std::string::npos) {
-                // substr 长度必须排除闭合 ']'：多算 1 会把 ']' 带进 num_str，
-                // all_digits 恒 false → BODY[n] 永远解析不出节号 → 正文为空
-                std::string num_str = attrs.substr(bracket + 1, close - bracket - 1);
-                bool all_digits = !num_str.empty();
-                for (char c : num_str) if (c < '0' || c > '9') { all_digits = false; break; }
-                if (all_digits) body_part_num = std::stoi(num_str);
-            }
+    // 一条 FETCH 可同时索取多个 section，保留请求顺序。0 专指 BODY[]。
+    std::vector<uint64_t> body_parts;
+    static const std::regex section_pattern(R"(BODY(?:\.PEEK)?\[([0-9]*)\])");
+    for (std::sregex_iterator it(attrs.begin(), attrs.end(), section_pattern), end; it != end; ++it) {
+        const auto number = (*it)[1].str();
+        uint64_t part = 0;
+        if (!number.empty() && (!parse_uint(number, part) || part == 0)) {
+            send_tagged(self, tag, "BAD", "Invalid BODY section number");
+            self->drain_buffered_commands();
+            return;
         }
+        body_parts.push_back(part);
     }
-    bool want_body_part = (body_part_num > 0);
-    if (want_body_part) want_body = true;
+    const bool want_body = !body_parts.empty();
     bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
@@ -1037,7 +1034,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
     state->has_header_fields = has_header_fields;
     state->header_fields_not = header_fields_not;
     state->header_fields_filter = std::move(header_fields_filter);
-    state->body_part_num = body_part_num;
+    state->body_parts = std::move(body_parts);
     auto* srv = self->get_server();
     state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
 
@@ -1079,7 +1076,7 @@ struct TraditionalImapsFsm<ConnectionType>::FetchContext {
     bool want_body = false, want_body_header = false, want_body_struct = false;
     bool has_header_fields = false, header_fields_not = false;
     std::string header_fields_filter;
-    int body_part_num = 0;
+    std::vector<uint64_t> body_parts;
 
     // 推进游标到下一封待处理的邮件；false = 全部完成
     bool advance() {
@@ -1157,24 +1154,28 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
         c.cur += label + " " + build_fetch_body_response(headers, headers.size()) + " ";
     }
     if (c.want_body) {
-        if (c.body_part_num > 0) {
-            MimePart mime_tree;
-            if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
+        MimePart mime_tree;
+        const bool need_parts = std::any_of(c.body_parts.begin(), c.body_parts.end(),
+                                           [](uint64_t n) { return n != 0; });
+        const bool have_tree = need_parts && ensure_mime_tree(mail_info.body_path, body_content, mime_tree);
+        for (const auto part_number : c.body_parts) {
+            std::string part_content;
+            const std::string* content = &body_content;
+            if (part_number > 0) {
                 const MimePart* part = nullptr;
-                if (mime_tree.is_multipart() && (size_t)c.body_part_num <= mime_tree.subs.size())
-                    part = &mime_tree.subs[c.body_part_num - 1];
-                else if (!mime_tree.is_multipart() && c.body_part_num == 1)
-                    part = &mime_tree;
+                if (have_tree) {
+                    if (mime_tree.is_multipart() && part_number <= mime_tree.subs.size())
+                        part = &mime_tree.subs[static_cast<size_t>(part_number - 1)];
+                    else if (!mime_tree.is_multipart() && part_number == 1)
+                        part = &mime_tree;
+                }
                 if (part)
-                    body_content = extract_part_content(body_content, *part);
-                else
-                    body_content.clear();
-            } else {
-                body_content.clear();
+                    part_content = extract_part_content(body_content, *part);
+                content = &part_content;
             }
+            const std::string label = part_number > 0 ? "BODY[" + std::to_string(part_number) + "]" : "BODY[]";
+            c.cur += label + " " + build_fetch_body_response(*content, content->size()) + " ";
         }
-        std::string body_label = c.body_part_num > 0 ? ("BODY[" + std::to_string(c.body_part_num) + "]") : "BODY[]";
-        c.cur += body_label + " " + build_fetch_body_response(body_content, body_content.size()) + " ";
     }
     if (c.want_body_struct) {
         if (c.struct_sidecar_hit) {

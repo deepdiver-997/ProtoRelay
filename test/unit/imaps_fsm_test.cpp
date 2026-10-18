@@ -1,4 +1,6 @@
 // IMAP FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应码
+// 2026-10-18：手机同时 FETCH 多个 BODY section 仅收到第一段；见
+// docs/bugfixes/2026-10-18-imap-multiple-body-sections.md。
 #undef NDEBUG
 #include <cassert>
 #include <fstream>
@@ -545,10 +547,29 @@ TEST(fetch_body_part_number) {
             {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
             {"status", "1"}, {"send_time", "1700000000"}}}));
 
-    auto w2 = fetch_and_wait(*session2, conn_ptr2, "A002 FETCH 1 (BODY.PEEK[2])\r\n",
+    auto w2 = fetch_and_wait(*session2, conn_ptr2,
+                             "A002 FETCH 1 (BODY.PEEK[2] BODY.PEEK[1] BODY.PEEK[] BODYSTRUCTURE)\r\n",
                              "A002 OK FETCH completed");
     assert(w2.find("BODY[2] {") != std::string::npos);      // 节号 2 同样解析成功
     assert(w2.find("<p>hello html part</p>") != std::string::npos);
+
+    // 消费者按 literal 的声明长度读取每段，不能只检查某个标签存在。
+    auto literal = [&](const std::string& label) {
+        auto start = w2.find(label + " {");
+        assert(start != std::string::npos);
+        start += label.size() + 2;
+        auto end = w2.find("}\r\n", start);
+        assert(end != std::string::npos);
+        auto count = std::stoull(w2.substr(start, end - start));
+        assert(end + 3 + count <= w2.size());
+        return w2.substr(end + 3, count);
+    };
+    assert(literal("BODY[2]") == "<p>hello html part</p>");
+    assert(literal("BODY[1]") == "hello plain part");
+    assert(literal("BODY[]") == body);
+    assert(w2.find("BODY[2]") < w2.find("BODY[1]"));
+    assert(w2.find("BODY[1]") < w2.find("BODY[]"));
+    assert(w2.find("BODYSTRUCTURE ((") != std::string::npos);
 
     std::filesystem::remove_all("/tmp/imaps_fetch_part_test");
     io->stop(); wk->stop();
