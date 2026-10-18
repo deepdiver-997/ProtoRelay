@@ -34,6 +34,7 @@ public:
     static void start_after_starttls(std::shared_ptr<ImapsSession> self);
 
     void handle_read(const std::string& data) override;
+    void trace_append_inbound(const std::string& data) override;
     void process_read() override;
     bool has_buffered_input() const override;
     std::string extract_one_line() override;

@@ -218,6 +218,61 @@ static std::string poll_written_for(Handle& h, const std::string& needle, int ti
     return h.conn->written();
 }
 
+TEST(abnormal_trace_after_auth) {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() /
+        ("imaps-trace-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto cfg = fx.cfg;
+    cfg.log_file = (root / "imap.log").string();
+    auto server = std::make_shared<TestServer>(cfg, fx.io_pool, fx.worker_pool, fx.router);
+    const auto b64 = sasl_plain_b64("user0@test.local", "test123");
+    {
+        auto conn = std::make_unique<MockConnection>();
+        conn->set_deferred_read(true);
+        auto* raw = conn.get();
+        auto session = std::make_shared<ImapsSession<MockConnection>>(server.get(), std::move(conn), fx.fsm);
+        FsmTestFixture::Handle h{raw, session};
+        session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+        const std::string login = "T1 LOGIN user0@test.local test123\r\n";
+        session->trace_append_inbound(login);
+        session->handle_read(login);
+        session->process_read();
+        assert(HAS(poll_written_for(h, "T1 OK LOGIN completed"), "T1 OK LOGIN completed"));
+        session->trace_append_inbound("T2 AUTHENTICATE PLAIN " + b64 + "\r\n");
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        ctx->sasl_plain_state = 1;
+        session->trace_append_inbound(b64 + "\r\n");
+        ctx->sasl_plain_state = 0;
+        session->trace_append_inbound("T3 UID FETCH 43 (BODY.PEEK[2] BODY.PEEK[1])\r\n");
+        session->close(); // 已认证但未 LOGOUT，必须留取信阶段的对话
+    }
+    std::vector<fs::path> traces;
+    for (const auto& file : fs::directory_iterator(root / "traces")) traces.push_back(file.path());
+    assert(traces.size() == 1);
+    std::ifstream in(traces.front(), std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)), {});
+    const bool redacted = !HAS(text, "test123") && !HAS(text, b64);
+    const bool auth = HAS(text, "auth: yes");
+    const bool private_file = (fs::status(traces.front()).permissions() &
+        (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none;
+    std::cout << "  trace credentials_redacted=" << redacted << " auth_correct=" << auth
+              << " file_private=" << private_file << std::endl;
+    assert(redacted && auth && private_file);
+    assert(HAS(text, "T3 UID FETCH 43 (BODY.PEEK[2] BODY.PEEK[1])"));
+    {
+        auto session = std::make_shared<ImapsSession<MockConnection>>(
+            server.get(), std::make_unique<MockConnection>(), fx.fsm);
+        session->trace_append_inbound("T4 LOGOUT\r\n");
+        session->set_trace_clean_close();
+        finish_session(session);
+    }
+    size_t count = 0;
+    for (const auto& file : fs::directory_iterator(root / "traces")) { (void)file; ++count; }
+    assert(count == 1); // 正常退出不新增文件
+    fs::remove_all(root);
+    std::cout << "  [PASS] abnormal_trace_after_auth" << std::endl;
+}
+
 TEST(auth_plain_ir_success) {
     // SASL-IR：初始响应随命令行（fixture auth cache 命中 user0@test.local/test123）
     auto h = fx.make_session();
@@ -1225,6 +1280,7 @@ int main() {
         test_capability_response(fx);
         test_login_response(fx);
         test_login_success_real_auth(fx);
+        test_abnormal_trace_after_auth(fx);
         test_auth_plain_ir_success(fx);
         test_auth_plain_two_step(fx);
         test_auth_plain_abort(fx);

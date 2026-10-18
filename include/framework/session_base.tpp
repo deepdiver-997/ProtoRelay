@@ -456,6 +456,8 @@ void SessionBase<ConnectionType>::trace_maybe_save() {
         if (dir.empty()) dir = std::filesystem::path("/tmp/logs");
         dir /= "traces";
         std::filesystem::create_directories(dir);
+        std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
 
         // 诊断期可能大量异常连接（如垃圾扫描器），限制文件数防磁盘膨胀：超 300 删最旧
         constexpr size_t kMaxTraceFiles = 300;
@@ -492,6 +494,9 @@ void SessionBase<ConnectionType>::trace_maybe_save() {
                           + std::to_string(seq.fetch_add(1)) + ".txt";
         std::ofstream of(dir / fname, std::ios::trunc);
         if (of.is_open()) {
+            std::filesystem::permissions(dir / fname,
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                std::filesystem::perm_options::replace);
             of << "=== abnormal connection trace ===\n"
                << "client_ip: " << get_client_ip() << "\n"
                << "local_port: " << lport << "\n"
@@ -499,8 +504,15 @@ void SessionBase<ConnectionType>::trace_maybe_save() {
                << "error: " << error_message(last_error_);
             if (!last_error_detail_.empty()) of << " (" << last_error_detail_ << ")";
             of << "\n--- conversation ---\n" << m_trace_buf << "\n";
+            if (!of) LOG_SESSION_WARN("Failed to write abnormal connection trace: {}", fname);
+        } else {
+            LOG_SESSION_WARN("Failed to open abnormal connection trace: {}", fname);
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        LOG_SESSION_WARN("Failed to save abnormal connection trace: {}", e.what());
+    } catch (...) {
+        LOG_SESSION_WARN("Failed to save abnormal connection trace: unknown error");
+    }
     m_trace_buf.clear();
 }
 

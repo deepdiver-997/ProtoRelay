@@ -166,7 +166,7 @@ public:
     // ── 5c. 连接追踪（诊断） ──────────────────────────────────
     // 在读写路径拦截拷贝应用层字节（天然排除 TLS 握手，握手在 SSL 层内部）。
     // 正常关闭(QUIT/LOGOUT)丢弃缓冲；异常结束在 close() 时落盘到 traces/ 目录。
-    void trace_append_inbound(const std::string& line) { trace_append("C: ", line); }
+    virtual void trace_append_inbound(const std::string& line) { trace_append("C: ", line); }
     void trace_append_outbound(const std::string& data) { trace_append("S: ", data); }
     void set_trace_clean_close() { m_trace_clean_close = true; }
     // STARTTLS 交接：把旧会话已记录的对话交给新会话，保证完整且不误判为异常

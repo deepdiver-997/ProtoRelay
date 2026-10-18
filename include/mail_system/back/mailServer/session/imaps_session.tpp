@@ -100,6 +100,35 @@ void ImapsSession<ConnectionType>::start_after_starttls(std::shared_ptr<ImapsSes
 // SMTP 的 handle_read 消费命令 → IMAP 的 handle_read 也消费命令
 // ====================================================================
 template <typename ConnectionType>
+void ImapsSession<ConnectionType>::trace_append_inbound(const std::string& data) {
+    if (context_.sasl_plain_state == 1) {
+        pr::SessionBase<ConnectionType>::trace_append_inbound("<SASL response redacted>\r\n");
+        return;
+    }
+    if (awaiting_literal_) {
+        pr::SessionBase<ConnectionType>::trace_append_inbound(
+            "<literal data omitted: " + std::to_string(data.size()) + " bytes>\r\n");
+        return;
+    }
+    std::istringstream input(data);
+    std::string tag, command, mechanism;
+    input >> tag >> command >> mechanism;
+    std::transform(command.begin(), command.end(), command.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
+    if (command == "LOGIN") {
+        pr::SessionBase<ConnectionType>::trace_append_inbound(tag + " LOGIN <credentials redacted>\r\n");
+    } else if (command == "AUTHENTICATE") {
+        std::transform(mechanism.begin(), mechanism.end(), mechanism.begin(),
+                       [](unsigned char c) { return std::toupper(c); });
+        pr::SessionBase<ConnectionType>::trace_append_inbound(
+            tag + " AUTHENTICATE " + (mechanism == "PLAIN" ? mechanism : "<mechanism>") +
+            " <credentials redacted>\r\n");
+    } else {
+        pr::SessionBase<ConnectionType>::trace_append_inbound(data);
+    }
+}
+
+template <typename ConnectionType>
 void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
     auto self = this->shared_from_this();
     auto* session = this;

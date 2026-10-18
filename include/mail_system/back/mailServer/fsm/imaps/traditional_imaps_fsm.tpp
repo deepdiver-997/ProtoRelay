@@ -399,6 +399,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
                             c->user_id = user_id;
                             c->shard_index = shard;
                         }
+                        self->set_authenticated(true); // close()/trace/metrics 不能等析构才同步
                         self->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
                         send_tagged(self, tag, "OK", ok_text);
                         LOG_IMAP_INFO("IMAP login successful: {} (user_id={})", username, user_id);
