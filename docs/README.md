@@ -53,7 +53,8 @@ docs/
 
 SMTP/IMAP/POP3、共享 SMTP 内核、进程内提交与 React Webmail 均已落地。
 API/会话以邮件业务架构文档为准；前端运行见 [webmail/README.md](../webmail/README.md)，
-生产部署见 [operations.md](build-deploy/operations.md)。通用 DB/存储/cache/HTTP 位于
+生产部署见 [operations.md](build-deploy/operations.md)，实际收发验证和已知衔接缺口见
+[2026-10-18 发布验证](reports/release-2026-10-18.md)。通用 DB/存储/cache/HTTP 位于
 `framework/`，应用旧路径保留兼容 shim。带日期的报告、复盘及阶段记录反映当时状态，
 历史测试数、旧类名和故障示例不代表当前能力。
 

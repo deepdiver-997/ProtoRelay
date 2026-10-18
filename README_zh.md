@@ -36,7 +36,7 @@ include/mail_system/back/   # 邮件系统（框架的成熟应用）
 
 ## 当前已实现范围
 
-已实现认证提交、MIME/附件收取与存储、IMAP/POP3 邮箱访问、事务持久化和 outbox 外投。
+已实现认证提交、含附件的完整 MIME 收取与存储、IMAP/POP3 邮箱访问、事务持久化和 outbox 外投。
 各协议仍有功能边界，具体以对应协议设计为准，不声称完整 RFC 覆盖。
 Outbound 嵌在 `smtpsServer` 和默认 DB 模式的 `webmailServer` 内，由数据库租约协调；
 没有独立 outbound 二进制。出站边缘服务器运行自己的 SMTP 进程。
@@ -45,6 +45,9 @@ Outbound 嵌在 `smtpsServer` 和默认 DB 模式的 `webmailServer` 内，由�
 通过 MailSubmissionService 直接持久化写信、已读/标星、local/distributed 流式附件下载和
 原子保存已发送副本。React SPA 支持桌面三栏与手机布局、富文本 To/Cc 写信和失效草稿保留。
 附件上传、服务器草稿、删除/移动和全库搜索尚未实现。
+SMTP 尚未完整生成独立附件文件/索引，因此 Webmail 下载仍需补齐入站衔接；SMTP/IMAP
+原始 MIME 附件收发正常。DATA_END 的 DKIM/DMARC hard 拒收与认证结果头写入也尚未接通。
+本次实际验收与边界见 [发布验证](docs/reports/release-2026-10-18.md)。
 构建/运行见 [前端 README](webmail/README.md)，接口与迁移见
 [Webmail API](docs/mail-system/architecture/webmail-api.md)。
 

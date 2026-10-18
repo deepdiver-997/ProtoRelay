@@ -114,34 +114,36 @@ Key points:
 
 ### 4.1.1 Inbound Sender Verification (SPF/DKIM/DMARC)
 
-At `MAIL FROM` and `DATA_END` stages, the inbound path performs sender identity verification:
+At `MAIL FROM`, unauthenticated MTA traffic can be checked for SPF. A `fail` result with
+`inbound_spf_mode=hard` is rejected before DATA; authenticated submission is exempt from this check.
+At `DATA_END`, `InboundVerifier` can compute DKIM signature validity and DMARC alignment/policy,
+reusing any earlier SPF result. DNS operations use the asynchronous c-ares interface.
 
-- **SPF** (Sender Policy Framework): checks at `MAIL FROM` whether the connecting IP is authorized by the envelope sender's domain. On hard-fail (`-all`), the session rejects with `550 5.7.1` before accepting the message body.
-- **DKIM** (DomainKeys Identified Mail): at `DATA_END`, verifies the DKIM signature in the message headers against the signer's public key retrieved via DNS TXT.
-- **DMARC** (Domain-based Message Authentication, Reporting and Conformance): at `DATA_END`, evaluates DKIM and SPF alignment against the `From` header domain and applies the domain's published policy.
+**Current integration gap (2026-10-18)**: DATA_END stores verification results in session context,
+but does not yet turn DKIM/DMARC hard failures into SMTP rejection or prepend an
+`Authentication-Results` header to the stored MIME. The header builder exists but is not called
+by this path. The `hard` configuration name alone does not establish DKIM/DMARC enforcement.
+If DNS/body-path prerequisites are absent, the current fallback also skips DATA_END verification.
+See [inbound verification](../mail-system/architecture/inbound-verification-flow.md).
 
-The verification result is injected into the message as an `Authentication-Results` header (RFC 8601).
+**DNS TXT caching** uses fixed per-record TTLs: SPF 300 seconds, DMARC 900 seconds, DKIM
+3600 seconds, and empty/failed lookups 60 seconds. `off` skips a check; `soft` and `hard` run
+configured checks, but only MAIL FROM SPF currently implements hard rejection in the SMTP adapter.
 
-**SPF-at-MAIL-FROM optimization**: to enable early rejection without blocking the IO thread, the MAIL FROM stage performs a quick SPF check using a DNS TXT cache. If the cache is hot, verification completes inline; a miss falls through and a full verification (including DKIM/DMARC) runs on a worker thread at `DATA_END`, reusing the SPF result if already computed.
-
-**DNS TXT caching**: DKIM and SPF lookups use an in-memory cache with a fixed 300-second TTL. Cache entries are keyed by domain, and cache hits avoid repeated DNS round trips.
-
-**Per-check mode configuration**: each check (SPF/DKIM/DMARC) supports three modes:
-- `off`: skip this check entirely.
-- `soft`: perform the check and record the result in `Authentication-Results`, but do not reject.
-- `hard`: perform the check and reject the message on failure.
-
-### 4.1.2 SMTP AUTH and EHLO Verification
+### 4.1.2 SMTP AUTH Policy
 
 The server supports three AUTH policies via `inbound_auth_policy`:
 
 - `off` (default): never require AUTH — pure relay/MTA mode. MAIL FROM is accepted without authentication.
 - `on`: always require AUTH — pure MSA (Mail Submission Agent) mode. Clients must authenticate with AUTH LOGIN/PLAIN before sending.
-- `auto`: hybrid mode. Use PTR (reverse DNS) lookup on the connecting IP to identify trusted servers:
-  - PTR record matches the EHLO domain → skip AUTH (server-to-server traffic)
-  - No PTR match → require AUTH (client submission)
+- `auto`: checks the session trust flag before requiring AUTH. The current SMTP path never sets
+  this flag, so this global policy currently requires AUTH for every unauthenticated session.
+  Automatic PTR/EHLO-based trust exemption is not implemented.
 
-**EHLO verification flow** (auto mode): at MAIL FROM, the server performs a cached PTR lookup on the connecting IP. If any returned hostname matches the EHLO domain (exact or suffix), the connection is marked as trusted and AUTH is skipped. The PTR cache shares the 300-second TTL with other DNS caches.
+Each listener can override the global policy with `on` or `off`; a listener configured as `auto`
+uses the global `inbound_auth_policy`. Configure public MTA port 25 explicitly as `off` and
+authenticated submission ports as `on`. PTR/EHLO names alone do not grant relay permission;
+trusted relay networks and recipient/account policy remain separate checks.
 
 **SMTP AUTH** supports LOGIN/PLAIN. AccountPolicy shares credential checks, sender binding, quota and
 alias rules with Webmail. Password verification accepts bcrypt and upgrades supported legacy hashes
@@ -412,7 +414,7 @@ Inbound sender verification knobs:
 - `inbound_auth_timeout_ms` (default `30000`)
   - max wait time for the asynchronous verification task on the worker thread.
 - `inbound_auth_policy` (`off`|`auto`|`on`, default `off`)
-  - AUTH enforcement mode. `off`=relay mode (no AUTH), `auto`=EHLO/PTR-verified servers skip AUTH, `on`=always require AUTH before MAIL FROM.
+  - Global AUTH enforcement policy. `off` does not require AUTH, `on` requires AUTH before MAIL FROM, and `auto` checks the currently unset session trust flag (therefore also requires AUTH). Listener `on`/`off` overrides this setting; listener `auto` uses it.
 
 Startup sequence (simplified):
 

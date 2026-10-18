@@ -2,7 +2,12 @@
 
 ## 背景
 
-SMTP 入站（25 端口）在投递前做 SPF/DKIM/DMARC 三重验证，结果写入 `Authentication-Results` 头（RFC 8601）。这三者都涉及 **DNS TXT 查询**，且校验对象是**发件服务器（MTA）的 IP 和域名**而非单个客户端，复用率高。
+当前 SMTP 入站可执行 SPF/DKIM/DMARC 计算，三者涉及 DNS TXT 查询。MAIL FROM 的
+SPF `fail` + `hard` 拒收已接通；认证提交豁免此阶段 SPF。DATA_END 会保存 DKIM/DMARC
+等结果到会话，但 **尚未接通 DKIM/DMARC hard 拒收和 Authentication-Results 头写入**。
+头构造函数存在，SMTP 路径没有调用；缺失 DNS/body_path 时还会跳过 DATA_END 校验。
+配置为 `hard` 不能据此声称已有完整三重强制验证。2026-10-18 公网回投测试独立 DKIM
+验签成功，但保存的 MIME 没有认证结果头，与代码一致。
 
 2026-08-18 起改为**异步校验**：`InboundVerifier` 直接使用异步 `IDnsResolver`（c-ares），不再用 `SyncDnsWrapper` 同步阻塞 io_context。
 
@@ -21,7 +26,7 @@ DATA        WAIT_DATA → IN_MESSAGE            收正文（流式落盘）
 DATA_END    IN_MESSAGE ──发起完整校验异步──→ DKIM: selector._domainkey TXT + 验签
                                               DMARC: _dmarc TXT + 评估(依赖 SPF/DKIM)
                                               SPF: 复用 MAIL FROM 结果 或补查
-              └─校验回调─→ 组装 Authentication-Results 头 → 入队 → 250 OK → WAIT_MAIL_FROM
+              └─校验回调─→ 保存结果到 context → 入队 → 按 ack_mode 回复 → WAIT_MAIL_FROM
 QUIT        WAIT_QUIT                         221 Bye
 ```
 
@@ -30,15 +35,18 @@ QUIT        WAIT_QUIT                         221 Bye
 | 校验 | 最早开始 | 必须完成 | 依赖 | DNS 查询 |
 |---|---|---|---|---|
 | SPF | MAIL FROM（有 client_ip + mail_from + ehlo_domain） | MAIL FROM 回复前（提前拒）或 DATA_END | 无 | SPF TXT + 递归 a/mx/include/redirect（深度 ≤10，RFC 7208） |
-| DKIM | DATA_END（需完整 header+body） | 组装 Authentication-Results 前 | 完整 body | `selector._domainkey` TXT |
-| DMARC | DATA_END（需 From 头域） | 组装 Authentication-Results 前 | From 域 + SPF 结果 + DKIM 结果 | `_dmarc` TXT |
+| DKIM | DATA_END（需完整 header+body） | DATA_END 入队前（当前仅记录结果） | 完整 body | `selector._domainkey` TXT |
+| DMARC | DATA_END（需 From 头域） | DATA_END 入队前（当前仅记录结果） | From 域 + SPF 结果 + DKIM 结果 | `_dmarc` TXT |
 
 ### 说明
 
 - **SPF 最早可在 MAIL FROM 阶段发起**（只需 `client_ip` + `mail_from` + `ehlo_domain`），不必等 DATA。SPF hard-fail 且配置 `inbound_spf_mode=hard` 时可在 MAIL FROM 提前 550 拒绝，节省带宽。
 - **DKIM 必须等 DATA 结束**（需要完整 header + body 计算 hash）。
 - **DMARC 必须等 DATA 结束**（需要 From 头域），且策略评估依赖 SPF/DKIM 结果，故在 SPF/DKIM 完成后评估。
-- `Authentication-Results` 头必须在邮件**落盘/入队前**写入（写在正文前），因此 DATA_END 的校验必须在 `submit_mail_to_queue()` 之前完成。
+- 当前没有向 MIME 注入 `Authentication-Results`。后续实现需在验证完成后、持久化提交前
+  通过存储写入接口生成最终正文，处理失败、取消和 DKIM 正文保真，不能只改内存 header。
+- 后续还需把 hard 失败映射到明确的 SMTP 拒绝，并覆盖无 DNS/正文路径和临时 DNS 错误；
+  当前不能用“成功验签一封合法邮件”替代失败路径验收。
 
 ---
 

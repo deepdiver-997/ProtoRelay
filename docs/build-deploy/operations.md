@@ -38,9 +38,10 @@ DB schema 和 outbox 状态，再进入替换步骤。
 ## 本地容器构建
 
 持久容器 `relay-build` 基于 `ubuntu:22.04`、`--platform linux/amd64`，源码挂载 `/src:ro`，
-成品目录挂载 `/out`，构建目录在容器 `/build`。首次准备可用：
+成品目录可挂载 `/out`，构建目录在容器 `/build`。首次准备可用：
 
 ```bash
+mkdir -p artifacts/linux-release
 docker run -d --name relay-build --platform linux/amd64 \
   -v "$PWD:/src:ro" -v "$PWD/artifacts/linux-release:/out" ubuntu:22.04 sleep infinity
 docker exec relay-build bash -lc 'apt-get update && apt-get install -y \
@@ -59,6 +60,15 @@ docker exec relay-build bash -lc 'cmake -S /src -B /build \
   -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v2" && \
   cmake --build /build --target smtpsServer imapsServer -j4 && \
   mkdir -p /out/release && cp /build/smtpsServer /build/imapsServer /out/release/'
+```
+
+若旧容器的 `/out` 对应已被删除的宿主临时目录，不要把复制失败误判为编译失败。
+可直接从容器取成品，再核对版本/哈希：
+
+```bash
+mkdir -p artifacts/linux-release/release
+docker cp relay-build:/build/smtpsServer artifacts/linux-release/release/
+docker cp relay-build:/build/imapsServer artifacts/linux-release/release/
 ```
 
 必须显式使用服务器 CPU 支持的 ISA，旧边缘 CPU 不含 AVX2。不要在小内存服务器编译/链接。
@@ -113,3 +123,21 @@ systemctl show -p MainPID -p ExecStart -p WorkingDirectory smtpserver imapserver
 
 认证日志、邮件正文、收件人地址、生产凭据和 DKIM 私钥不能作为公开发布记录提交。
 公开记录保留版本、检查项目和脱敏结论；真实地址/测试凭据放未跟踪的本地运维记录。
+
+## IMAP 异常退出对话
+
+所有非正常 LOGOUT 的会话均在有效 `log_file` 的父目录 `traces/` 下留存，认证成功不会
+停止记录。STARTTLS 前后沿用同一 trace；文件头 `auth: yes/no` 在认证成功时立即同步。
+IMAP LOGIN/SASL 凭据在写入缓冲前脱敏，入站 literal 只记长度；服务端响应和 UID/FETCH
+请求继续保留。单连接上限 64 KiB，最多 300 份，超限淘汰最旧。目录 0700、文件 0600，
+历史文件也应由运维收紧权限；不要把原始对话公开贴到 issue。
+正常 LOGOUT 丢弃记录；保存失败应有日志警告。细节见
+[异常追踪复盘](../bugfixes/2026-10-18-imap-abnormal-trace.md)。
+
+## 2026-10-18 发布验证
+
+主站 SMTP/IMAP 与边缘 SMTP 已更新到代码提交 `78279b4b528c`，未部署 Webmail。
+完成 TLS/AUTH、QQ 外发与公网回投、IMAP MIME/section 附件哈希和独立 DKIM 验签。
+验收同时确认了 Webmail 独立附件提取/索引及 DATA_END 验证结果应用的既有缺口；
+不能把这次 SMTP/IMAP 成功扩大为完整 Webmail 收件附件或完整入站 hard 策略验收。
+详情与成品指纹见 [发布验证](../reports/release-2026-10-18.md)。

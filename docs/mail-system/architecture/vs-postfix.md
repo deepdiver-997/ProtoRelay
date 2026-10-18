@@ -94,7 +94,7 @@ Postfix 配置分散在多个软件的目录中，不同文件之间彼此耦合
 | 持久化队列 | Postfix qmgr (文件系统队列) | ✅ 数据库持久化队列 |
 | 出站投递 | Postfix smtp (C, 高度优化) | ✅ 租约式出站客户端 |
 | ESMTP 8BITMIME / SMTPUTF8 | ✅ | ✅ |
-| 附件处理 | Amavis 解码 | ✅ 流式写盘，内存可控 |
+| 附件处理 | Amavis 解码 | 完整 MIME 流式写盘；Webmail 独立附件提取/索引待接通 |
 | Sieve 过滤 | Dovecot Pigeonhole | ❌ |
 | 全文搜索 | Dovecot FTS (Solr/Flatcurve/xapian) | ❌ 可外挂实现 |
 

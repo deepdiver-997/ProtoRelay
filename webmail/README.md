@@ -50,6 +50,9 @@ C++ 服务或 Vite 开发代理。
 尚未提供附件上传、密送、服务器草稿保存、删除/移动/文件夹管理、全库搜索、邮件线程、
 回复引用/转发及联系人。列表筛选只作用于当前页；文件夹中已有的历史草稿可以阅读，
 写信内容不会自动存入草稿箱。TLS/Secure cookie 感知装配继续按后端计划推进。
+下载要求已有独立附件文件和正确索引。当前 SMTP 仅保留完整 MIME，独立附件提取/索引
+尚未接通，所以 SMTP/IMAP 能读取的附件不保证已能在 Webmail 下载；浏览器 fixture
+预置附件文件，未覆盖这个入站衔接缺口。详情见 [API 契约](../docs/mail-system/architecture/webmail-api.md)。
 下载目前支持 local/distributed provider；S3/HDFS 未实现有界下载时返回 503，
 不会退回整对象入内存。
 

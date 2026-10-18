@@ -57,6 +57,12 @@ Business docs: [`docs/web-server/README.md`](docs/web-server/README.md).
 
 `webmailServer` supports a shared DB session per account (new logins revoke previous cookies), mailbox/message lists, MIME reading, and durable submission through an injected MailSubmissionService (text/HTML, To/Cc). Apply `config/sql/migration_web_sessions.sql` on shard 0 (existing multi-session tables also need `migration_web_sessions_single_login.sql` after stopping old Webmail writers) and give every writer a distinct `webmail_node_id` (0..1023; default 1, SMTP defaults to 0). The React/TypeScript SPA includes login, responsive mailbox/read/compose views, read/star flags, authenticated streaming attachment downloads (local/distributed), and an atomic Sent copy on direct submission. Attachment uploads, server drafts, folder mutations, and full-mailbox search remain pending. Build/start instructions are in [webmail/README.md](webmail/README.md). See the [Webmail API contract](docs/mail-system/architecture/webmail-api.md) for configuration and verification commands.
 
+Current integration limits: SMTP preserves complete MIME attachments for SMTP/IMAP delivery,
+but does not yet populate complete standalone attachment objects/indexes for Webmail downloads.
+DATA_END DKIM/DMARC computation is not yet connected to hard rejection or stored
+Authentication-Results headers. See the [release verification](docs/reports/release-2026-10-18.md)
+for tested paths and limits.
+
 ## Extensibility by Design
 
 ProtoRelay is structured around replaceable modules instead of monolithic logic:
