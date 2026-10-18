@@ -4,7 +4,7 @@
 // 用法: webmailServer [config_json] [port] [doc_root]
 //       默认 config=config/webmailConfig.json（文件缺失 → 程序化最小配置，
 //       DB 走 NullDBPool：health/me 可用，login 一律 503 fail-closed）
-//       默认 port=8081  doc_root=./config/webmail
+//       默认 port=8081  doc_root=./build-webmail
 // 装配同 mail_server_combined：bootstrap::assemble 按配置建 DB/存储/路由。
 // ──────────────────────────────────────────────────────────────────
 #include "framework/thread_pool/io_thread_pool.h"
@@ -31,13 +31,13 @@ static std::unique_ptr<webmail::WebmailServer> g_server;
 int main(int argc, char* argv[]) {
     if (argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         std::cout << "Usage: webmailServer [config_json] [port] [doc_root]\n"
-                     "Defaults: config/webmailConfig.json, 8081, ./config/webmail\n"
+                     "Defaults: config/webmailConfig.json, 8081, ./build-webmail\n"
                      "Config: webmail_node_id (0..1023, default 1); use a distinct Snowflake node ID per writer.\nShared DB sessions and direct durable submission require use_database=true.\n";
         return 0;
     }
     std::string config_path = argc > 1 ? argv[1] : "config/webmailConfig.json";
     int port = argc > 2 ? std::atoi(argv[2]) : 8081;
-    std::string doc_root = argc > 3 ? argv[3] : "./config/webmail";
+    std::string doc_root = argc > 3 ? argv[3] : "./build-webmail";
 
     sigemptyset(&g_sigset);
     sigaddset(&g_sigset, SIGINT);

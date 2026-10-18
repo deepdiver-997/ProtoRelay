@@ -119,6 +119,7 @@ struct mail
     std::vector<attachment> attachments; // 附件元数据列表
     mail_system::persist_storage::SharedPersistStatus persist_status{}; // 持久化状态
     bool mail_over{false};    // 邮件内容是否完整（用于流式处理）
+    bool save_sent_copy{false}; // trusted Webmail submission: Sent link belongs to the same DB transaction
     bool deduplicated_inbound{false}; // 是否被入站去重命中
     std::shared_future<bool> meta_future; // 附件元数据持久化返回的 future，可拷贝
     MimePart mime_root;        // 预解析 MIME 树（SMTP 收信时填充）
@@ -139,6 +140,7 @@ struct mail
         persist_status = other.persist_status;
         body_path = other.body_path;
         mail_over = other.mail_over;
+        save_sent_copy = other.save_sent_copy;
         deduplicated_inbound = other.deduplicated_inbound;
         mime_root = other.mime_root;
     }
@@ -158,6 +160,7 @@ struct mail
         persist_status = other.persist_status;
         body_path = std::move(other.body_path);
         mail_over = other.mail_over;
+        save_sent_copy = other.save_sent_copy;
         deduplicated_inbound = other.deduplicated_inbound;
         mime_root = std::move(other.mime_root);
     }

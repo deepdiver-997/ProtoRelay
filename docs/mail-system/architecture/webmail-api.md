@@ -2,13 +2,15 @@
 
 `webmailServer` 是复用邮件引擎的第四个协议前端。当前支持 cookie 登录会话、
 邮箱列表、邮件分页、MIME 正文读取与清洗、通过共享 MailSubmissionService 写信。
-附件下载、附件上传、搜索、标记已读、文件夹管理、自动保存发件箱副本和 SPA 尚未完成。
+React/TypeScript SPA、已读/标星、附件下载及自动保存已发送副本已实现。
+附件上传、服务器草稿、全库搜索、文件夹修改尚未完成。前端构建与开发代理见
+[Webmail 前端](../../../webmail/README.md)。
 
 ## 启动与装配
 
 ```bash
 ./build-release/webmailServer --help
-./build-release/webmailServer config/webmailConfig.json 8081 ./config/webmail
+./build-release/webmailServer config/webmailConfig.json 8081 ./build-webmail
 ```
 
 参数顺序为配置文件、HTTP 端口、静态根目录。`webmail_node_id` 为 0..1023
@@ -31,11 +33,44 @@ TLS/Secure cookie 感知装配仍待补；静态目录不能指向邮件正文�
 | `GET /api/mailboxes` | 本人邮箱及 total/unread |
 | `GET /api/mailboxes/{id}/messages?page=1&page_size=50` | 邮件分页；每页上限 100 |
 | `GET /api/mailboxes/{id}/messages/{mail_id}` | 邮件元数据、解码正文、附件清单 |
+| `PATCH /api/mailboxes/{id}/messages/{mail_id}` | 本人的 read/is_starred 状态 |
+| `GET /api/mailboxes/{id}/messages/{mail_id}/attachments/{attachment_id}` | 鉴权后流式下载附件 |
+| `HEAD /api/mailboxes/{id}/messages/{mail_id}/attachments/{attachment_id}` | 同样鉴权，返回长度/下载头，不发送正文 |
 | `POST /api/send` | 生成 MIME，按会话身份提交共享 MailSubmissionService |
+
+用户、邮箱、邮件、附件的 `id` 一律为十进制 **JSON 字符串**（如 `"9007199254740993"`），
+避免 JavaScript Number 丢失雪花 ID 的精度；计数、时间戳、状态仍为数字。JSON 响应
+设置 `Cache-Control: no-store` 和 `X-Content-Type-Options: nosniff`。
 
 邮件列表与详情的 `subject` 解码 UTF-8/ASCII RFC 2047 B/Q encoded-word；
 未知 charset 保留原文。HTML 正文经过白名单清洗；前端仍须使用无脚本、
 无 same-origin 权限的 sandbox iframe 和 CSP，远程图片默认禁用。
+
+## 已读与标星
+
+`PATCH` 要求登录 cookie 和 `Content-Type: application/json`，请求为非空对象，
+只允许布尔字段 `read`、`is_starred`，可单独或一起提交。成功返回 `200 {"ok":true}`；
+重复设置成功，即使数据库改变行数为 0。未知字段、错误类型/空对象为 400，媒体类型为 415。
+
+先在事务中锁定并验证邮箱/邮件均归本人，再更新。`read=true` 将本人收件行的状态
+1 改为 0，false 反向设置；只处理 0/1，保留其他投递状态，其他收件人不受影响。
+Sent 的 read 更新不改变任何收件行；Sent 列表/详情状态与未读数均为 0。
+标星只更新本人当前邮箱中的关联。详情 GET 本身不改变已读状态，前端打开后显式 PATCH。
+没有归属关系统一 404；DB/事务失败回滚并返回 503。
+
+## 附件下载
+
+在同一查询中核对附件属于该邮件、邮件在该邮箱、邮箱和关联均属当前用户；
+路径从数据库和 shard storage 获取，不接受客户端文件路径。跨用户/不匹配 ID 返回 404。
+GET/HEAD 均验证会话。成功使用 octet-stream、attachment Content-Disposition、
+UTF-8 filename*（控制字符/引号全部百分号编码）、nosniff/no-store。
+HEAD 包括错误响应均不发送正文。
+
+存储提供 `open_download` 有界读取接口；local 持有已打开文件，distributed 在打开时
+依次尝试副本，HTTP worker 每次最多读 64 KiB，写完成再读下一块。长度以打开的实际对象
+为准；下载中途对象截断或读取失败记录日志并关闭连接，消费者可发现 Content-Length
+不完整。每个下载持有 worker 池，不在后续块中依赖裸 Server 指针。
+S3/HDFS 尚无有界下载实现时返回 503，不使用 `read_all` 回退；不支持 Range/断点续传。
 
 ## 写信请求
 
@@ -88,7 +123,11 @@ HTTP 状态为 **202**，表示已确认持久化，不表示外域收件人已�
 | 504 | 等待持久化超时，结果未知，retryable=false |
 
 提交失败响应包含 `message_id`，方便核对邮件。收到结果未知时提示用户核实投递，
-不能自动重试。当前不自动生成 Sent 副本。等待持久化 deadline 取自
+不能自动重试。默认 DirectSubmitter 将发件人的 Sent（`box_type=2`）关联与邮件元数据、
+收件人/outbox 放入同一主分片事务；HTTP 202 时副本已提交，共享原邮件 ID/正文，
+不会额外复制正文文件。缺少系统 Sent 邮箱或关联写入失败会回滚整个提交。
+SMTP/可选 Loopback 适配器仍遵循传统客户端另行 APPEND 的行为。
+等待持久化 deadline 取自
 `inbound_persist_wait_timeout_ms`；超时不撤销在途持久化。
 LoopbackSmtpSubmitter 继续作为可注入的兼容适配器，其 SMTP 协议限制和结果映射
 仍由专项测试覆盖，默认 Webmail 不使用该路径。
@@ -111,4 +150,5 @@ python3 test/scripts/webmail_send_smoke.py --build-dir build-release
 Python 的 email 标准库独立验证编码。带 `--db-config` 的烟测会使用临时高端口
 启动两个 Webmail 与一个 SMTP 服务、创建随机账号、验证共享会话、新登录互踢/并发单会话、重启、
 跨节点提交/读信、别名与跨协议配额、注销、状态/到期/改密，
-随后清理自身数据和进程。
+随后清理自身数据和进程。还验证 Sent 与接收邮件共享 ID、Sent 不改变收件人未读、
+标记幂等及越权拒绝。完整真实浏览器验收见前端 README 的 fixture 命令。

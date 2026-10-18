@@ -414,23 +414,44 @@ void PersistentQueue::batch_insert_metadata_async(mail* mail_data, IDBConnection
                 return;
             }
 
-            // 本域收件人的 mailbox 关联（不影响事务成功/失败）
-            for (size_t i = 0; i < mail_data->to.size(); ++i) {
-                const std::string& recipient = mail_data->to[i];
-                const auto domain = extract_domain_lower(recipient);
-                auto system_domain = local_domain_;
-                std::transform(system_domain.begin(), system_domain.end(), system_domain.begin(),
-                               [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                if (domain.empty() || domain != system_domain) continue;
+            auto finish_metadata = [this, mail_data, conn, cb = std::move(cb)](bool ok, std::string error) mutable {
+                if (!ok) { cb(false, std::move(error)); return; }
+                // 本域收件人的 mailbox 关联（不影响事务成功/失败）
+                for (size_t i = 0; i < mail_data->to.size(); ++i) {
+                    const std::string& recipient = mail_data->to[i];
+                    const auto domain = extract_domain_lower(recipient);
+                    auto system_domain = local_domain_;
+                    std::transform(system_domain.begin(), system_domain.end(), system_domain.begin(),
+                                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                    if (domain.empty() || domain != system_domain) continue;
 
-                std::string mailbox_sql = db::sql::build_insert_mailbox_for_recipient(
-                    mail_data->id, recipient, conn);
-                // mailbox 插入非关键路径，同步执行即可
-                conn->execute(mailbox_sql);
-            }
+                    std::string mailbox_sql = db::sql::build_insert_mailbox_for_recipient(
+                        mail_data->id, recipient, conn);
+                    // mailbox 插入非关键路径，同步执行即可
+                    conn->execute(mailbox_sql);
+                }
 
-            LOG_PERSISTENT_QUEUE_INFO("Successfully inserted metadata for mail ID {}", mail_data->id);
-            cb(true, "");
+                LOG_PERSISTENT_QUEUE_INFO("Successfully inserted metadata for mail ID {}", mail_data->id);
+                cb(true, "");
+            };
+            if (!mail_data->save_sent_copy) { finish_metadata(true, ""); return; }
+            // Sent is critical for Webmail: its relation commits atomically with recipients/outbox.
+            conn->async_query(
+                "SELECT mb.id AS mailbox_id,mb.user_id FROM mailboxes mb JOIN users u ON u.id=mb.user_id "
+                "WHERE u.mail_address=? AND u.status=1 AND mb.box_type=2 ORDER BY mb.id LIMIT 1",
+                {mail_data->from},
+                [mail_data, conn, finish_metadata = std::move(finish_metadata)](std::shared_ptr<IDBResult> boxes) mutable {
+                    if (!boxes || !boxes->get_row_count()) {
+                        LOG_PERSISTENT_QUEUE_ERROR("Sent mailbox unavailable mail_id={}", mail_data->id);
+                        finish_metadata(false, "Sent mailbox unavailable"); return;
+                    }
+                    conn->async_execute(
+                        "INSERT INTO mail_mailbox (mail_id,mailbox_id,user_id) VALUES (?,?,?)",
+                        {std::to_string(mail_data->id), boxes->get_value(0, "mailbox_id"), boxes->get_value(0, "user_id")},
+                        [finish_metadata = std::move(finish_metadata)](bool ok) mutable {
+                            finish_metadata(ok, ok ? "" : "Sent relation insert failed");
+                        });
+                });
         });
     });
 }

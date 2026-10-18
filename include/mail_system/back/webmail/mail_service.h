@@ -185,8 +185,11 @@ public:
                             [conn, out, cb = std::move(cb)]
                             (std::shared_ptr<IDBResult> result) mutable {
                                 if (result) {
-                                    for (size_t i = 0; i < result->get_row_count(); ++i)
-                                        out.messages.push_back(map_mail_row(*result, i));
+                                    for (size_t i = 0; i < result->get_row_count(); ++i) {
+                                        auto message = map_mail_row(*result, i);
+                                        if (out.mailbox.box_type == 2) message.status = 0;
+                                        out.messages.push_back(std::move(message));
+                                    }
                                 }
                                 out.ok = static_cast<bool>(result);
                                 cb(std::move(out));
@@ -197,7 +200,7 @@ public:
 
     // ── 读信（MVP-2 第二步）─────────────────────────────────────
     // 编排：归属校验（信必须在该箱且属于本人）→ 发件人/收件人/附件三查询
-    // 并行发起计数 join → storage 读 body → MIME 树（sidecar 优先）取材解码。
+    // 顺序查询 → storage 读 body → MIME 树（sidecar 优先）取材解码。
     // 与读路径契约一致：回调在 storage/DB 事件线程触发，HTTP 写经 exec_ctx_
     // 串行化。body 文件缺失不失败——信壳（元数据/附件表）照常返回，
     // body_available=false 交前端降级展示。
@@ -221,6 +224,7 @@ public:
                 st.subject = result->get_value(0, "subject");
                 st.send_time =
                     static_cast<std::time_t>(safe_stoull(result->get_value(0, "send_time")));
+                st.status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
                 st.starred = result->get_value(0, "is_starred") == "1";
                 st.important = result->get_value(0, "is_important") == "1";
                 st.deleted = result->get_value(0, "is_deleted") == "1";

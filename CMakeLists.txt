@@ -419,6 +419,8 @@ if(BUILD_OBJECT_ONLY)
         src/mail_system/back/webmail/api/auth_api.cpp
         src/mail_system/back/webmail/api/mail_api.cpp
         src/mail_system/back/webmail/api/compose_api.cpp
+        src/mail_system/back/webmail/api/actions_api.cpp
+        src/mail_system/back/webmail/mail_actions.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
         src/mail_system/back/webmail/session_store.cpp
         src/mail_system/back/webmail/direct_submitter.cpp
@@ -493,6 +495,8 @@ else()
         src/mail_system/back/webmail/api/auth_api.cpp
         src/mail_system/back/webmail/api/mail_api.cpp
         src/mail_system/back/webmail/api/compose_api.cpp
+        src/mail_system/back/webmail/api/actions_api.cpp
+        src/mail_system/back/webmail/mail_actions.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
         src/mail_system/back/webmail/session_store.cpp
         src/mail_system/back/webmail/direct_submitter.cpp
@@ -634,6 +638,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         src/mail_system/back/webmail/api/auth_api.cpp
         src/mail_system/back/webmail/api/mail_api.cpp
         src/mail_system/back/webmail/api/compose_api.cpp
+        src/mail_system/back/webmail/api/actions_api.cpp
+        src/mail_system/back/webmail/mail_actions.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
         src/mail_system/back/webmail/session_store.cpp
         src/mail_system/back/webmail/direct_submitter.cpp

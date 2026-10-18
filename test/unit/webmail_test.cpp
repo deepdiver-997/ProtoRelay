@@ -1,3 +1,5 @@
+// 2026-10-18: browser resource IDs lost precision and message detail omitted unread state.
+// docs/bugfixes/2026-10-18-webmail-browser-contract.md
 // webmail_test — webmail MVP 单测（无 DB、无网络）
 //   SessionStore：token 生成/登记/查询/注销/TTL 过期；cookie 解析
 //   AuthService：缓存命中路径（预注入 AuthCache，无需 DB）+ 三态结果
@@ -225,7 +227,7 @@ static void test_router_login_flow() {
     assert(c.resp->extra_headers.find("Set-Cookie: wb_session=") != std::string::npos);
     assert(c.resp->extra_headers.find("HttpOnly") != std::string::npos);
     assert(c.resp->extra_headers.find("SameSite=Lax") != std::string::npos);
-    assert(c.resp->body.find("\"id\":42") != std::string::npos);
+    assert(c.resp->body.find("\"id\":\"42\"") != std::string::npos);
 
     // 提取 cookie → /api/me 自省 200
     std::string set_cookie = c.resp->extra_headers;
@@ -336,7 +338,7 @@ static void test_mail_api_mailboxes_list() {
 
     auto body = nlohmann::json::parse(c.resp->body);
     assert(body["mailboxes"].size() == 2);
-    assert(body["mailboxes"][0]["id"] == 1);
+    assert(body["mailboxes"][0]["id"] == "1");
     assert(body["mailboxes"][0]["name"] == "INBOX");
     assert(body["mailboxes"][0]["unread"] == 3);
     assert(body["mailboxes"][1]["box_type"] == 2);
@@ -382,7 +384,7 @@ static void test_mail_api_messages_pagination() {
     assert(c.calls == 1 && c.resp->status == 200);
 
     auto body = nlohmann::json::parse(c.resp->body);
-    assert(body["mailbox"]["id"] == 7 && body["mailbox"]["name"] == "INBOX");
+    assert(body["mailbox"]["id"] == "7" && body["mailbox"]["name"] == "INBOX");
     assert(body["total"] == 25 && body["page"] == 2 && body["page_size"] == 10);
     assert(body["total_pages"] == 3);
     assert(body["messages"].size() == 2);
@@ -613,7 +615,7 @@ static void fire_message_meta(test::MockDbConnection& conn,
     // ① 归属校验：mail 在箱内 + body_path
     conn.fire_query(std::make_shared<test::MockDbResult>(MockRows{
         {{"id", "7"}, {"subject", "Hello"}, {"body_path", body_path},
-         {"send_time", "1729200000"}, {"is_starred", "1"},
+         {"send_time", "1729200000"}, {"status", "1"}, {"is_starred", "1"},
          {"is_important", "0"}, {"is_deleted", "0"}}}));
     // ② 发件人 / ③ 收件人 / ④ 附件（发起序 = 回调序，join 后进存储段）
     conn.fire_query(std::make_shared<test::MockDbResult>(MockRows{
@@ -669,10 +671,13 @@ static void test_mail_api_get_message_flow() {
     assert(c.calls == 1 && c.resp->status == 200);
 
     auto body = nlohmann::json::parse(c.resp->body);
-    assert(body["message"]["id"] == 7);
+    assert(body["message"]["id"] == "7");
     assert(body["message"]["sender"] == "alice@test.local");
     assert(body["message"]["recipients"].size() == 2);
     assert(body["message"]["is_starred"] == true);
+    // 2026-10-18: detail must expose unread state so the UI can mark it read.
+    // docs/bugfixes/2026-10-18-webmail-browser-contract.md
+    assert(body["message"]["status"] == 1);
     assert(body["body_available"] == true);
     // QP 解码（软换行 + UTF-8 字节）
     assert(body["body"]["text"] == "h\xc3\xa9llo w\xc3\xb6rldnext line");
@@ -988,9 +993,78 @@ static void test_single_login_replacement() {
     assert(calls == 1);
 }
 
+// 2026-10-18: JSON numeric Snowflake IDs lose precision in JavaScript.
+// See docs/bugfixes/2026-10-18-webmail-browser-contract.md.
+static void test_resource_ids_are_lossless() {
+    auto response = api::json_response(200, {{"message", {{"id", uint64_t{9007199254740993ULL}}, {"status", 1}}}});
+    auto body = nlohmann::json::parse(response.body);
+    assert(body["message"]["id"].is_string());
+    assert(body["message"]["id"] == "9007199254740993");
+    assert(body["message"]["status"] == 1);
+}
+
+
+static void test_message_actions_contract() {
+    const auto dir = std::filesystem::temp_directory_path() / ("webmail-actions-" + std::to_string(getpid()));
+    std::filesystem::remove_all(dir);
+    MailApiFixture fx(dir.string());
+    MailActions actions(fx.shard, nullptr);
+    ApiRouter api(*fx.auth, fx.sessions, *fx.mail, nullptr, &actions);
+    const auto resource = "/api/mailboxes/81/messages/7";
+    auto check = [&](http::HttpRequest req, int status) {
+        Captured response;
+        assert(api.handle(req, response.complete()));
+        assert(response.calls == 1 && response.resp->status == status);
+        return response.resp;
+    };
+    check(make_req("PATCH", resource, "{\"read\":true}"), 401);
+    for (const auto& body : {"{}", "[]", "{", "{\"read\":1}", "{\"deleted\":true}"}) {
+        auto req = make_req("PATCH", resource, body, "wb_session=" + fx.token);
+        req.headers["content-type"] = "application/json";
+        check(std::move(req), 400);
+    }
+    auto req = make_req("PATCH", resource, "{\"read\":true}", "wb_session=" + fx.token);
+    check(req, 415);
+    req.headers["content-type"] = "application/json";
+    check(req, 404); // no ownership row
+    fx.db->mock_conn()->push_sync_result(nullptr);
+    check(req, 503);
+    fx.db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{{{"box_type","1"}}}));
+    check(req, 200);
+    fx.db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{{{"box_type","1"}}}));
+    check(req, 200); // repeat is idempotent
+    const auto file = (dir / "binary").string();
+    { std::ofstream out(file, std::ios::binary); out.write("a\0b", 3); }
+    const std::string download = std::string(resource) + "/attachments/5";
+    check(make_req("GET", download, {}, "wb_session=" + fx.token), 404);
+    for (const auto& method : {"GET", "HEAD"}) {
+        fx.db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{
+            {{"filepath",file},{"filename","hello\"\r\nInjected: yes.txt"}}}));
+        auto response = check(make_req(method, download, {}, "wb_session=" + fx.token), 200);
+        assert(response->content_length == 3 && response->body.empty());
+        assert(response->extra_headers.find("%22%0D%0AInjected%3A%20yes.txt") != std::string::npos);
+        assert(response->extra_headers.find("\r\nInjected:") == std::string::npos);
+        assert(bool(response->body_source) == (std::string(method) == "GET"));
+        if (response->body_source) {
+            char bytes[8]; size_t count = 0; pr::IoError error;
+            assert(response->body_source->read_at(0, bytes, sizeof(bytes), count, error));
+            assert(std::string(bytes,count) == std::string("a\0b",3));
+        }
+    }
+    fx.db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{{{"filepath",file+"missing"}}}));
+    check(make_req("GET", download, {}, "wb_session=" + fx.token), 503);
+    std::filesystem::remove_all(dir);
+    std::cout << "  [PASS] flags and attachment API validation, ownership, errors, binary stream and safe filename\n";
+}
+
 void run_webmail_submission_tests();
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--unread-detail-regression") {
+        test_mail_api_get_message_flow(); return 0;
+    }
+    test_resource_ids_are_lossless();
+    test_message_actions_contract();
     if (argc == 2 && std::string(argv[1]) == "--single-login-regression") {
         test_single_login_replacement(); return 0;
     }

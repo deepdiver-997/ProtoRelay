@@ -13,6 +13,7 @@
 #include "framework/http/http_types.hpp"
 #include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/webmail/api/api_util.h"
+#include "mail_system/back/webmail/api/actions_api.h"
 #include "mail_system/back/webmail/api/auth_api.h"
 #include "mail_system/back/webmail/api/mail_api.h"
 #include "mail_system/back/webmail/api/compose_api.h"
@@ -27,14 +28,16 @@ namespace mail_system::webmail {
 class ApiRouter {
 public:
     ApiRouter(AuthService& auth, SessionStore& sessions, MailService& mail,
-              ISmtpSubmitter* submitter = nullptr)
-        : auth_(auth), sessions_(sessions), mail_(mail), submitter_(submitter) {}
+              ISmtpSubmitter* submitter = nullptr, MailActions* actions = nullptr)
+        : auth_(auth), sessions_(sessions), mail_(mail), submitter_(submitter), actions_(actions) {}
 
     using Complete = std::function<void(pr::http::HttpResponse)>;
 
     bool handle(const pr::http::HttpRequest& req, const Complete& complete) const {
         // 只认领 /api 前缀；其余一切（含 /api 精确路径）归静态文件管线
         if (req.path.rfind("/api/", 0) != 0) return false;
+
+        if (api::route_actions(req, sessions_, actions_, complete)) return true;
 
         if (req.path == "/api/health") {
             if (req.method != "GET" && req.method != "HEAD") {
@@ -143,6 +146,7 @@ private:
     SessionStore& sessions_;
     MailService& mail_;
     ISmtpSubmitter* submitter_;
+    MailActions* actions_;
 };
 
 } // namespace mail_system::webmail

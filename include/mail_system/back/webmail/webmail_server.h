@@ -48,6 +48,7 @@ private:
     std::shared_ptr<SessionStore> sessions_;
     std::shared_ptr<AuthService> auth_service_;
     std::shared_ptr<MailService> mail_service_;
+    std::shared_ptr<MailActions> mail_actions_;
     std::shared_ptr<ISmtpSubmitter> submitter_;
     std::shared_ptr<ApiRouter> router_;
 };

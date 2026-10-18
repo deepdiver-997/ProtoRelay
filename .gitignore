@@ -238,3 +238,11 @@ test/sql_queries_test
 artifacts/
 artifacts-g0/
 /build-release/
+
+# Webmail frontend
+!/webmail/package-lock.json
+/build-webmail/
+/webmail/playwright-report/
+/webmail/test-results/
+
+/build-webmail-cache/

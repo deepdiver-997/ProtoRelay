@@ -466,7 +466,7 @@ void test_build_webmail_queries() {
     check_contains("webmail_list_mb_own_row", list_mb,
                    "LEFT JOIN mail_recipients mr ON mr.mail_id = mm.mail_id AND mr.recipient = ?");
     check_contains("webmail_list_mb_unread_rule", list_mb,
-                   "SUM(CASE WHEN mr.status = 1 THEN 1 ELSE 0 END)");
+                   "SUM(CASE WHEN mb.box_type <> 2 AND mr.status = 1 THEN 1 ELSE 0 END)");
     check_contains("webmail_list_mb_user_filter", list_mb, "WHERE mb.user_id = ?");
     check_contains("webmail_list_mb_group", list_mb,
                    "GROUP BY mb.id, mb.name, mb.box_type");

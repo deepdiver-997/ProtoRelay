@@ -1,0 +1,36 @@
+{
+  "name": "protorelay-webmail",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:e2e": "playwright test",
+    "format": "prettier --write src tests vite.config.ts playwright.config.ts tsconfig.json package.json index.html",
+    "format:check": "prettier --check src tests vite.config.ts playwright.config.ts tsconfig.json package.json index.html"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.3.1",
+    "@tiptap/extension-placeholder": "3.32.0",
+    "@tiptap/react": "3.32.0",
+    "@tiptap/starter-kit": "3.32.0",
+    "lucide-react": "1.59.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "prettier": "3.6.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}

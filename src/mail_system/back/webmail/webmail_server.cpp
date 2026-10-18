@@ -26,6 +26,7 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
       auth_service_(std::make_shared<AuthService>(
           get_shard_router(), auth_cache_, worker_pool, config.use_database)),
       mail_service_(std::make_shared<MailService>(get_shard_router())),
+      mail_actions_(std::make_shared<MailActions>(get_shard_router(), worker_pool)),
       submitter_(std::move(submitter)) {
     if (!submitter_ && config.use_database) {
         if (submission_node_id > 1023) throw std::invalid_argument("webmail_node_id must be 0..1023");
@@ -53,9 +54,9 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
         outbound_->start();
     }
     // 工厂把 handler 注入每个新连接的 session；须在 start() 之前设置完成
-    router_ = std::make_shared<ApiRouter>(*auth_service_, *sessions_, *mail_service_, submitter_.get());
+    router_ = std::make_shared<ApiRouter>(*auth_service_, *sessions_, *mail_service_, submitter_.get(), mail_actions_.get());
     set_api_handler([router = router_, auth = auth_service_, sessions = sessions_,
-                     mail = mail_service_, submitter = submitter_](const pr::http::HttpRequest& req,
+                     mail = mail_service_, actions = mail_actions_, submitter = submitter_](const pr::http::HttpRequest& req,
                            std::function<void(pr::http::HttpResponse)> complete) {
         return router->handle(req, std::move(complete));
     });

@@ -134,6 +134,7 @@ private:
     std::string doc_root_;   // 静态根目录（工厂注入）
     ApiHandler api_handler_;  // 动态请求处理器（工厂注入，可空）
     std::shared_ptr<HttpFsm<ConnectionType>> fsm_;
+    std::shared_ptr<pr::ThreadPoolBase> download_workers_;
     std::atomic<int> state_{static_cast<int>(HttpState::WAIT_REQUEST_LINE)};
     HttpEvent next_event_{HttpEvent::REQUEST_LINE};
 
@@ -154,6 +155,7 @@ private:
     // API 响应（api_handler 的 complete 落点）：走 HttpResponse 全量字段——
     // content_type=application/json、extra_headers（Set-Cookie 等）都进头。
     void send_response(HttpResponse r, bool close);
+    void stream_download(std::shared_ptr<pr::IDownloadStream> source, uint64_t offset, bool close);
     void send_file(const std::string& full_path, const std::string& content_type,
                    int64_t length, bool close, bool head_only);
     // 便携式分块读文件 → async_write（非零拷贝路径；Linux 见 sendfile 备注）

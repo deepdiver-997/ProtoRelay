@@ -91,6 +91,7 @@ struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation
                 m.subject = self->request.subject;
                 m.source_message_id = self->request.message_id;
                 m.send_time = std::time(nullptr);
+                m.save_sent_copy = true;
                 m.box_id = 1;
                 m.status = 1;
                 m.mail_over = true;

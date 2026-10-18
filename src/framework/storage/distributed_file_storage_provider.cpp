@@ -99,6 +99,16 @@ bool DistributedFileStorageProvider::append_binary(const std::string& storage_ke
     return true;
 }
 
+std::unique_ptr<pr::IDownloadStream> DistributedFileStorageProvider::open_download(const std::string& key, IoError& error) {
+    const auto relative = strip_root_prefix(key);
+    for (auto index : pick_replica_indices(relative)) {
+        auto stream = pr::FileDownloadStream::open(roots_[index] + relative, error);
+        if (stream) return stream;
+    }
+    error = IoError::permanent("no readable download replica");
+    return nullptr;
+}
+
 bool DistributedFileStorageProvider::read_all(const std::string& storage_key,
                                               std::string& out,
                                               IoError& error) {

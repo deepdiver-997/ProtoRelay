@@ -52,6 +52,7 @@ HttpSession<ConnectionType>::HttpSession(pr::ServerBase* server,
     std::shared_ptr<HttpFsm<ConnectionType>> fsm)
     : pr::SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
+    , download_workers_(server ? server->m_workerThreadPool : nullptr)
 {}
 
 template <typename ConnectionType>
@@ -512,10 +513,25 @@ void HttpSession<ConnectionType>::send_response(HttpResponse r, bool close) {
                                               : r.status_text) + "\r\n";
     head += "Content-Type: " + r.content_type + "\r\n";
     head += r.extra_headers;   // 逐条自带 CRLF（Set-Cookie / Cache-Control 等）
-    head += "Content-Length: " + std::to_string(r.body.size()) + "\r\n";
+    head += "Content-Length: " + std::to_string(r.content_length >= 0 ? r.content_length : static_cast<int64_t>(r.body.size())) + "\r\n";
     head += (close ? "Connection: close\r\n" : "Connection: keep-alive\r\n");
     head += "\r\n";
     auto self = self_ptr();
+    if (request_.method == "HEAD") {
+        this->do_async_write(head, [self, close](auto, const boost::system::error_code& ec) {
+            if (ec) { self->handle_error(ec); return; }
+            self->finish_response(!close);
+        });
+        return;
+    }
+    if (r.body_source) {
+        auto source = r.body_source;
+        this->do_async_write(head, [self, source, close](auto, const boost::system::error_code& ec) {
+            if (ec) { self->handle_error(ec); return; }
+            self->stream_download(source, 0, close);
+        });
+        return;
+    }
     std::string resp = head + r.body;
     this->do_async_write(resp,
         [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
@@ -523,6 +539,27 @@ void HttpSession<ConnectionType>::send_response(HttpResponse r, bool close) {
             if (ec) { self->handle_error(ec); return; }
             self->finish_response(!close);
         });
+}
+
+template <typename ConnectionType>
+void HttpSession<ConnectionType>::stream_download(std::shared_ptr<pr::IDownloadStream> source, uint64_t offset, bool close) {
+    if (offset >= source->size()) { finish_response(!close); return; }
+    auto self = self_ptr();
+    auto task = [self, source, offset, close] {
+        std::string chunk(static_cast<size_t>(std::min<uint64_t>(64 * 1024, source->size() - offset)), '\0');
+        size_t count = 0;
+        pr::IoError error;
+        if (!source->read_at(offset, chunk.data(), chunk.size(), count, error) || !count || count > chunk.size()) {
+            LOG_AT("HTTP", err, "download read failed offset={} reason={}", offset, error.message);
+            self->close(); return;
+        }
+        chunk.resize(count);
+        self->do_async_write(chunk, [self, source, offset, count, close](auto, const boost::system::error_code& ec) {
+            if (ec) { self->handle_error(ec); return; }
+            self->stream_download(source, offset + count, close);
+        });
+    };
+    if (download_workers_) download_workers_->post(std::move(task)); else task();
 }
 
 template <typename ConnectionType>

@@ -99,6 +99,11 @@ public:
         return inner_->open_read(storage_key, error);
     }
 
+    std::unique_ptr<pr::IDownloadStream> open_download(const std::string& storage_key,
+                                                      IoError& error) override {
+        return inner_->open_download(storage_key, error);
+    }
+
     bool object_size(const std::string& storage_key, std::uint64_t& size,
                      IoError& error) override {
         return inner_->object_size(storage_key, size, error);

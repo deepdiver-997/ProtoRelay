@@ -47,6 +47,10 @@ public:
                      std::uint64_t& size,
                      IoError& error) override;
 
+    std::unique_ptr<pr::IDownloadStream> open_download(const std::string& key, IoError& error) override {
+        return pr::FileDownloadStream::open(key, error);
+    }
+
 private:
     static std::string ensure_trailing_slash(const std::string& path);
     static std::string sanitize_filename(const std::string& name);

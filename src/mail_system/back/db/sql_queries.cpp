@@ -514,7 +514,7 @@ std::string build_imap_copy_insert_mailbox() {
 std::string build_webmail_list_mailboxes() {
     return "SELECT mb.id, mb.name, mb.box_type, "
            "COUNT(mm.id) AS total, "
-           "COALESCE(SUM(CASE WHEN mr.status = 1 THEN 1 ELSE 0 END), 0) AS unread "
+           "COALESCE(SUM(CASE WHEN mb.box_type <> 2 AND mr.status = 1 THEN 1 ELSE 0 END), 0) AS unread "
            "FROM mailboxes mb "
            "LEFT JOIN mail_mailbox mm ON mm.mailbox_id = mb.id AND mm.user_id = mb.user_id "
            "LEFT JOIN mail_recipients mr ON mr.mail_id = mm.mail_id AND mr.recipient = ? "
@@ -554,8 +554,12 @@ std::string build_webmail_list_mailbox_mails(std::uint32_t limit, std::uint32_t 
 std::string build_webmail_get_mail_in_mailbox() {
     return "SELECT m.id, m.subject, m.body_path, "
            "UNIX_TIMESTAMP(m.send_time) AS send_time, "
-           "mm.is_starred, mm.is_important, mm.is_deleted "
+           "mm.is_starred, mm.is_important, mm.is_deleted, "
+           "CASE WHEN mb.box_type=2 THEN 0 ELSE COALESCE((SELECT MAX(mr.status) "
+           "FROM mail_recipients mr WHERE mr.mail_id=m.id AND mr.recipient=u.mail_address),0) END AS status "
            "FROM mail_mailbox mm JOIN mails m ON mm.mail_id = m.id "
+           "JOIN mailboxes mb ON mb.id=mm.mailbox_id AND mb.user_id=mm.user_id "
+           "JOIN users u ON u.id=mm.user_id "
            "WHERE mm.mail_id = ? AND mm.mailbox_id = ? AND mm.user_id = ?";
 }
 

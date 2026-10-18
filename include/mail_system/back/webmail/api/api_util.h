@@ -32,14 +32,22 @@ inline const char* status_text(int code) {
 // CRLF（Set-Cookie 等）。dump 带 replace 错误处理器：邮件正文可能携带非
 // UTF-8 字节（charset 声明缺失/脏数据），默认 dump 会抛 316 异常打穿回调
 // 线程——replace 把非法字节替换为 U+FFFD，响应永远可序列化。
-inline pr::http::HttpResponse json_response(int status, const nlohmann::json& body,
+inline void stringify_ids(nlohmann::json& value) {
+    if (value.is_array()) { for (auto& item : value) stringify_ids(item); }
+    else if (value.is_object()) for (auto it = value.begin(); it != value.end(); ++it) {
+        if (it.key() == "id" && it->is_number_integer()) *it = std::to_string(it->get<uint64_t>());
+        else stringify_ids(*it);
+    }
+}
+inline pr::http::HttpResponse json_response(int status, nlohmann::json body,
                                             std::string extra_headers = {}) {
     pr::http::HttpResponse r;
     r.status = status;
     r.status_text = status_text(status);
     r.content_type = "application/json";
+    stringify_ids(body);
     r.body = body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-    r.extra_headers = std::move(extra_headers);
+    r.extra_headers = "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n" + extra_headers;
     return r;
 }
 

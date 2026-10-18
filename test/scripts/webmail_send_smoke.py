@@ -77,10 +77,10 @@ def check_local_e2e(build_dir, db_config_path, temp):
     opener, cookie_jar = new_client()
     base = f"http://127.0.0.1:{port}"
 
-    def api(path, body=None, client=None, content_type="application/json", node=None):
+    def api(path, body=None, client=None, content_type="application/json", node=None, method=None):
         request = urllib.request.Request((f"http://127.0.0.1:{node}" if node else base) + path,
             data=None if body is None else json.dumps(body).encode(),
-            headers={} if body is None else {"Content-Type": content_type})
+            headers={} if body is None else {"Content-Type": content_type}, method=method)
         try:
             response = (client or opener).open(request, timeout=35)
         except urllib.error.HTTPError as error:
@@ -212,7 +212,21 @@ def check_local_e2e(build_dir, db_config_path, temp):
             assert cursor.fetchone()[0] == 1
             cursor.execute("SELECT recipient FROM mail_recipients WHERE sender=%s", (addresses[0],))
             assert sorted(row[0] for row in cursor.fetchall()) == sorted(addresses[1:])
-        # 当前提交服务不自动保存 Sent（传统客户端通常另用 IMAP APPEND）。
+        # Webmail creates Sent in the same primary-shard transaction before HTTP 202.
+        status, sender_boxes = api("/api/mailboxes")
+        sent_box = next(b for b in sender_boxes["mailboxes"] if b["box_type"] == 2)
+        assert sent_box["total"] == 1 and sent_box["unread"] == 0
+        status, sent_page = api(f"/api/mailboxes/{sent_box['id']}/messages")
+        assert status == 200 and sent_page["total"] == 1
+        sent_id = sent_page["messages"][0]["id"]
+        assert isinstance(sent_id, str) and int(sent_id) > 2**53
+        assert sent_page["messages"][0]["status"] == 0
+        sent_resource = f"/api/mailboxes/{sent_box['id']}/messages/{sent_id}"
+        assert api(sent_resource, {"read": True}, method="PATCH")[0] == 200
+        with db.cursor() as cursor:
+            cursor.execute("SELECT status FROM mail_recipients WHERE mail_id=%s", (sent_id,))
+            assert [row[0] for row in cursor.fetchall()] == [1, 1]
+        readers = []
         for address in addresses[1:]:
             reader, _ = new_client()
             assert api("/api/login", {"address": address, "password": password}, client=reader)[0] == 200
@@ -222,12 +236,24 @@ def check_local_e2e(build_dir, db_config_path, temp):
             status, page = api(f"/api/mailboxes/{box['id']}/messages", client=reader)
             assert status == 200 and page["total"] == 1, (status, page)
             item = page["messages"][0]
-            assert item["subject"] == payload["subject"]
+            assert item["subject"] == payload["subject"] and item["id"] == sent_id
+            assert item["status"] == 1
+            readers.append((reader, box["id"]))
             status, detail = api(f"/api/mailboxes/{box['id']}/messages/{item['id']}", client=reader)
             assert status == 200 and detail["body_available"], (status, detail)
             assert detail["message"]["subject"] == payload["subject"]
             assert detail["body"]["text"] == "hello\r\n.\r\nlast"
             assert detail["body"]["html"] == "<b>ok</b>"
+            assert detail["message"]["status"] == 1
+            resource = f"/api/mailboxes/{box['id']}/messages/{item['id']}"
+            assert api(resource, {"read": True, "is_starred": True}, client=reader, method="PATCH")[0] == 200
+            assert api(resource, {"read": True}, client=reader, method="PATCH")[0] == 200 # idempotent
+            changed = api(resource, client=reader)[1]["message"]
+            assert changed["status"] == 0 and changed["is_starred"]
+            assert api(sent_resource, {"read": True}, client=reader, method="PATCH")[0] == 404
+            assert api(resource, {"read": "true"}, client=reader, method="PATCH")[0] == 400
+            assert api(resource, {}, client=reader, method="PATCH")[0] == 400
+        print("PASS: atomic Sent relation; lossless snowflake IDs; own-recipient read and per-mailbox star; idempotent flags; cross-user denial")
         assert api("/api/me")[0] == 200 # other accounts have independent session slots
         # Cross-node logout, disable, expiry and credential reset all reject old cookies.
         assert api("/api/logout", {}, node=second_port)[0] == 200

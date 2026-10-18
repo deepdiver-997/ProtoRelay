@@ -2,6 +2,7 @@
 #define PR_FRAMEWORK_STORAGE_I_STORAGE_PROVIDER_H
 
 #include "framework/storage/i_read_stream.h"
+#include "framework/storage/i_download_stream.h"
 #include "framework/storage/i_write_stream.h"
 #include "framework/storage/buffered_upload_stream.h"
 #include "framework/storage/local_file_read_stream.h"
@@ -56,6 +57,12 @@ public:
     // 失败返回 nullptr 并填充 error。
     virtual std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
                                                      IoError& error);
+
+    // True bounded download. Unsupported providers fail explicitly; never fall back to read_all.
+    virtual std::unique_ptr<pr::IDownloadStream> open_download(const std::string&, IoError& error) {
+        error = IoError::permanent("provider does not support bounded downloads");
+        return nullptr;
+    }
 
     // ── 读侧 ────────────────────────────────────────────────────────────
     // 读侧此前完全没有抽象：FSM 直接对 body_path 做 std::ifstream。

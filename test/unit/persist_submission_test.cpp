@@ -23,6 +23,7 @@ class ControlledConnection : public test::MockDbConnection {
 public:
     ControlledConnection() { set_deferred(false); }
     std::atomic<bool> fail_metadata{false}, committed{false};
+    std::atomic<bool> sent_missing{false}, sent_insert_failure{false}, sent_inserted{false};
     std::atomic<int> deletes{0}, rollbacks{0};
     bool execute(const std::string& sql) override {
         if (sql.rfind("DELETE", 0) == 0) ++deletes;
@@ -30,6 +31,18 @@ public:
     }
     void async_execute(const std::string& sql, pr::ExecuteCallback cb) override {
         cb(!fail_metadata && execute(sql));
+    }
+    void async_query(const std::string& sql, const std::vector<std::string>& params, pr::QueryCallback cb) override {
+        if (sql.find("mb.box_type=2") != std::string::npos) {
+            assert(params == std::vector<std::string>{"sender@test.local"});
+            cb(std::make_shared<test::MockDbResult>(sent_missing ? std::vector<std::map<std::string,std::string>>{} :
+                std::vector<std::map<std::string,std::string>>{{{"mailbox_id","7"},{"user_id","9"}}}));
+        } else test::MockDbConnection::async_query(sql, params, std::move(cb));
+    }
+    void async_execute(const std::string& sql, const std::vector<std::string>& params, pr::ExecuteCallback cb) override {
+        assert(sql.find("INSERT INTO mail_mailbox") == 0);
+        assert(params.size() == 3 && params[1] == "7" && params[2] == "9" && !committed);
+        sent_inserted = !sent_insert_failure; cb(!sent_insert_failure);
     }
     void async_commit(pr::ExecuteCallback cb) override {
         std::lock_guard<std::mutex> lock(mutex_); commit_ = std::move(cb); ready_.notify_all();
@@ -200,7 +213,29 @@ void test_independent_waiters() {
     assert(long_wait.wait_for(1s) == std::future_status::ready && long_wait.get().status == PersistStatus::SUCCESS);
     guard.reset(); runner.join();
 }
+void test_atomic_sent_copy(int failure) {
+    Fixture f;
+    f.db->connection->sent_missing = failure == 1;
+    f.db->connection->sent_insert_failure = failure == 2;
+    auto mail = f.message(); mail->save_sent_copy = true; const auto body = mail->body_path;
+    auto submission = f.queue->submit_owned_mail(std::move(mail)); assert(submission.accepted);
+    std::promise<PersistResult> reply; auto result = reply.get_future();
+    submission.ticket.async_wait(f.io.get_executor(), 2s, [&](PersistResult r) { reply.set_value(r); });
+    if (!failure) {
+        assert(f.db->connection->wait_commit() && f.db->connection->sent_inserted);
+        assert(result.wait_for(20ms) == std::future_status::timeout);
+        f.db->connection->complete_commit();
+        assert(result.wait_for(2s) == std::future_status::ready && result.get().status == PersistStatus::SUCCESS);
+        assert(std::filesystem::exists(body));
+    } else {
+        assert(f.db->connection->wait_rollback() && !f.db->connection->committed);
+        f.db->connection->complete_rollback();
+        assert(result.wait_for(2s) == std::future_status::ready && result.get().status == PersistStatus::FAILED);
+        assert(!std::filesystem::exists(body));
+    }
+}
 int main() {
+    test_atomic_sent_copy(0); test_atomic_sent_copy(1); test_atomic_sent_copy(2);
     test_observer_race(); test_independent_waiters(); test_committed_cancel(); test_timeout_late_commit();
     test_failed_rollback(false); test_failed_rollback(true);
     test_cancel_shutdown_pressure(false); test_cancel_shutdown_pressure(true);
