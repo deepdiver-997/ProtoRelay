@@ -1016,44 +1016,32 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                     });
                 return;
             }
-            // after_persist: wait for persistence, then reply
-            auto pool = session->get_server()->m_workerThreadPool;
-            pool->post([s = session]() mutable {
-                auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(s.get());
-                if (!smtp_s) { if (s) s->close(); return; }
-                if (!smtp_s->has_pending_mail_submission()) { s->close(); return; }
-
-                const auto wait_to = std::chrono::milliseconds(
-                    std::atomic_load(&s->get_server()->m_config)->inbound_persist_wait_timeout_ms);
-                auto deadline = std::chrono::steady_clock::now() + wait_to;
-                auto backoff = std::chrono::milliseconds(50);
-                while (std::chrono::steady_clock::now() < deadline) {
-                    auto status = smtp_s->get_pending_mail_persist_status();
-                    if (status == persist_storage::PersistStatus::SUCCESS) {
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                        smtp_s->reset_mail_state();
-                        s->get_server()->increment_mails_accepted();
-                        s->do_async_write("250 OK\r\n",
-                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> ss, const boost::system::error_code& ec) mutable {
-                                if (ec) return;
-                                ss->do_async_read();
-                            });
-                        return;
-                    }
-                    if (status == persist_storage::PersistStatus::FAILED ||
-                        status == persist_storage::PersistStatus::CANCELLED) {
-                        smtp_s->clear_pending_mail_submission();
-                        s->do_async_write("451 Requested action aborted: local processing error\r\n",
-                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
-                        return;
-                    }
-                    std::this_thread::sleep_for(backoff);
-                    backoff = std::min(backoff * 2, std::chrono::milliseconds(400));
+            // 在连接 executor 上等待完成/超时，不占用持久化需要的 worker。
+            session->set_paused(true);
+            const auto timeout = std::chrono::milliseconds(
+                std::atomic_load(&session->get_server()->m_config)->inbound_persist_wait_timeout_ms);
+            smtp_session->async_wait_pending_mail(timeout, [session](persist_storage::PersistResult result) {
+                auto* smtp = static_cast<SmtpsSession<ConnectionType>*>(session.get());
+                if (session->is_closed()) { smtp->clear_pending_mail_submission(); return; }
+                session->set_paused(false);
+                if (!result.timed_out && result.status == persist_storage::PersistStatus::SUCCESS) {
+                    session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                    smtp->reset_mail_state();
+                    session->get_server()->increment_mails_accepted();
+                    session->do_async_write("250 OK\r\n",
+                        [](auto s, const boost::system::error_code& ec) {
+                            if (!ec) s->do_async_read();
+                        });
+                    return;
                 }
-                smtp_s->cancel_pending_mail_submission();
-                smtp_s->clear_pending_mail_submission();
-                s->do_async_write("451 Requested action aborted: local processing timeout\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
+                LOG_SMTP_WARN("Persistence acknowledgement failed mail_id={} timeout={} reason={}",
+                              result.mail_id, result.timed_out, result.error);
+                if (result.timed_out) smtp->cancel_pending_mail_submission();
+                smtp->clear_pending_mail_submission();
+                session->do_async_write(result.timed_out
+                    ? "451 Requested action aborted: local processing timeout\r\n"
+                    : "451 Requested action aborted: local processing error\r\n",
+                    [](auto s, const boost::system::error_code&) { s->close(); });
             });
         } catch (const std::exception& e) {
             LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());

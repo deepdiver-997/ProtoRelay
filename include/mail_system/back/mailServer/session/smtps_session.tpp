@@ -335,11 +335,19 @@ persist_storage::SubmitOwnedMailResult SmtpsSession<ConnectionType>::submit_mail
         // 压测 / 无 DB 模式：直接标记接受
         result.accepted = true;
         result.ticket.mail_id = this->get_mail()->id;
+        result.ticket.status = this->get_mail()->persist_status;
+        result.ticket.complete(persist_storage::PersistStatus::SUCCESS);
         pending_submission_ = result.ticket;
         LOG_SESSION_INFO("Mail {} accepted without persistence (null queue)", this->get_mail()->id);
     }
 
     return result;
+}
+
+template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::async_wait_pending_mail(
+    std::chrono::milliseconds timeout, persist_storage::PersistCompletion::Complete callback) {
+    pending_submission_.async_wait(this->get_connection().get_executor(), timeout, std::move(callback));
 }
 
 template <typename ConnectionType>

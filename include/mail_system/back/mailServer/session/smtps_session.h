@@ -68,6 +68,7 @@ public:
     void create_mail_on_data_command();
     persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
     bool check_mail_persist_status();
+    void async_wait_pending_mail(std::chrono::milliseconds timeout, persist_storage::PersistCompletion::Complete callback);
 
     // 冲刷剩余缓冲并持久化正文（含 fsync）。返回 false 表示正文未能落盘，
     // 调用方必须回 4xx 而不是 250 —— 否则就是骗发送方 MTA 把邮件从队列里删掉。

@@ -28,6 +28,7 @@
 | [architecture/smtp-outbound-client-design.md](architecture/smtp-outbound-client-design.md) | SMTP 发件引擎设计 |
 | [architecture/inbound-verification-flow.md](architecture/inbound-verification-flow.md) | 入站校验（SPF/DKIM/DMARC）流程 |
 | [architecture/smtp-client-core.md](architecture/smtp-client-core.md) | 共享 SMTP 内核、重试结果、executor 分配与后续可信提交入口 |
+| [持久化完成通知](architecture/persistence-completion.md) | 提交结果订阅、取消/超时及 after_persist 的异步接受边界 |
 | [architecture/webmail-api.md](architecture/webmail-api.md) | Webmail API：会话、列表、读信、MIME 写信与本机 SMTP 提交 |
 | [architecture/auth-password-hash.md](architecture/auth-password-hash.md) | 认证密码哈希：bcrypt/MD5/明文三格式口径、AuthCache 窗口、rehash-on-login 自动升级（CAS 回写） |
 | [architecture/vs-postfix.md](architecture/vs-postfix.md) | 与 Postfix 的对比 |

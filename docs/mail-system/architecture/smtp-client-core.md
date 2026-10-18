@@ -38,8 +38,9 @@ QUIT 失败不改变 Accepted。Submitter 的短期限重试与 Outbound 的持�
 同进程部署优先注入 MailSubmissionService 接口，SMTP/Webmail 都是其前端，
 不让 Webmail 持有具体 SmtpsServer 指针，也不复制一套数据库/文件写入逻辑。
 持久化队列和 outbox 共用。默认在正文完成存储及 DB/outbox 事务提交后应答，
-不等待外域投递。当前 PersistentQueue.accepted 只表示进入内存队列，不能当作
-崩溃可恢复的接受凭据；完成通知应改为回调，替代 worker 的 sleep 轮询。
+不等待外域投递。PersistentQueue.accepted 只表示进入内存队列，不能当作
+崩溃可恢复的接受凭据。第二阶段已增加完成回调并移除 SMTP worker sleep 轮询，
+详见 [持久化完成通知](persistence-completion.md)。
 
 跨进程可考虑专用 TLS listener/Unix socket。连接认证服务身份（可查数据库中的
 服务账号/令牌），每条请求仍携带用户身份、信封、正文长度、request_id，进入同一
@@ -98,3 +99,9 @@ ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan -R 'smtp_client_test|smt
 另以控制队列和连接分属不同 IO context/线程运行并通过 ASan/UBSan。Python
 独立 MIME 消费者及真实 HTTP 登录→SMTP AUTH→持久化→To/Cc 收件箱/正文读取、
 配额与注销检查均通过。测试只向本机投递，未作外部账号收信验收。
+
+## 第二阶段入口
+
+已落实持久化完成订阅与 SMTP after_persist 接入，见
+[持久化完成通知](persistence-completion.md)。Webmail 仍经现有 SMTP 提交；共享
+账号政策与完整 MailSubmissionService、可信 listener、请求级持久化幂等仍未实现。

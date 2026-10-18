@@ -2,6 +2,8 @@
 #define PERSISTENT_QUEUE_H
 
 #include "mail_system/back/entities/mail.h"
+#include "mail_system/back/persist_storage/persist_submission.h"
+#include <condition_variable>
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/mailServer/outbound/outbox_repository.h"
@@ -25,26 +27,6 @@ namespace mail_system { using pr::MetricsServer; }
 
 namespace mail_system {
 namespace persist_storage {
-
-struct PersistSubmissionTicket {
-    std::uint64_t mail_id{0};
-    mail_system::persist_storage::SharedPersistStatus status{};
-    std::shared_ptr<std::atomic<bool>> cancel_requested{std::make_shared<std::atomic<bool>>(false)};
-
-    bool valid() const {
-        return mail_id != 0;
-    }
-
-    void request_cancel() const {
-        if (cancel_requested) {
-            cancel_requested->store(true, std::memory_order_release);
-        }
-    }
-
-    bool is_cancel_requested() const {
-        return cancel_requested && cancel_requested->load(std::memory_order_acquire);
-    }
-};
 
 struct SubmitOwnedMailResult {
     bool accepted{false};
@@ -86,6 +68,7 @@ public:
     // 出站投递最大尝试次数：写进 mail_outbox.max_attempts 行（供 claim/重试/DEAD 判断）
     void set_max_attempts(size_t max_attempts);
 
+    // 停止接收，取消尚未开始的任务；析构在 worker/DB 运行时仍存活时排空在途回调。
     void shutdown();
     bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
 
@@ -96,6 +79,7 @@ public:
 
 private:
     void push_queue_metrics();
+    void finish_task();
     // ---- 工作线程 ----
     void worker_loop();
     bool process_task();
@@ -156,7 +140,9 @@ private:
     };
     boost::lockfree::queue<QueueItem*, boost::lockfree::capacity<16384>> task_queue_{};
     std::atomic<size_t> queued_task_count_{0};
-    std::atomic<bool> wakeup_flag_{false};  // worker 自旋等待的低开销唤醒
+    std::mutex submission_mutex_;
+    std::condition_variable available_;
+    std::condition_variable drained_;
     std::atomic<size_t> inflight_mail_count_{0};
     std::atomic<size_t> batch_pop_size_{16};
 

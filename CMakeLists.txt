@@ -301,6 +301,7 @@ set(COMMON_SRCS
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp
+    src/mail_system/back/persist_storage/persist_submission.cpp
     src/mail_system/back/router/table_shard_router.cpp
     # 显式模板实例化（避免每个翻译单元重复编译 ~4300 行模板代码）
     src/mail_system/back/mailServer/session/session_base_inst.cpp
@@ -643,6 +644,16 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(http_session_read_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(http_session_read_test)
 
+    add_executable(persist_submission_test ${COMMON_SRCS} test/unit/persist_submission_test.cpp)
+    target_include_directories(persist_submission_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(persist_submission_test)
+
+    add_executable(smtp_persist_ack_test ${COMMON_SRCS}
+        src/mail_system/back/mailServer/smtps/smtps_server.cpp
+        test/unit/smtp_persist_ack_test.cpp)
+    target_include_directories(smtp_persist_ack_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(smtp_persist_ack_test)
+
     add_executable(smtp_client_test src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_test.cpp)
     setup_mail_target(smtp_client_test)
 
@@ -804,6 +815,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME password_rehash_test COMMAND password_rehash_test)
     add_test(NAME safe_parse_test COMMAND safe_parse_test)
     add_test(NAME webmail_test COMMAND webmail_test)
+    add_test(NAME persist_submission_test COMMAND persist_submission_test)
+    set_tests_properties(persist_submission_test PROPERTIES TIMEOUT 20)
+    add_test(NAME smtp_persist_ack_test COMMAND smtp_persist_ack_test)
+    set_tests_properties(smtp_persist_ack_test PROPERTIES TIMEOUT 15)
     add_test(NAME smtp_client_test COMMAND smtp_client_test)
     set_tests_properties(smtp_client_test PROPERTIES TIMEOUT 20)
     add_test(NAME smtp_submitter_test COMMAND smtp_submitter_test)
@@ -844,6 +859,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         webmail_test
         smtp_submitter_test
         smtp_client_test
+        smtp_persist_ack_test
+        persist_submission_test
         http_session_read_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
@@ -857,7 +874,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             intrusion_detector_test server_config_test mapped_file_test
             thread_pool_test session_base_test server_base_test
             outbound_utils_test metrics_core_test bcrypt_test
-            webmail_test smtp_submitter_test smtp_client_test http_session_read_test)
+            webmail_test smtp_submitter_test smtp_client_test smtp_persist_ack_test persist_submission_test http_session_read_test)
         foreach(_t IN LISTS _asan_tests)
             # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)

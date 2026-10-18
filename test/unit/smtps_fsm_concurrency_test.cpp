@@ -95,7 +95,13 @@ struct ConcurrencyTestFixture {
             std::vector<std::shared_ptr<DBPool>>{db_pool},  // shard 0 → mock DB（user_exists 异步路径）
             std::vector<std::shared_ptr<storage::IStorageProvider>>{});
 
-        persist_q = std::make_shared<pq::PersistentQueue>(router, worker_pool);
+        // 此夹具 use_database=false；mock DB 专用于认证/RCPT 的单个手动回调，
+        // 不与后台持久化共享单槽 MockDbConnection，否则回调会被其它场景覆盖。
+        auto file_router = std::make_shared<router::StaticShardRouter>(
+            std::vector<std::pair<std::string, int>>{}, 0,
+            std::vector<std::shared_ptr<DBPool>>{},
+            std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+        persist_q = std::make_shared<pq::PersistentQueue>(file_router, worker_pool);
         pq::PersistentQueuePressureConfig pc;
         pc.max_inflight_mails           = 1000000;
         pc.min_available_memory_mb      = 0;
