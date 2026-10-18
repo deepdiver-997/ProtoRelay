@@ -1,5 +1,9 @@
 # ProtoRelay 架构演进文档
 
+> 本文保留架构演进/开发过程的历史描述。2026-10-18 当前结构与能力以
+> [整体架构](../architecture/ARCHITECTURE.md) 和 [Webmail API](../mail-system/architecture/webmail-api.md)
+> 为准；旧类名、示例路径、缓存策略和阶段测试数应按当时背景阅读。
+
 > 本文档记录了项目从单线程 SMTP 原型到分布式邮件系统的完整演进过程。
 > 基于 v1-v8 各版本 git 历史整理，2026-06-25；v8 阶段 I 更新至 2026-08-18。
 

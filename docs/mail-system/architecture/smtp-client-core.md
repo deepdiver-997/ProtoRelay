@@ -1,18 +1,22 @@
 # 共享 SMTP 客户端与提交服务边界
 
-## 2026-10-18 议定的分层
+## 当前分层（2026-10-18）
 
-Outbound 与 Webmail Submitter 共用 SMTP 客户端内核。内核只处理一个端点上的
-连接、TLS、SMTP 响应、EHLO/可选 AUTH、MAIL/多 RCPT/DATA、超时与取消；
-返回结构化结果，不认识 HTTP、MX、数据库、租约、DKIM 或发信配额。
+Outbound 和可注入的兼容 LoopbackSmtpSubmitter 共用 SMTP 客户端内核。
+默认 Webmail 已使用 DirectSubmitter → MailSubmissionService → PersistentQueue，
+不再进行 loopback SMTP AUTH。内核只处理单端点连接、TLS、响应、EHLO/可选 AUTH、
+MAIL/多 RCPT/DATA、超时与取消，不认识 HTTP、MX、DB、租约、DKIM 或配额。
 
 | 层 | 责任 |
 | --- | --- |
-| SMTP client session | 单连接顺序事务、响应限额、Accepted/Rejected/Unavailable/Unknown 等结果 |
-| SMTP connection pool | 连接复用、空闲回收、有界并发；按 endpoint/TLS/认证身份分组 |
-| Webmail submitter | 固定提交端点、凭据与提交策略；API 层映射 HTTP |
-| Outbound 调度 | MX/候选 failover、outbox 租约、内容加载/签名、重试及状态回写 |
-| MailSubmissionService（后续） | 各协议共用的用户身份、账号政策、配额、别名、正文存储和持久化入口 |
+| SMTP client session | 单连接顺序事务、有界响应与结构化结果 |
+| LoopbackSmtpSubmitter | 显式注入的 SMTP 兼容/测试适配器，每请求独立连接 |
+| DirectSubmitter / MailSubmissionService | 默认 Webmail；身份、政策、别名、正文和持久化结果 |
+| AccountPolicy | SMTP/Webmail 共用的认证、发送者绑定、配额及别名 |
+| OutboundServer / OutboundSmtpSession | MX/候选 failover、连接复用、outbox 租约、签名、重试 |
+
+通用 SMTP 连接池尚未抽出；Outbound 保留自己的 MX 池。没有独立 outbound 可执行文件，
+模块由 SMTP/Webmail 应用装配；独立中继节点运行 SMTP 进程。
 
 每条连接创建时从 ExecutorProvider 获取一次 executor。装配根的 provider 捕获
 IOThreadPool 的 shared_ptr，并调用既有 get_io_context() 轮询；同一连接的
@@ -33,9 +37,9 @@ QUIT 失败不改变 Accepted。Submitter 的短期限重试与 Outbound 的持�
 多收件人默认任一 RCPT 拒绝即不发送 DATA；需要部分投递时由调用者显式选择。
 连接仅在事务成功或明确复位后复用；协议错误/取消/不确定状态关闭连接。
 
-## 后续可信提交入口（尚未实现）
+## 进程内提交已实现；跨进程可信入口待做
 
-同进程部署优先注入 MailSubmissionService 接口，SMTP/Webmail 都是其前端，
+默认 Webmail 已注入 MailSubmissionService；SMTP FSM 继续经共享 AccountPolicy 和队列工作，
 不让 Webmail 持有具体 SmtpsServer 指针，也不复制一套数据库/文件写入逻辑。
 持久化队列和 outbox 共用。默认在正文完成存储及 DB/outbox 事务提交后应答，
 不等待外域投递。PersistentQueue.accepted 只表示进入内存队列，不能当作
@@ -53,11 +57,11 @@ QUIT 失败不改变 Accepted。Submitter 的短期限重试与 Outbound 的持�
 RCPT 放行中继，不能维持 AUTH 路径上的配额、发件人绑定、外投开关与别名语义，
 也不是 DNSBL/SPF/DKIM/DMARC 的统一豁免开关。
 
-## 本轮实施范围
+## 阶段记录
 
-先提取公共客户端，迁移 Submitter/Outbound 并接上 executor provider；保留既有
-Outbound 池与 MX/outbox 编排。通用连接池、Submitter 自动重试、共享提交服务、
-配额幂等与自定义 TLS 协议后续分步落地。本轮不更改公开 25/587 的受信策略。
+以下第一、第二阶段描述各自实施时的范围。当前默认直接提交、共享账号政策和
+共享单会话已落地；通用连接池、自动提交重试、请求幂等与跨进程可信协议仍待做。
+公开 25/587 的受信策略未因 Webmail 改变。
 ## 第一阶段实现（2026-10-18）
 
 - `smtp_client/client_session.{h,cpp}`：可复用的单连接异步客户端，支持明文、
@@ -80,11 +84,11 @@ Outbound 池与 MX/outbox 编排。通用连接池、Submitter 自动重试、�
   现在计量 resolve/连接/SMTP 就绪的完整尝试，不能直接与旧版仅 TCP 阶段数值比较。
 
 本阶段只实现全有或全无 RCPT 策略，失败即关闭；未提供部分投递和 RSET 复位 API。
-当前两个适配器仍使用既有明文 SMTP 端点（Webmail 仅 loopback），TLS 能力经公共
+当时两个适配器使用既有明文 SMTP 端点（兼容提交器仅 loopback），TLS 能力经公共
 内核 API 提供，未新增部署配置或自动更改现有端点。报文仍整体缓存在内存中；
-通用连接池、流式正文、自定义可信协议及共享提交服务留待后续。
+当前仍待通用连接池、流式 SMTP 正文和自定义可信协议；共享进程内提交服务已实现。
 
-## 本轮验证
+## 第一阶段验证记录
 
 ```sh
 cmake --build build-release -j 8
@@ -100,16 +104,16 @@ ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan -R 'smtp_client_test|smt
 独立 MIME 消费者及真实 HTTP 登录→SMTP AUTH→持久化→To/Cc 收件箱/正文读取、
 配额与注销检查均通过。测试只向本机投递，未作外部账号收信验收。
 
-## 第二阶段入口
+## 第二阶段完成
 
 已落实持久化完成订阅与 SMTP after_persist 接入，见
-[持久化完成通知](persistence-completion.md)。Webmail 仍经现有 SMTP 提交；共享
-账号政策与完整 MailSubmissionService、可信 listener、请求级持久化幂等仍未实现。
+[持久化完成通知](persistence-completion.md)。后续阶段已实现 AccountPolicy 和
+默认直接提交；可信 listener、请求级持久化幂等仍未实现。
 
 ## 2026-10-18 续：共享账号政策与会话已落地
 
 AccountPolicy 已从 SMTP/Webmail 认证、别名、配额路径收口；Webmail 默认使用
 注入的 MailSubmissionService，确认 PersistentQueue 终态后响应。共享 DB 会话
-支持跨节点/设备和重启，生产不保留 SMTP 密码。详见
+支持跨节点和重启；新登录替换旧设备会话，生产不保留 SMTP 密码。详见
 [共享会话与提交服务](webmail-sessions-and-submission.md)。可信 TLS listener、
 自定义协议、幂等键/配额补偿、会话管理 API 仍未实现。

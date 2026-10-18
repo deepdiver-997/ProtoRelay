@@ -1,6 +1,6 @@
 # ProtoRelay
 
-ProtoRelay 是一个基于 C++17 的邮件中继核心，当前聚焦在 SMTP 协议执行与投递链路基础能力。
+ProtoRelay 是基于 C++17 的邮件系统，已实现 SMTP/SMTPS、IMAP、POP3、异步外投，以及 HTTP API 和 React Webmail 前端。
 
 ## 框架 / 应用分离
 
@@ -8,21 +8,25 @@ ProtoRelay 是一个基于 C++17 的邮件中继核心，当前聚焦在 SMTP �
 
 ```
 include/framework/          # 可复用框架（与邮件协议无关）
-├── server_base.h           #   服务器生命周期、配置、DB/存储/分片初始化
+├── server_base.h           #   服务器生命周期、配置、指标；外部注入资源
 ├── tcp_server_base.h       #   TCP/SSL 多协议监听器模板
 ├── session_base.h          #   异步读写 + FSM 集成 + 超时管理
 ├── fsm_base.h              #   通用状态机 (std::map dispatch)
 ├── fast_fsm_base.h         #   编译期数组 O(1) dispatch 变体
 ├── connection/             #   IConnection 抽象 + TCP/SSL 实现
+├── db/                     #   DB/连接池抽象接口、配置和 RAII 租约
+├── storage/                #   存储 provider、读写流及有界下载流
+├── cache/                  #   通用 LruCache
+├── http/                   #   HTTP/1.1 与 HTTP/2 组件
 ├── thread_pool/            #   IO + Worker 线程池
 ├── metrics_server.h        #   嵌入式 Prometheus 指标
 └── intrusion_detector.h    #   基于 IP 的失败尝试跟踪与封禁
 
 include/mail_system/back/   # 邮件系统（框架的成熟应用）
-├── mailServer/             #   SMTP/IMAP 协议服务器 + FSM 状态机
-├── db/                     #   数据库抽象层 (IDBConnection/DBPool)
-├── storage/                #   存储提供者 (local/s3/hdfs/null)
-├── outbound/               #   出站投递引擎 (MX路由/DNS/DKIM)
+├── mailServer/             #   SMTP/IMAP/POP3 FSM + outbound 调度
+├── db/                     #   MySQL/MariaDB 驱动、具体连接池和邮件 SQL
+├── storage/                #   通用存储接口/实现的兼容 shim
+├── smtp_client/            #   Outbound/兼容提交器共用 SMTP 客户端内核
 ├── persist_storage/        #   持久化队列 + Bloom 去重
 ├── inbound/                #   SPF/DKIM/DMARC 入站验证
 └── ...
@@ -32,15 +36,17 @@ include/mail_system/back/   # 邮件系统（框架的成熟应用）
 
 ## 当前已实现范围
 
-目前项目有意保持边界清晰，重点完成 SMTP 核心三件事：
+已实现认证提交、MIME/附件收取与存储、IMAP/POP3 邮箱访问、事务持久化和 outbox 外投。
+各协议仍有功能边界，具体以对应协议设计为准，不声称完整 RFC 覆盖。
+Outbound 嵌在 `smtpsServer` 和默认 DB 模式的 `webmailServer` 内，由数据库租约协调；
+没有独立 outbound 二进制。出站边缘服务器运行自己的 SMTP 进程。
 
-- SMTP 状态机（会话生命周期与命令流转）
-- SMTP 解析（命令、信封、正文处理）
-- 投递链路（队列与外发 relay 主路径）
-
-这是一种分阶段策略：先把 relay 核心打牢，再逐步扩展更多协议与能力。
-
-`webmailServer` 已支持 cookie 登录、邮箱/邮件列表、MIME 读信与本机 SMTP 提交写信（文本/HTML、收件人/抄送）。附件下载与上传、搜索和 SPA 仍待实现；API 契约、配置及验证命令见 [Webmail API](docs/mail-system/architecture/webmail-api.md)。
+`webmailServer` 已支持共享 DB 单会话（新登录踢旧会话）、邮箱/邮件分页、MIME 读信、
+通过 MailSubmissionService 直接持久化写信、已读/标星、local/distributed 流式附件下载和
+原子保存已发送副本。React SPA 支持桌面三栏与手机布局、富文本 To/Cc 写信和失效草稿保留。
+附件上传、服务器草稿、删除/移动和全库搜索尚未实现。
+构建/运行见 [前端 README](webmail/README.md)，接口与迁移见
+[Webmail API](docs/mail-system/architecture/webmail-api.md)。
 
 ## 可扩展性设计
 
@@ -116,7 +122,7 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 1. **IO 线程池分发**：TCP socket 必须绑定到 `IOThreadPool::get_io_context()`（轮询分发到 4 个 io_context），而非 `ServerBase::get_io_context()`（单 listener context）。曾因代码变更退化到单线程处理所有 TCP 连接，吞吐下降 7 倍。
 2. **连接复用 vs 每封独立连接**：压测脚本默认复用连接（100 连接发 10000 封），更符合 benchmark 惯例。`--per-conn` 切换为每封新连接。
 3. **认证缓存**：SmtpsFsm 内置 `LruCache`（TTL 5min，容量 10000），同一用户重复认证不查 DB。
-4. **持久化队列无锁化**：`boost::lockfree::queue` 替代 `deque + mutex + cv`，worker 指数退让避免空转。
+4. **持久化队列**：有界 `boost::lockfree::queue`，入队/关机门闩和空闲条件变量等待；终态订阅替代 worker sleep 轮询。
 5. **日志级别**：INFO 级下 spdlog 同步写 stdout 在高并发确有开销（每封 5+ 条日志抢同一把锁），压测仍建议 `warn`。但它不是吞吐天花板——DB 路径真正的热点是"TLS+阻塞 fd 使异步 DB 引擎退化成 io 线程同步执行"和"CPS 回调漏持连接导致 op 在飞归池"，均已于 2026-09-24 修复，详见 `test/bench/imap/REPORT.md` 第 6 节。
 6. **SMTP 命令流水线**：`do_async_read` 入口检查命令缓冲区，如有完整行优先解析（每轮 FSM 一个命令），全部处理完后再发起网络读。不完整命令自动等待下次 TCP 到达拼接。
 
@@ -162,7 +168,7 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 
 见：
 
-- `docs/PROJECT_STYLE.md`
+- `docs/style/PROJECT_STYLE.md`
 
 ## 写给学弟学妹
 

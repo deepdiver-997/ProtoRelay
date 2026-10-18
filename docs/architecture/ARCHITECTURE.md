@@ -7,14 +7,17 @@ asynchronous outbound delivery, and remote mailbox access.
 
 **Supported protocols:**
 - **SMTP/SMTPS** (RFC 5321) — inbound mail receipt + outbound delivery
-- **IMAP4rev1** (RFC 3501) — remote mailbox access (reading, searching, managing folders)
+- **IMAP4rev1** (RFC 3501 subset) — remote mailbox access, MIME fetch, flags and folders
+- **POP3** (RFC 1939) — retrieval with per-account DB lease
+- **Webmail HTTP/1.1** — shared single-login sessions, mailbox/read/compose API and React SPA
 
 Current implementation status:
 
 - Inbound (SMTP): protocol parsing, state machine, MIME/attachment handling.
 - Inbound (IMAP): protocol state machine, folder listing, mail retrieval, flag management.
-- Persistence: local filesystem, distributed filesystem roots, optional WebHDFS provider.
-- Outbound (SMTP): queue-driven delivery worker with retry/backoff and lease-style claiming.
+- Persistence: local/distributed, optional S3/WebHDFS; durable transaction completion subscriptions.
+- Outbound (SMTP): embedded scheduler with shared SMTP client core, MX pools, DB leases, DKIM and retries.
+- Webmail: direct in-process submission, atomic Sent, read/star flags and bounded local/distributed attachment downloads.
 - Operations: service-manager-first deployment (systemd/launchd), configurable log sinks.
 
 ## 2. Design Principles
@@ -35,13 +38,15 @@ Current implementation status:
                                 |
 +-------------------------------v------------------------------+
 | Business Layer (mail_system/back/)                            |
-| smtp/         SMTP FSM + session + server                    |
-| imap/         IMAP FSM + session + server                    |
-| outbound/     SMTP outbound delivery client                  |
+| mailServer/   SMTP/IMAP/POP3 FSMs, sessions and outbound      |
+| smtp_client/  shared asynchronous SMTP transaction core      |
+| webmail/      sessions, HTTP API, read/actions/submit adapters |
+| submission/   MailSubmissionService and outbound config        |
+| common/       AccountPolicy, auth and application helpers      |
 | persist_storage/  Inbound persistence queue                   |
 | router/       Shard routing strategies                       |
-| storage/      Storage abstraction (read/write streams, local/S3/HDFS) — see storage-abstraction.md |
-| db/           DB connection pool + SQL builders              |
+| storage/      compatibility headers for framework storage    |
+| db/           MySQL/MariaDB drivers, concrete pools and SQL   |
 | entities/     mail, usr data structs                          |
 +-------------------------------+------------------------------+
                                 |
@@ -53,6 +58,7 @@ Current implementation status:
 | TcpServerBase — TCP/SSL acceptors, listener thread            |
 | Connection    — IConnection, TcpConnection, SslConnection    |
 | ThreadPool    — ThreadPoolBase, IOThreadPool, BoostThreadPool|
+| db/storage/cache/http — generic interfaces and components    |
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
@@ -63,16 +69,21 @@ Current implementation status:
 
 ### 3.1 Framework vs Business
 
-The `include/framework/` directory contains **transport-and-protocol-agnostic** infrastructure:
+`include/framework/` contains generic infrastructure plus transport/protocol component directories
+(`connection/`, `http/`). The lifecycle/FSM base classes do not know mail business types:
 - `SessionBase<ConnectionType>` — manages one TCP/SSL connection lifecycle, async read/write, command buffering
 - `FsmBase<ConnectionType, State, Event>` — transition table + handler registry + dispatch loop
-- `ServerBase` — config loading, metrics, intrusion detection, lifecycle (start/stop/run)
+- `ServerBase` — config, metrics, intrusion detection and lifecycle; requires injected pools/router
 - `TcpServerBase<TcpSession, SslSession>` — TCP/SSL acceptor loop, STARTTLS handoff
 
 Business code in `include/mail_system/back/` inherits from these:
 - `SmtpsSession` / `ImapsSession` : public `SessionBase`
 - `TraditionalSmtpsFsm` / `TraditionalImapsFsm` : public `FsmBase`
-- `SmtpsServer` / `ImapsServer` : public `TcpServerBase`
+- `SmtpsServer` / `ImapsServer` / `Pop3Server` : public `TcpServerBase`
+- `WebmailServer` : public framework `HttpServer`
+
+`mail_system::bootstrap::assemble` is the composition root. It selects concrete DB/storage/router
+implementations and creates or reuses caller-provided pools. Servers/providers do not stop shared pools.
 
 See [docs/framework-refactor.md](framework-refactor.md) for the extraction history.
 
@@ -132,16 +143,23 @@ The server supports three AUTH policies via `inbound_auth_policy`:
 
 **EHLO verification flow** (auto mode): at MAIL FROM, the server performs a cached PTR lookup on the connecting IP. If any returned hostname matches the EHLO domain (exact or suffix), the connection is marked as trusted and AUTH is skipped. The PTR cache shares the 300-second TTL with other DNS caches.
 
-**AUTH implementation**: supports `AUTH LOGIN` (base64-encoded username/password). Credentials are verified against the `users` table. On success, `last_login_time` is updated. The `status` column allows disabling accounts without deletion.
+**SMTP AUTH** supports LOGIN/PLAIN. AccountPolicy shares credential checks, sender binding, quota and
+alias rules with Webmail. Password verification accepts bcrypt and upgrades supported legacy hashes
+on successful login using CAS. SMTP uses its documented short-lived AuthCache; Webmail uses fresh DB checks.
 
 ## 4.2 Outbound Delivery Pipeline
 
-The outbound engine uses the same FsmBase + SessionBase pattern as inbound:
+The outbound engine is embedded in `smtpsServer` and the default DB-backed `webmailServer`.
+There is no standalone outbound executable. A separate relay machine runs its own SMTP process,
+queue and DB; it is not an IMAP/account database replica.
 
-- `OutboundSmtpFsm` — 12-state SMTP client state machine (INIT → CONNECT → EHLO → MAIL → RCPT → DATA → ... → CLOSED)
-- `OutboundSmtpSession` — manages one MX TCP connection, pipeline delivery with in_callback queue
-- `OutboundServer` — MX connection pool, event-driven watermark-based task pulling
-- `OutboxRepository` — stateless DB access for outbox table
+- `smtp_client::ClientSession` — single-endpoint asynchronous SMTP/TLS/AUTH/transaction core
+- `OutboundSmtpSession` — MX candidates, connection reuse, content loading/signing and task queue
+- `OutboundServer` — MX connection pool and watermark-based task claiming
+- `OutboxRepository` — DB lease and delivery state operations
+
+The old `OutboundSmtpFsm` has been removed. Socket/timer operations use a fixed connection strand;
+content loading/signing runs on workers. See [shared core](../mail-system/architecture/smtp-client-core.md).
 
 ### 4.2.1 Event-Driven Pull with Watermark Pre-allocation
 
@@ -174,9 +192,9 @@ Idle MX connection eviction runs on an independent 30-second `steady_timer`.
 
 - Up to 4 concurrent sessions per MX domain (`DEFAULT_MAX_SESSIONS_PER_MX`)
 - Session selection: prefer shortest queue (load-aware routing)
-- Idle eviction: 120 seconds of inactivity with no queued/active tasks
+- Pool idle eviction: 120 seconds; a connected idle adapter also closes after 30 seconds
 - Global cap: 256 MX entries (`DEFAULT_MAX_MX_ENTRIES`), LRU eviction on overflow
-- Connection reuse: up to 100 mails per TCP connection, RSET between mails
+- Connection reuse: up to 100 mails per connection; no public RSET/partial-RCPT API. Rejected or uncertain transactions close the connection.
 
 ### 4.2.3 Related Components
 
@@ -230,8 +248,10 @@ virtual void async_rollback(ExecuteCallback);              // → bool
 ```
 
 Default behavior: callback fires before `async_xxx` returns (= synchronous).
-Subclasses (e.g., a future non-blocking MySQL implementation) override these
-to post work to a thread pool or integrate with OS async I/O.
+The MySQL compatibility engine retains synchronous defaults. The optional MariaDB Connector/C
+engine already implements nonblocking start/cont operations on its executor; this is not a future
+implementation. Select it explicitly with DB `achieve=mariadb` and install/build the connector.
+See [DB async design](../mail-system/architecture/database-async-design.md).
 
 **Callback types** (in `db_service.h`):
 ```cpp
@@ -241,13 +261,14 @@ using ExecuteCallback = std::function<void(bool success)>;
 
 ### 4.4.3 Async Adoption Strategy
 
-1. **Leaf-level**: FSMs call `conn->async_query/execute()` via `sq()`/`se()` sync-bridge helpers (callbacks fire immediately with default impl, ready for future non-blocking override).
+1. **Leaf-level**: SMTP/IMAP use asynchronous continuation chains; compatibility sync helpers remain only where documented. Never assume async callbacks fire inline, and do not overlap queries on one leased connection.
 2. **Transaction flow**: `PersistentQueue::persist_mail_transactional_async()` chains async callbacks through `begin → insert_metadata → insert_attachments → enqueue_outbox → commit`. `shared_ptr<ScopedConnection>` keeps the connection alive across the callback chain.
 3. **FSM handlers**: use the **paused pipeline** pattern (see §5.2) to initiate async DB and return without blocking the IO thread.
 
 ## 4.5 Logging Subsystem
 
-Built on spdlog with module-oriented loggers (15 modules × 6 levels = 90 macros).
+Built on spdlog with `LOG_AT("module", level, ...)` and registered string modules.
+Application legacy macro aliases remain compatibility shims; framework modules do not use mail enums.
 
 **Log compression toolchain** (see [log-transform-toolchain.md](../build-deploy/log-transform-toolchain.md)):
 build-time transformation replaces `LOG_*` macros with `LOG_PURE(hash, args, ts)`,
@@ -441,7 +462,9 @@ Recommended production shape:
 
 ## 9. Sharding / Horizontal Scaling
 
-ProtoRelay supports user-based sharding via the `IShardRouter` abstraction. Each shard owns an independent database pool and storage provider. The router maps `email → shard_index`, and all components (FSMs, PersistentQueue, OutboundClient) access DB and storage exclusively through the router—no raw DBPool or IStorageProvider references are held anywhere.
+ProtoRelay supports user-based sharding via the `IShardRouter` abstraction. Each shard owns an independent database pool and storage provider. The router maps `email → shard_index`, and components obtain the appropriate DB/storage resource through the router. In-flight work must retain
+the DBPool/provider together with its connection/stream until completion; the router is not a ban on
+operation-local resource ownership.
 
 Three routing strategies are provided:
 - **Hash** — `hash(email) % N`, deterministic, zero-config
@@ -452,23 +475,43 @@ The delivery worker polls all shards with a local-first policy: claim from the h
 
 See [docs/sharding-refactor.md](sharding-refactor.md) for the full design discussion and refactoring history.
 
+## 9.1 Webmail and shared submission
+
+React source is in `webmail/`, build output in `build-webmail/`; the C++ HTTP server serves it
+with same-origin APIs. Resource IDs are decimal strings to preserve Snowflake precision in JS.
+Production sessions use one authoritative DB slot per account: new login replaces the old token.
+Only the SHA-256 token digest is stored; user passwords are not retained for SMTP re-authentication.
+
+Default send: session → MIME compose → DirectSubmitter → MailSubmissionService → AccountPolicy
+→ storage commit → PersistentQueue transaction/completion → HTTP 202. Sent is linked in the same
+primary transaction and shares the message body. No SMTP roundtrip or MX wait is needed for HTTP acceptance.
+An unknown/timeout result must not trigger automatic resubmission.
+
+Attachment GET/HEAD checks ownership before opening a provider stream; workers read at most 64 KiB
+and wait for the previous socket write before reading again. S3/HDFS bounded download remains pending.
+Details: [API](../mail-system/architecture/webmail-api.md),
+[sessions/submission](../mail-system/architecture/webmail-sessions-and-submission.md).
+
 ## 10. Current Scope and Extension Points
 
 Implemented now:
 
 - SMTP state machine and message parsing.
 - Message persistence and outbound queue processing.
-- Configurable storage providers and optional WebHDFS.
+- Configurable local/distributed/null/S3/WebHDFS storage providers.
+- POP3 retrieval and shared DB leases; Webmail SPA/API and direct durable submission.
 - Service-manager-friendly operation.
 - Transactional outbox creation with local lease-first hot dispatch.
 
 Expected extension directions:
 
-- POP3 retrieval plane.
+- POP3 protocol extensions beyond the implemented retrieval/lease flow.
 - DKIM signing policy and key rotation tooling.
-- Metrics/trace export for observability stacks.
+- Further observability integration; embedded Prometheus metrics and session traces already exist.
 - Certificate hot-reload and rolling restart ergonomics.
 - File-free in-memory outbound MIME construction for the hot-dispatch path.
+- Webmail server drafts, upload, folder mutations, full search, TLS/Secure-cookie-aware assembly.
+- Incremental mailbox sync and scoped automation credentials; AI/agent integration remains optional planning.
 
 ## 11. Related Docs
 

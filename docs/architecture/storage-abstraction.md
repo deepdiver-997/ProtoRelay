@@ -103,13 +103,15 @@ IStorageProvider
 
 拿不准时选 retryable：451 最多让对方多投几次，550 会把邮件丢掉。
 
-## 分层：framework 原语 vs 应用层 Provider
+## 分层：framework 通用存储与应用兼容路径
 
-通用原语已在 `framework/storage/`（namespace `pr`，与 `framework/db` 同层）：
-`IReadStream`/`IWriteStream`（含 `commit_async`）/`BufferedUploadStream`/
-`LocalFile*Stream`/`MappedFile`/`IoError`。`IStorageProvider` 与邮件命名规则
-（`build_mail_body_key` 等）留在 `mail_system/back/storage/`，经伞形头
-`i_storage_provider.h` 以 using 兼容引入——和 `db_pool.h` 的向后兼容是同一模式。
+接口、配置、五类 provider 与流原语全部位于 `framework/storage/`，namespace `pr::storage`
+（流原语沿用 `pr`）。`mail_system/back/storage/` 仅保留转发头和 using，兼容旧消费方；
+不是第二套 provider 实现。邮件历史命名的 key 构造方法暂未改名。
+
+Webmail 附件另用 `open_download` → `IDownloadStream::read_at`，每次最多 64 KiB，
+不依赖整对象 view。local 持有打开文件，distributed 打开时尝试副本；S3/HDFS 未实现
+该有界读取时返回不可用，不退回 read_all。HEAD 不读正文。详见 [Webmail API](../mail-system/architecture/webmail-api.md)。
 
 ## 远程后端的真异步：装配时装饰，而非 provider 内自建线程
 
@@ -118,7 +120,8 @@ IStorageProvider
 （server 的 worker 线程池），底层 provider 保持纯同步实现。本地后端不套——
 多一次线程跳转纯属浪费。S3/HDFS 的 PUT/GET 由此不再阻塞 io 线程，
 SMTP DATA_END 整条链路（commit → MIME 预解析读）对远程后端完全非阻塞。
-executor 惰性取 pool（装配时 worker 池尚未创建），无池配置内联兜底。
+IO/worker 池由装配根先创建并注入；装饰器捕获现有 worker，生命周期由装配根管理，
+不在 provider 内自建或停止线程池。无 executor 的显式测试配置可内联。
 
 ## 后续方向
 

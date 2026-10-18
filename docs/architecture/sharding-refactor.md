@@ -1,5 +1,9 @@
 # 分布式分片重构
 
+> 本文保留架构演进/开发过程的历史描述。2026-10-18 当前结构与能力以
+> [整体架构](../architecture/ARCHITECTURE.md) 和 [Webmail API](../mail-system/architecture/webmail-api.md)
+> 为准；旧类名、示例路径、缓存策略和阶段测试数应按当时背景阅读。
+
 ## 动机
 
 ProtoRelay 最初是单节点架构：一个 DB 连接池、一个文件存储目录、所有用户共享。要支持水平扩展，必须引入分片路由层，让系统能够根据用户邮箱将请求定向到正确的 shard。

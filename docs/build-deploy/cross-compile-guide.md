@@ -1,4 +1,9 @@
-# 交叉编译部署指南
+# 历史 object-only 交叉编译指南
+
+> 2026-10-18：生产首选已改为本地 Ubuntu amd64 容器编译/链接、服务器只收成品，
+> 详见 [运维与发布](operations.md)。下文保留 object-only 工具链背景；不要据此在
+> 小内存边缘服务器编译或链接。旧 `deploy.sh` 不处理边缘 SSH 2222/跳板及新多应用目标隔离。
+> 直接网络不佳时通过主站跳板，具体命令见运维文档。
 
 ## 架构
 
@@ -37,7 +42,7 @@ bash build.sh sync-sysroot
 - 设置 `SYSROOT_INCLUDE` cmake 变量
 - 临时屏蔽 Homebrew 的 spdlog/fmt（避免 cmake 误找），configure 完成后自动恢复
 
-## 完整流程
+## 历史流程（不作为当前生产默认）
 
 ### 1. 编译
 
@@ -50,7 +55,7 @@ EXTRA_CMAKE_ARGS="-DENABLE_S3_STORAGE=OFF" bash build.sh Release cross-x64 8
 - `cross-x64` 自动使用 `x86_64-linux-gnu-g++` 并跳过链接（object-only）
 - 产物在 `artifacts/linux-x86_64/Release/obj/`
 
-### 2. 上传与链接（推荐用 deploy.sh，见下）
+### 2. 上传与链接（历史路径，仅用于理解工具）
 
 手工方式仅作理解用。核心注意点：**link.sh 必须显式给 `--obj-root`**，否则它会把
 当前目录下所有 `.o`（包括历史遗留的 `build-obj/`）一并收集 → `multiple definition of main`。

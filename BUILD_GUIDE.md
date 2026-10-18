@@ -2,7 +2,8 @@
 
 ## 概述
 
-此 CMakeLists.txt 已优化为支持两种构建模式，每种模式有不同的编译参数和日志级别配置。
+直接 CMake 使用 Debug/Release，并提供 ASan/UBSan、TSan、coverage 和 object-only 开关；
+`build.sh` 另提供 SafeRelease/Asan 预设。脚本按 target 串行、target 内并行，避免内存峰值。
 
 ## 构建模式对比
 
@@ -13,7 +14,7 @@
 | **调试符号** | ✅ `-g` | ❌ |
 | **帧指针** | ✅ `-fno-omit-frame-pointer` | ❌ |
 | **NDEBUG** | ❌ | ✅ |
-| **日志级别** | DEBUG（全部） | INFO（仅 INFO 和 WARNING） |
+| **日志级别** | DEBUG（全部） | INFO（INFO/WARNING/ERROR） |
 | **编译时间** | 快 | 较慢 |
 | **运行时速度** | 慢 | 快 |
 | **二进制大小** | 大 | 小 |
@@ -83,8 +84,10 @@ CMakeLists.txt 现已支持自动查找依赖库，无需硬编码路径：
 
 ## 日志配置
 
-### Debug 模式（自动启用）
-所有日志模块均启用：
+### Debug 日志（独立开关）
+
+直接 `cmake -DCMAKE_BUILD_TYPE=Debug` 不会自动打开所有 DEBUG 宏；需显式
+`-DENABLE_DEBUG_LOGS=ON`。`build.sh Debug` 预设会设置该开关。启用后包括：
 - `ENABLE_SERVER_DEBUG_LOG=1`
 - `ENABLE_NETWORK_DEBUG_LOG=1`
 - `ENABLE_DATABASE_DEBUG_LOG=1`
@@ -119,7 +122,10 @@ make -j$(nproc)
 
 ## 性能优化 (Release)
 
-Release 模式使用 `-march=native` 为当前 CPU 架构生成优化代码，通常提升 10-20% 性能。
+是否出现 `-march=native` 取决于 CMake 缓存与构建入口，不承诺固定性能收益。
+部署到不同 CPU 时必须显式指定兼容 ISA，例如 `-DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v2"`，
+不能把本机 native 优化产物直接发往旧 CPU。生产标准采用目标 ABI 一致的本地容器构建，
+见 [部署操作](docs/build-deploy/operations.md)；服务器只接收成品。
 
 ## 输出目录结构
 
@@ -188,16 +194,16 @@ python3 cl.py --mode mta-relay --messages 10 --concurrency 2 --verbose
 ./build/smtp_client --seq --t 8 --msgs 5000              # sequential per-conn
 ```
 
-## 检查构建配置
+## 核对产物与前端
 
-每次构建时，CMake 会输出配置摘要：
+```bash
+./build-release/smtpsServer --version
+./build-release/imapsServer --version
+ctest --test-dir build-release -N
+npm ci --prefix webmail
+npm run --prefix webmail build
+```
 
-```
--- Build type: Debug
--- ✓ SSL/TLS support ENABLED
--- 📝 Debug mode: All debug logs ENABLED
--- ✓ Found mysqlclient via pkg-config: ...
--- ✓ Found MySQL: ...
--- Build output: executables → .../test
--- Build output: intermediate → .../build/build
-```
+构建输出由 `-B` 或脚本 BUILD_DIR 决定，不能用历史输出示例推断实际目录。
+产物应报告 Git commit、UTC 构建时间和目标架构；容器需装 git 才能注入真实提交号。
+前端源码与 C++ 构建分开，产物在 `build-webmail/`，详见 [前端说明](webmail/README.md)。

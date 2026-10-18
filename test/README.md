@@ -12,6 +12,17 @@ bash test/run_all_tests.sh --no-build # 只跑不构建
 （实例见 `docs/bugfixes/2026-09-04-mock-empty-executor-fsm-tests.md`：
 框架开始 post 到连接 executor 后，mock 返回的空 executor 让 4 个 FSM 套件静默挂了一个多星期）。
 
+## 当前验收入口（2026-10-18）
+
+- `ctest --test-dir build-release -j4 --output-on-failure`：34 个已注册测试，包含共享 SMTP 内核、持久化完成、Webmail 会话/API/下载。
+- `npm ci --prefix webmail && npm run --prefix webmail build`，`npm run --prefix webmail format:check`：前端类型/生产构建与格式。
+- `.venv/bin/python test/scripts/webmail_send_smoke.py --db-config config/db_config.json`：本地真实 DB + 双 Webmail 节点 + SMTP。
+- `.venv/bin/python test/scripts/webmail_ui_fixture.py --db-config config/db_config.json`：7 项真实 Chromium 场景，使用独立随机账号和邮件，结束自动清理。
+- ASan/UBSan 专项见 [前端契约回归](../docs/bugfixes/2026-10-18-webmail-browser-contract.md) 和 [共享内核](../docs/mail-system/architecture/smtp-client-core.md)。
+
+测试目录含真实 loopback socket、临时文件和可选 DB 场景，并非全部零 I/O。
+下面的断言数量和历史故障条目保留其统计时点；当前测试注册以 CMake/CTest 为准。
+
 ## 测试架构
 
 ```
@@ -429,7 +440,7 @@ MockConnection 已被销毁。
 **修复**：`TestServer` 改为派生自 `SmtpsServer`（转型合法），并在 fixture 绑定
 `server->m_persistentQueue = persist_q`。同源缺陷也存在于 `fsm_bench.cpp`
 的 `BenchServer`（派生自 `ServerBase` 且丢弃了传入的队列参数），一并修复。
-根因分析见 [session/smtps_session.tpp 的 TODO 注释](../../include/mail_system/back/mailServer/session/smtps_session.tpp#L22)。
+根因分析见 [session/smtps_session.tpp 的 TODO 注释](../include/mail_system/back/mailServer/session/smtps_session.tpp#L22)。
 
 **遗留加固建议**（未改生产代码）：构造函数内的裸 `static_cast<SmtpsServer*>` 仍是
 潜在地雷，可改用 `dynamic_cast` + null 兜底、在 `ServerBase` 加虚访问器，或将队列

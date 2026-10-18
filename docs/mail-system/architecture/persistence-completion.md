@@ -1,11 +1,11 @@
 # 持久化完成通知：共享提交服务的接受边界
 
-## 第二阶段（2026-10-18）
+## 当前接入（2026-10-18）
 
-在第一阶段共享 SMTP 客户端之后，先落实 MailSubmissionService 所需的提交结果
-通路。SMTP 的 after_persist 已迁移到此通路，Webmail 通过现有 SMTP 提交也随之
-使用。认证、配额和别名仍由现有 SMTP 流程执行；本阶段不提供 Webmail 直接入库
-或新的可信 listener。
+SMTP 的 after_persist 与 Webmail 默认 DirectSubmitter 已共用持久化完成订阅。
+Webmail 通过 MailSubmissionService 写正文并移交队列，不连接本机 SMTP；AccountPolicy
+统一认证、发件人绑定、配额和别名。未提供跨进程可信 listener。
+详情见 [共享会话与提交服务](webmail-sessions-and-submission.md)。
 
 ## 接口及保证
 
@@ -48,9 +48,8 @@ executor 上用 ticket 的完成通知/定时器竞争一次应答：成功后 2
 超时后 451 关闭。已关闭的 session 忽略晚到通知。after_enqueue 仍由配置显式选择，
 维持原来的内存入队后应答语义，不把它改称 durable acceptance。
 
-这一步让后续同进程/可信 listener 的提交服务能等待相同的事务完成通知，不需要
-持有 SmtpsServer 指针，也不需要再造一套持久化轮询。下一步再抽取认证身份、发件人
-约束、配额和别名的共享业务策略，并提供 MailSubmissionService 的完整提交入口。
+同进程 MailSubmissionService 已使用相同的事务完成通知，无需持有 SmtpsServer 指针或
+再造持久化轮询。Webmail 的 Sent 关联也在主分片事务内；SMTP 的传统客户端行为不变。
 
 ## 验证
 

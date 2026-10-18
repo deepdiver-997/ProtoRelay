@@ -69,7 +69,8 @@ HTTP session 校验 → MIME compose → DirectSubmitter
 读信仍可惰性解析。等待 deadline 使用 `inbound_persist_wait_timeout_ms`。
 超时返回 504/unknown，不取消已入队工作、不自动重试；持久化仍可能完成。
 202 始终表示确认持久化，与 Webmail 配置的 `inbound_ack_mode` 无关，且不表示外域
-实际送达。没有自动 Sent 副本、幂等键或配额补偿；这些继续后置。
+实际送达。已发送副本关联与主分片邮件/收件人/outbox 同事务提交，共用正文与邮件 ID；
+Sent 写入失败则整体回滚。请求幂等键和配额补偿仍未实现。详见 [API 契约](webmail-api.md)。
 
 配额保留 SMTP 的既有语义：一次 MAIL/提交占用一次配额，后续拒绝或存储故障不
 返还；连接或 UPDATE 故障时配额检查 fail-open 并记 WARN；ROW_COUNT 查询/解析失败

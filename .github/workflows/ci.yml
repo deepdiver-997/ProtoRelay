@@ -7,6 +7,22 @@ on:
     branches: [main]
 
 jobs:
+  webmail-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webmail/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix webmail
+      - name: Check frontend formatting
+        run: npm run --prefix webmail format:check
+      - name: Typecheck and build frontend
+        run: npm run --prefix webmail build
+
   # ---- 单元测试 (Debug 构建全部单测 + 运行 ctest) ----
   unit-test:
     runs-on: ubuntu-latest

@@ -4,10 +4,13 @@
 构建运维在 [`../build-deploy/`](../build-deploy/)。**目前是验证框架可用性的脚手架
 （scaffold）**：可服务真实静态文件，但不是生产级完整 HTTP 服务器。
 
+HTTP 组件已从原 `web_server/` 上移至 `framework/http/`。`webServer` / `h2web`
+仍为框架验证应用；Webmail 应用位于 `mail_system/back/webmail/`，动态 API 目前只接 H1。
+
 ## 模块范围
 
 ```
-web_server/
+include/framework/http/ + src/framework/http/
   http_types.hpp        HttpRequest / HttpResponse（跨 H1/H2 共享）
   http_parser.{h,cpp}   resolve_safe_path 防穿越 / mime / 请求行&头解析
   message_processor.*   协议无关 request→response 纯函数（路由/定长/ctype，体不入内存）
@@ -42,4 +45,4 @@ web_server/
 | [bugfixes/2026-09-02-shared-io-context.md](bugfixes/2026-09-02-shared-io-context.md) | 框架 vector+shared_ptr 让所有线程共享 io_context → H2 并发 UAF |
 
 > 纯函数层（MessageProcessor / framer / hpack / codec）已有单测 `h2_web_test`（39 断言）。
-> 整机多流 e2e 仍手动（见 `../local/TODO.md`）。新 bugfix 按 `YYYY-MM-DD-简短.md` 命名。
+> 整机多流 e2e 仍手动；Webmail 的 HTTP/1.1 API/SPA 有真实浏览器 fixture。新 bugfix 按 `YYYY-MM-DD-简短.md` 命名。

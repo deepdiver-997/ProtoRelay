@@ -185,30 +185,29 @@ IMAP 监听器通过主配置文件中的 `listeners` 数组配置：
 
 Key differences from SMTP config:
 - **No outbound/DKIM fields** — IMAP doesn't deliver mail
-- **No persistent queue settings** — IMAP reads, doesn't write through the pipeline
+- **No SMTP persist queue** — APPEND/COPY/MOVE write through IMAP DB/storage operations
 - **No inbound auth policy** — IMAP always requires authentication
 - **Longer timeouts** — IMAP sessions last longer (30 min idle vs 5 min SMTP)
 
 ## Integration
 
-IMAP 和 SMTP 共用同一个配置文件 `config/smtpsConfig.json`，通过 `listeners` 中的 `type` 区分协议。
+独立部署通常分别使用 `config/imapsConfig.json` 和 `config/smtpsConfig.json`，读取同一
+权威数据库与可见的正文/附件存储。listener.type 表示 TCP/SSL，不表示 SMTP/IMAP 协议。
+合并入口可共享装配资源；独立进程各自装配资源。
 
 ```cpp
+#include "mail_system/back/bootstrap.h"
 #include "mail_system/back/mailServer/imaps_server.h"
-
-// 与 SMTP server 共用 config
-ServerConfig cfg;
-cfg.loadFromFile("config/smtpsConfig.json");
-
-// Share the same thread pools & DB pool for efficiency
+mail_system::ServerConfig cfg;
+cfg.loadFromFile("config/imapsConfig.json");
+auto resources = mail_system::bootstrap::assemble(cfg);
 auto imap_server = std::make_shared<ImapsServer>(
-    imap_cfg,
-    io_pool,     // shared IO thread pool
-    work_pool,   // shared worker thread pool
-    db_pool      // shared DB pool
-);
+    cfg, resources.io_pool, resources.worker_pool, resources.shard_router);
 imap_server->start();
 ```
+
+APPEND/COPY/MOVE 等操作会写数据库/存储；独立 IMAP 不拥有 SMTP 外投队列。
+通用接口在 framework，具体 DB 驱动仍由应用装配。
 
 ### Testing with openssl
 
@@ -235,15 +234,15 @@ Once connected, try:
 ## Known Limitations (Phase 2)
 
 1. **IDLE 推送** — 能进出 IDLE，但不会主动推送新邮件 EXISTS 通知（需后台轮询机制）
-2. **BODYSTRUCTURE** — 未实现，仅支持 BODY[]
+2. **MIME FETCH 已实现** — BODYSTRUCTURE、BODY[]/HEADER/TEXT 与 MIME section；复杂合法 MIME 的兼容性仍由 fixture/fuzz 持续验证
 3. **INTERNALDATE** — 目前使用 mails.send_time；建议在 Date header 可用时优先使用
 4. **UID** — 直接使用 mail_id (Snowflake)；未来可改为每邮箱自增 UID
-5. **SEARCH** — 支持 UNSEEN / SEEN / DELETED 过滤，尚未支持 SUBJECT/FROM 等文本匹配
+5. **SEARCH** — 当前为已实现条件子集，不能把它等同于 Webmail 全库全文/语义检索
 6. **ACL / QUOTA** — 未实现
 7. **SORT / THREAD** — 未实现
 8. **LIST-EXTENDED** — 未实现
 
 ## Future Roadmap
 
-- **Phase 3**: IDLE 推送通知, BODYSTRUCTURE, ACL, QUOTA
+- **Phase 3**: IDLE 主动通知、ACL、QUOTA；BODYSTRUCTURE 已实现
 - **Phase 4**: SORT, THREAD, LIST-EXTENDED, MULTISEARCH, full-text SEARCH

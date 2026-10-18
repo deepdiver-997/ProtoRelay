@@ -15,6 +15,9 @@ docs/
 │   │   ├── smtp-outbound-client-design.md # SMTP 发件引擎设计
 │   │   ├── inbound-verification-flow.md   # 入站校验流程
 │   │   ├── mailbox-concurrency.md     # 多客户端并发对照（SMTP/POP3/IMAP）
+│   │   ├── webmail-api.md             # HTTP API、SPA、附件和标记
+│   │   ├── webmail-sessions-and-submission.md # 单会话与直接提交
+│   │   ├── smtp-client-core.md         # 共享 SMTP 内核及边界
 │   │   └── vs-postfix.md              # 与 Postfix 的对比
 │   └── bugfixes/                      # 邮件业务 bug 复盘（YYYY-MM-DD-描述.md）
 │       ├── 2026-08-27-counter-triangle-bug.md
@@ -45,6 +48,14 @@ docs/
     ├── PROJECT_STYLE.md               # 项目编码规范
     └── dev-summary.md                 # 开发总结
 ```
+
+## 当前实现入口（2026-10-18）
+
+SMTP/IMAP/POP3、共享 SMTP 内核、进程内提交与 React Webmail 均已落地。
+API/会话以邮件业务架构文档为准；前端运行见 [webmail/README.md](../webmail/README.md)，
+生产部署见 [operations.md](build-deploy/operations.md)。通用 DB/存储/cache/HTTP 位于
+`framework/`，应用旧路径保留兼容 shim。带日期的报告、复盘及阶段记录反映当时状态，
+历史测试数、旧类名和故障示例不代表当前能力。
 
 ## 阅读指引
 

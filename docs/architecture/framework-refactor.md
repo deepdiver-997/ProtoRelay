@@ -1,5 +1,9 @@
 # Framework Extraction Refactor (2026-07)
 
+> 本文保留架构演进/开发过程的历史描述。2026-10-18 当前结构与能力以
+> [整体架构](../architecture/ARCHITECTURE.md) 和 [Webmail API](../mail-system/architecture/webmail-api.md)
+> 为准；旧类名、示例路径、缓存策略和阶段测试数应按当时背景阅读。
+
 ## Summary
 
 Extracted a reusable server framework from the mail-system codebase. The framework is transport-agnostic (no TCP/SSL dependency in `ServerBase`), protocol-agnostic (no SMTP/IMAP knowledge in `SessionBase` or `FsmBase`), and lives in `include/framework/`.

@@ -1,5 +1,9 @@
 # IMAP 服务端开发总结
 
+> 本文保留架构演进/开发过程的历史描述。2026-10-18 当前结构与能力以
+> [整体架构](../architecture/ARCHITECTURE.md) 和 [Webmail API](../mail-system/architecture/webmail-api.md)
+> 为准；旧类名、示例路径、缓存策略和阶段测试数应按当时背景阅读。
+
 > 本文档记录 MailFront / ProtoRelay 项目中 IMAP 服务端的开发过程、
 > 技术决策和架构设计，用于面试准备。
 
