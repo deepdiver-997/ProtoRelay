@@ -31,7 +31,8 @@ public:
                   std::shared_ptr<pr::ThreadPoolBase> worker_pool,
                   std::shared_ptr<router::IShardRouter> shard_router,
                   std::shared_ptr<AuthCache> auth_cache = nullptr,
-                  std::shared_ptr<SessionStore> sessions = nullptr);
+                  std::shared_ptr<SessionStore> sessions = nullptr,
+                  std::shared_ptr<ISmtpSubmitter> submitter = nullptr);
 
     SessionStore& sessions() { return *sessions_; }
 
@@ -40,6 +41,7 @@ private:
     std::shared_ptr<SessionStore> sessions_;
     std::unique_ptr<AuthService> auth_service_;
     std::unique_ptr<MailService> mail_service_;
+    std::shared_ptr<ISmtpSubmitter> submitter_;
     ApiRouter router_;
 };
 

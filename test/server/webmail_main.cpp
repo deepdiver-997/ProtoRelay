@@ -15,10 +15,13 @@
 
 #include <csignal>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <chrono>
+#include <nlohmann/json.hpp>
 
 using namespace mail_system;
 
@@ -26,6 +29,12 @@ static sigset_t g_sigset;
 static std::unique_ptr<webmail::WebmailServer> g_server;
 
 int main(int argc, char* argv[]) {
+    if (argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
+        std::cout << "Usage: webmailServer [config_json] [port] [doc_root]\n"
+                     "Defaults: config/webmailConfig.json, 8081, ./config/webmail\n"
+                     "Config: webmail_submission_port (1..65535, default 587); SMTP host is always 127.0.0.1.\n";
+        return 0;
+    }
     std::string config_path = argc > 1 ? argv[1] : "config/webmailConfig.json";
     int port = argc > 2 ? std::atoi(argv[2]) : 8081;
     std::string doc_root = argc > 3 ? argv[3] : "./config/webmail";
@@ -37,8 +46,18 @@ int main(int argc, char* argv[]) {
 
     try {
         ServerConfig config;
+        uint16_t submission_port = 587;
         if (std::filesystem::exists(config_path) && config.loadFromFile(config_path)) {
             LOG_SERVER_INFO("Loaded webmail config: {}", config_path);
+            // webmail 专属装配配置留在入口，不扩散进 framework/ServerConfig。
+            std::ifstream input(config_path);
+            auto web_config = nlohmann::json::parse(input);
+            if (web_config.contains("webmail_submission_port")) {
+                const auto& value = web_config["webmail_submission_port"];
+                if (!value.is_number_integer() || value < 1 || value > 65535)
+                    throw std::invalid_argument("webmail_submission_port must be an integer in 1..65535");
+                submission_port = value.get<uint16_t>();
+            }
         } else {
             LOG_SERVER_WARN("Config {} not loadable — minimal in-memory config (DB off)",
                             config_path);
@@ -70,7 +89,9 @@ int main(int argc, char* argv[]) {
         auto res = bootstrap::assemble(config, pools);
 
         g_server = std::make_unique<webmail::WebmailServer>(
-            config, doc_root, res.io_pool, res.worker_pool, res.shard_router);
+            config, doc_root, res.io_pool, res.worker_pool, res.shard_router,
+            nullptr, nullptr, std::make_shared<webmail::LoopbackSmtpSubmitter>(
+                io_pool->get_io_context().get_executor(), submission_port));
         g_server->start();
 
         LOG_SERVER_INFO("webmail API ready. try: curl http://localhost:{}/api/health", port);

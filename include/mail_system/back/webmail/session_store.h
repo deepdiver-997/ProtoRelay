@@ -15,6 +15,7 @@
 
 #include "framework/cache/lru_cache.h"
 #include "framework/http/http_types.hpp"
+#include "mail_system/back/webmail/session_password.h"
 
 #include <chrono>
 #include <cstdint>
@@ -57,16 +58,22 @@ public:
         return out;
     }
 
-    void put(const std::string& token, uint64_t user_id, const std::string& address) {
-        cache_.put(token, WebSessionInfo{user_id, address});
+    void put(const std::string& token, uint64_t user_id, const std::string& address,
+             SessionPasswordPtr password = nullptr) {
+        cache_.put(token, Entry{{user_id, address}, std::move(password)});
     }
 
     // 命中且未过期返回 true。滑动续期 MVP 不做（固定 TTL，到期重新登录）。
-    bool lookup(const std::string& token, WebSessionInfo& out) const {
+    bool lookup(const std::string& token, WebSessionInfo& out,
+                SessionPasswordPtr* password = nullptr) const {
+        if (password) password->reset();
         if (token.empty()) return false;
         bool stale = false;
-        if (!cache_.get(token, out, stale)) return false;
-        return !stale;
+        Entry entry;
+        if (!cache_.get(token, entry, stale) || stale) return false;
+        out = entry.user;
+        if (password) *password = entry.password;
+        return true;
     }
 
     void erase(const std::string& token) { cache_.invalidate(token); }
@@ -109,7 +116,11 @@ public:
     }
 
 private:
-    pr::LruCache<std::string, WebSessionInfo> cache_;
+    struct Entry {
+        WebSessionInfo user;
+        SessionPasswordPtr password;
+    };
+    pr::LruCache<std::string, Entry> cache_;
     std::chrono::seconds ttl_;
 };
 

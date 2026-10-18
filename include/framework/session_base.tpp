@@ -224,6 +224,8 @@ void SessionBase<ConnectionType>::do_async_read() {
                     self->handle_read(line);
                     self->process_read();
                 }
+                if (self->auto_continue_read() && !self->is_paused() && !self->is_closed())
+                    self->do_async_read();
             });
     });
 }

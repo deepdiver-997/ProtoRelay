@@ -40,6 +40,8 @@ include/mail_system/back/   # 邮件系统（框架的成熟应用）
 
 这是一种分阶段策略：先把 relay 核心打牢，再逐步扩展更多协议与能力。
 
+`webmailServer` 已支持 cookie 登录、邮箱/邮件列表、MIME 读信与本机 SMTP 提交写信（文本/HTML、收件人/抄送）。附件下载与上传、搜索和 SPA 仍待实现；API 契约、配置及验证命令见 [Webmail API](docs/mail-system/architecture/webmail-api.md)。
+
 ## 可扩展性设计
 
 ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：

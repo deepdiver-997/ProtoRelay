@@ -10,7 +10,8 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
                              std::shared_ptr<pr::ThreadPoolBase> worker_pool,
                              std::shared_ptr<router::IShardRouter> shard_router,
                              std::shared_ptr<AuthCache> auth_cache,
-                             std::shared_ptr<SessionStore> sessions)
+                             std::shared_ptr<SessionStore> sessions,
+                             std::shared_ptr<ISmtpSubmitter> submitter)
     : pr::http::HttpServer(config, std::move(doc_root), io_pool, worker_pool,
                            std::move(shard_router)),
       auth_cache_(auth_cache ? std::move(auth_cache) : std::make_shared<AuthCache>()),
@@ -18,7 +19,9 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
       auth_service_(std::make_unique<AuthService>(
           get_shard_router(), auth_cache_, worker_pool)),
       mail_service_(std::make_unique<MailService>(get_shard_router())),
-      router_(*auth_service_, *sessions_, *mail_service_) {
+      submitter_(submitter ? std::move(submitter) : std::make_shared<LoopbackSmtpSubmitter>(
+          get_io_context()->get_executor())),
+      router_(*auth_service_, *sessions_, *mail_service_, submitter_.get()) {
     // 工厂把 handler 注入每个新连接的 session；须在 start() 之前设置完成
     set_api_handler([this](const pr::http::HttpRequest& req,
                            std::function<void(pr::http::HttpResponse)> complete) {

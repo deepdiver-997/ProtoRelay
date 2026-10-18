@@ -41,8 +41,9 @@ void login(const pr::http::HttpRequest& req, AuthService& auth, SessionStore& se
         return;
     }
 
+    auto submission_password = std::make_shared<SessionPassword>(password);
     auth.login_async(address, password,
-        [&sessions, complete](AuthOutcome out) {
+        [&sessions, complete, submission_password](AuthOutcome out) {
             if (out.server_error) {
                 complete(error_response(503, "database unavailable"));
                 return;
@@ -57,7 +58,7 @@ void login(const pr::http::HttpRequest& req, AuthService& auth, SessionStore& se
                 complete(error_response(500, "token generation failed"));
                 return;
             }
-            sessions.put(token, out.user_id, out.address);
+            sessions.put(token, out.user_id, out.address, submission_password);
             complete(json_response(200, nlohmann::json{
                 {"user", {{"id", out.user_id}, {"address", out.address}}}},
                 sessions.issue_cookie_header(token)));

@@ -59,6 +59,42 @@ inline std::string decode_quoted_printable(const std::string& in) {
     return out;
 }
 
+// RFC 2047 UTF-8/ASCII encoded-word，供列表/读信显示 composer 生成的主题。
+// 相邻 encoded-word 间的折叠空白不属于主题；未知 charset 保留原文。
+inline std::string decode_header(const std::string& value) {
+    std::string out;
+    size_t pos = 0;
+    bool previous_word = false;
+    while (pos < value.size()) {
+        const size_t start = value.find("=?", pos);
+        if (start == std::string::npos) { out += value.substr(pos); break; }
+        const size_t charset_end = value.find('?', start + 2);
+        const size_t end = charset_end == std::string::npos ? std::string::npos : value.find("?=", charset_end + 3);
+        if (end == std::string::npos || charset_end + 2 >= value.size() || value[charset_end + 2] != '?') {
+            out += value.substr(pos); break;
+        }
+        auto charset = value.substr(start + 2, charset_end - start - 2);
+        std::transform(charset.begin(), charset.end(), charset.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const char encoding = value[charset_end + 1];
+        const bool supported = (charset == "utf-8" || charset == "us-ascii") &&
+            (encoding == 'B' || encoding == 'b' || encoding == 'Q' || encoding == 'q');
+        const auto between = value.substr(pos, start - pos);
+        if (!supported || !previous_word || between.find_first_not_of(" \t\r\n") != std::string::npos)
+            out += between;
+        auto payload = value.substr(charset_end + 3, end - charset_end - 3);
+        if (!supported) out += value.substr(start, end + 2 - start);
+        else if (encoding == 'B' || encoding == 'b') out += outbound::base64_decode(payload);
+        else {
+            std::replace(payload.begin(), payload.end(), '_', ' ');
+            out += decode_quoted_printable(payload);
+        }
+        previous_word = supported;
+        pos = end + 2;
+    }
+    return out;
+}
+
 // ── 按 part.encoding 解码（切片后的原始内容进来）────────────────
 inline DecodedBody decode_part(const std::string& raw_content, const MimePart& part) {
     DecodedBody out;

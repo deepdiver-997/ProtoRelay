@@ -413,6 +413,9 @@ if(BUILD_OBJECT_ONLY)
         src/mail_system/back/webmail/webmail_server.cpp
         src/mail_system/back/webmail/api/auth_api.cpp
         src/mail_system/back/webmail/api/mail_api.cpp
+        src/mail_system/back/webmail/api/compose_api.cpp
+        src/mail_system/back/webmail/smtp_submitter.cpp
+        src/mail_system/back/common/mime_composer.cpp
         test/server/webmail_main.cpp
     )
     setup_mail_target(webmailServer_obj)
@@ -482,6 +485,9 @@ else()
         src/mail_system/back/webmail/webmail_server.cpp
         src/mail_system/back/webmail/api/auth_api.cpp
         src/mail_system/back/webmail/api/mail_api.cpp
+        src/mail_system/back/webmail/api/compose_api.cpp
+        src/mail_system/back/webmail/smtp_submitter.cpp
+        src/mail_system/back/common/mime_composer.cpp
         test/server/webmail_main.cpp
     )
     setup_mail_target(webmailServer)
@@ -618,10 +624,29 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         ${COMMON_SRCS}
         src/mail_system/back/webmail/api/auth_api.cpp
         src/mail_system/back/webmail/api/mail_api.cpp
+        src/mail_system/back/webmail/api/compose_api.cpp
+        src/mail_system/back/webmail/smtp_submitter.cpp
+        src/mail_system/back/common/mime_composer.cpp
         test/unit/webmail_test.cpp
     )
     target_include_directories(webmail_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(webmail_test)
+
+    add_executable(http_session_read_test
+        ${COMMON_SRCS}
+        src/framework/http/http_parser.cpp
+        src/framework/http/message_processor.cpp
+        test/unit/http_session_read_test.cpp
+    )
+    target_include_directories(http_session_read_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(http_session_read_test)
+
+    add_executable(smtp_submitter_test
+        src/mail_system/back/common/mime_composer.cpp
+        src/mail_system/back/webmail/smtp_submitter.cpp
+        test/unit/smtp_submitter_test.cpp
+    )
+    setup_mail_target(smtp_submitter_test)
 
     add_executable(thread_pool_test
         src/framework/thread_pool/io_thread_pool.cpp
@@ -772,6 +797,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME password_rehash_test COMMAND password_rehash_test)
     add_test(NAME safe_parse_test COMMAND safe_parse_test)
     add_test(NAME webmail_test COMMAND webmail_test)
+    add_test(NAME smtp_submitter_test COMMAND smtp_submitter_test)
+    add_test(NAME http_session_read_test COMMAND http_session_read_test)
+    set_tests_properties(smtp_submitter_test PROPERTIES TIMEOUT 15)
 
     # 聚合 target：新增单测只需在上面 add_executable/add_test，
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
@@ -805,6 +833,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         password_rehash_test
         safe_parse_test
         webmail_test
+        smtp_submitter_test
+        http_session_read_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
@@ -817,7 +847,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             intrusion_detector_test server_config_test mapped_file_test
             thread_pool_test session_base_test server_base_test
             outbound_utils_test metrics_core_test bcrypt_test
-            webmail_test)
+            webmail_test smtp_submitter_test http_session_read_test)
         foreach(_t IN LISTS _asan_tests)
             # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)

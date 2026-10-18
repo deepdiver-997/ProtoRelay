@@ -27,6 +27,7 @@
 | [architecture/database-async-design.md](architecture/database-async-design.md) | DB 真异步化设计：MariaDB Connector/C 非阻塞 + prepared stmt 缓存 + mysql_ping 保活 |
 | [architecture/smtp-outbound-client-design.md](architecture/smtp-outbound-client-design.md) | SMTP 发件引擎设计 |
 | [architecture/inbound-verification-flow.md](architecture/inbound-verification-flow.md) | 入站校验（SPF/DKIM/DMARC）流程 |
+| [architecture/webmail-api.md](architecture/webmail-api.md) | Webmail API：会话、列表、读信、MIME 写信与本机 SMTP 提交 |
 | [architecture/auth-password-hash.md](architecture/auth-password-hash.md) | 认证密码哈希：bcrypt/MD5/明文三格式口径、AuthCache 窗口、rehash-on-login 自动升级（CAS 回写） |
 | [architecture/vs-postfix.md](architecture/vs-postfix.md) | 与 Postfix 的对比 |
 

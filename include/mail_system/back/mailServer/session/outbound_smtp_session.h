@@ -11,6 +11,7 @@
 #include "mail_system/back/mailServer/outbound/outbound_utils.h"
 #include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/common/smtp_wire.h"
 #include <queue>
 #include <mutex>
 #include <memory>
@@ -392,17 +393,7 @@ private:
         std::string payload = sign_payload_if_dkim(raw, ob_cfg_, &sign_err);
         if (!sign_err.empty())
             LOG_SMTP_WARN("Outbound: DKIM sign skipped for mail {}: {}", m.id, sign_err);
-        return dot_stuff(payload) + "\r\n.\r\n";
-    }
-
-    static std::string dot_stuff(const std::string& body) {
-        std::string out; out.reserve(body.size() + body.size() / 50);
-        for (size_t i = 0; i < body.size(); ++i) {
-            out.push_back(body[i]);
-            if (body[i] == '\n' && i + 1 < body.size() && body[i + 1] == '.') out.push_back('.');
-        }
-        if (!body.empty() && body[0] == '.') out.insert(0, ".");
-        return out;
+        return smtp::dot_stuff(payload) + "\r\n.\r\n";
     }
 
     // ── 状态处理器 ────────────────────────────────────────────

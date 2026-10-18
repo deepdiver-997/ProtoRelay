@@ -55,6 +55,8 @@ FastFsm, IO/worker pools, watchdog) carries a second protocol family:
 - `h2web` — HTTP/2 multi‑stream static files (HPACK + flow control)
 Business docs: [`docs/web-server/README.md`](docs/web-server/README.md).
 
+`webmailServer` supports cookie sessions, mailbox/message lists, MIME reading, and authenticated local SMTP submission (text/HTML, To/Cc). Attachment downloads/uploads, search, and the SPA remain pending. See the [Webmail API contract](docs/mail-system/architecture/webmail-api.md) for configuration and verification commands.
+
 ## Extensibility by Design
 
 ProtoRelay is structured around replaceable modules instead of monolithic logic:

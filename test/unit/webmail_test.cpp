@@ -14,6 +14,8 @@
 #include "mail_system/back/webmail/mail_service.h"
 #include "mail_system/back/webmail/session_store.h"
 #include "mail_system/back/common/bcrypt.h"
+#include "mail_system/back/common/mime_composer.h"
+#include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/webmail/html_sanitize.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
@@ -563,6 +565,13 @@ static void test_html_sanitize_whitelist() {
 
 static void test_mime_view_decode() {
     namespace mv = mime_view;
+    assert(mv::decode_header("plain subject") == "plain subject");
+    assert(mv::decode_header("=?UTF-8?B?5L2g5aW9?=") == "你好");
+    assert(mv::decode_header("=?UTF-8?B?5L2g?=\r\n =?UTF-8?B?5aW9?=") == "你好");
+    assert(mv::decode_header("=?utf-8?q?hello_=E4=BD=A0=E5=A5=BD?=") == "hello 你好");
+    assert(mv::decode_header("prefix =?utf-8?B?5L2g5aW9?= suffix") == "prefix 你好 suffix");
+    assert(mv::decode_header("=?unknown?B?abcd?=") == "=?unknown?B?abcd?=");
+    assert(mv::decode_header("=?broken") == "=?broken");
     // QP：=XX、软换行、小写 hex、非法序列按字面、尾部悬挂 '='
     assert(mv::decode_quoted_printable("h=C3=A9llo") == "h\xc3\xa9llo");
     assert(mv::decode_quoted_printable("a=\r\nb") == "ab");
@@ -731,6 +740,131 @@ static void test_mail_api_get_message_denied() {
     std::cout << "  [PASS] mail_api_get_message_denied" << std::endl;
 }
 
+struct MockSubmitter : ISmtpSubmitter {
+    int calls = 0;
+    SubmitRequest request;
+    SubmitResult result{SubmitStatus::Accepted, 250, "body"};
+    void submit_async(SubmitRequest input, Complete cb) override {
+        ++calls;
+        request = std::move(input);
+        cb(result);
+    }
+};
+
+static void test_compose_api() {
+    ApiFixture fx;
+    MockSubmitter submitter;
+    ApiRouter router(*fx.auth, fx.sessions, *fx.mail, &submitter);
+    const auto token = SessionStore::generate_token();
+    auto password = std::make_shared<SessionPassword>("secret");
+    fx.sessions.put(token, 42, "user@test.local", password);
+    auto request = make_req("POST", "/api/send", R"({"to":["a@test.local"],"cc":["cc@test.local","a@test.local"],"subject":"你好","text":"hello\n.\nlast","html":"<b>hello</b>"})",
+                            "wb_session=" + token);
+    request.headers["content-type"] = "application/json; charset=utf-8";
+    Captured c;
+    assert(router.handle(request, c.complete()));
+    assert(c.calls == 1 && c.resp->status == 202 && submitter.calls == 1);
+    assert(submitter.request.sender == "user@test.local");
+    assert(submitter.request.password->view() == "secret");
+    assert(submitter.request.recipients == std::vector<std::string>({"a@test.local", "cc@test.local"}));
+    assert(submitter.request.raw.find("From: <user@test.local>\r\n") != std::string::npos);
+    assert(submitter.request.raw.find("Cc: <cc@test.local>") != std::string::npos);
+    assert(submitter.request.raw.find("Bcc:") == std::string::npos);
+    auto response = nlohmann::json::parse(c.resp->body);
+    assert(response["status"] == "accepted");
+    assert(submitter.request.raw.find(response["message_id"].get<std::string>()) != std::string::npos);
+
+    // 站在现有 IMAP/webmail MIME 消费者视角验证能读回，两种正文都保留。
+    MimePart root;
+    parse_mime_tree(submitter.request.raw, root);
+    const auto* text = mime_view::find_text_leaf(root, "plain");
+    const auto* html = mime_view::find_text_leaf(root, "html");
+    assert(text && html);
+    assert(mime_view::decode_part(extract_part_content(submitter.request.raw, *text), *text).content == "hello\r\n.\r\nlast");
+    assert(mime_view::decode_part(extract_part_content(submitter.request.raw, *html), *html).content == "<b>hello</b>");
+    // 消费者应保留首尾空格，且用户输入的 encoded-word 字面量只解码一层。
+    for (const std::string subject : {" plain ", "=?UTF-8?B?5L2g5aW9?=", "normal"}) {
+        mime::Message message;
+        message.from = "user@test.local";
+        message.to = {"a@test.local"};
+        message.subject = subject;
+        message.text = "body";
+        auto composed = mime::compose(message);
+        auto headers = algorithm::parse_headers_map(composed.raw.substr(0, composed.raw.find("\r\n\r\n")));
+        assert(mime_view::decode_header(headers.at("subject")) == subject);
+    }
+
+    // SMTP 返回分类：配额/策略拒绝，临时故障，DATA 后断连不声称成功或可重试。
+    for (const auto& entry : std::vector<std::pair<SubmitStatus, int>>{
+            {SubmitStatus::Rejected, 422}, {SubmitStatus::Unavailable, 503},
+            {SubmitStatus::ProtocolError, 502}, {SubmitStatus::OutcomeUnknown, 504}}) {
+        submitter.result = {entry.first, 550, "mail"};
+        c = {};
+        assert(router.handle(request, c.complete()));
+        assert(c.calls == 1 && c.resp->status == entry.second);
+        auto error = nlohmann::json::parse(c.resp->body);
+        assert(error["retryable"] == (entry.first == SubmitStatus::Unavailable));
+        assert(error["message_id"].is_string());
+    }
+    submitter.result = {SubmitStatus::AuthFailed, 535, "auth"};
+    c = {};
+    assert(router.handle(request, c.complete()));
+    assert(c.resp->status == 401 && c.resp->extra_headers.find("Max-Age=0") != std::string::npos);
+    WebSessionInfo info;
+    assert(!fx.sessions.lookup(token, info));
+    std::cout << "  [PASS] compose_api + MIME consumer roundtrip" << std::endl;
+}
+
+static void test_compose_api_rejections() {
+    ApiFixture fx;
+    MockSubmitter submitter;
+    ApiRouter router(*fx.auth, fx.sessions, *fx.mail, &submitter);
+    const auto token = SessionStore::generate_token();
+    fx.sessions.put(token, 42, "user@test.local", std::make_shared<SessionPassword>("secret"));
+    auto request = make_req("POST", "/api/send", R"({"to":["a@test.local"],"text":"ok"})", "wb_session=" + token);
+    request.headers["content-type"] = "application/json";
+    auto check = [&](http::HttpRequest req, int status) {
+        Captured c;
+        assert(router.handle(req, c.complete()));
+        assert(c.calls == 1 && c.resp->status == status);
+        assert(submitter.calls == 0);
+    };
+    auto req = request;
+    req.headers.erase("cookie"); check(req, 401);
+    req = request; req.method = "GET"; check(req, 405);
+    req = request; req.headers.erase("content-type"); check(req, 415);
+    req = request; req.headers["content-type"] = "text/plain"; check(req, 415);
+    for (const std::string body : {"null", "[]", "{", R"({"from":"spoof@test.local","to":["a@test.local"],"text":"x"})",
+            R"({"to":"a@test.local","text":"x"})", R"({"to":[4],"text":"x"})",
+            R"({"to":["a@test.local"],"text":null})", R"({"to":["a@test.local"],"subject":"a\r\nBcc: bad@test.local","text":"x"})",
+            R"({"to":["a@test.local>\r\nDATA"],"text":"x"})", R"({"to":[],"text":"x"})",
+            R"({"to":["a@test.local"]})", R"({"to":["a@test.local"],"bcc":["hidden@test.local"],"text":"x"})", R"({"to":["a@test.local"],"attachments":[],"text":"x"})"}) {
+        req = request; req.body = body; check(req, 400);
+    }
+    req = request;
+    req.body = nlohmann::json{{"to", {"a@test.local"}}, {"text", std::string(mime::kMaxBodyBytes + 1, 'x')}}.dump();
+    check(req, 413);
+    req = request; req.body.assign(1024 * 1024 + 1, 'x'); check(req, 413);
+    // 登录成功后 SMTP 凭据留在会话中，me 不泄漏密码。
+    Captured login;
+    assert(router.handle(make_req("POST", "/api/login", R"({"address":"user@test.local","password":"secret"})"), login.complete()));
+    assert(login.resp->status == 200 && login.resp->body.find("secret") == std::string::npos);
+    auto cookie = login.resp->extra_headers.substr(strlen("Set-Cookie: "));
+    auto authenticated = make_req("GET", "/api/me", {}, cookie);
+    WebSessionInfo info;
+    SessionPasswordPtr password;
+    assert(fx.sessions.lookup(SessionStore::token_from_request(authenticated), info, &password));
+    assert(password && password->view() == "secret");
+    Captured me;
+    assert(router.handle(authenticated, me.complete()));
+    assert(me.resp->body.find("secret") == std::string::npos);
+    // 过期/注销永远取不到可提交凭据。
+    SessionStore expired(10, std::chrono::seconds(0));
+    expired.put("expired", 42, info.address, password);
+    assert(!expired.lookup("expired", info, &password) && !password);
+    std::cout << "  [PASS] compose_api_rejections" << std::endl;
+}
+
 int main() {
     std::cout << "Running webmail tests..." << std::endl;
     test_session_store_basics();
@@ -752,6 +886,8 @@ int main() {
     test_mail_api_get_message_flow();
     test_mail_api_get_message_degraded();
     test_mail_api_get_message_denied();
+    test_compose_api();
+    test_compose_api_rejections();
     std::cout << "All webmail tests passed!" << std::endl;
     return 0;
 }

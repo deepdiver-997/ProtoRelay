@@ -142,6 +142,9 @@ public:
     void drain_buffered_commands();
 
     virtual bool        has_buffered_input() const;
+    // 帧式协议可选择在本轮输入消费完后继续读（含未凑齐完整帧的分片）。
+    // 默认关闭：SMTP/IMAP/POP3 仍由命令 handler/写完成回调推进读循环。
+    virtual bool        auto_continue_read() const { return false; }
     virtual std::string extract_one_line();
     virtual std::string take_buffered_input();
     virtual std::chrono::milliseconds compute_reply_delay() const = 0;

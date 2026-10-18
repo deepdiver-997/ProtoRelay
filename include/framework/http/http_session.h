@@ -73,6 +73,12 @@ static constexpr size_t kSmallFileThreshold = 64 * 1024;
     void handle_read(const std::string& data) override;
     void process_read() override;
     bool has_buffered_input() const override;
+    bool auto_continue_read() const override {
+        const auto state = static_cast<HttpState>(state_.load(std::memory_order_acquire));
+        return next_event_ != HttpEvent::ERROR &&
+            (state == HttpState::WAIT_REQUEST_LINE || state == HttpState::WAIT_HEADERS ||
+             state == HttpState::WAIT_BODY);
+    }
     std::string extract_one_line() override;
     std::chrono::milliseconds compute_reply_delay() const override;
     void* get_fsm() const override;

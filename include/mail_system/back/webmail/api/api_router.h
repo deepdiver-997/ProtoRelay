@@ -15,6 +15,7 @@
 #include "mail_system/back/webmail/api/api_util.h"
 #include "mail_system/back/webmail/api/auth_api.h"
 #include "mail_system/back/webmail/api/mail_api.h"
+#include "mail_system/back/webmail/api/compose_api.h"
 #include "mail_system/back/webmail/mail_service.h"
 
 #include <cstring>
@@ -25,8 +26,9 @@ namespace mail_system::webmail {
 
 class ApiRouter {
 public:
-    ApiRouter(AuthService& auth, SessionStore& sessions, MailService& mail)
-        : auth_(auth), sessions_(sessions), mail_(mail) {}
+    ApiRouter(AuthService& auth, SessionStore& sessions, MailService& mail,
+              ISmtpSubmitter* submitter = nullptr)
+        : auth_(auth), sessions_(sessions), mail_(mail), submitter_(submitter) {}
 
     using Complete = std::function<void(pr::http::HttpResponse)>;
 
@@ -64,6 +66,16 @@ public:
                 return true;
             }
             complete(api::me(req, sessions_));
+            return true;
+        }
+        if (req.path == "/api/send") {
+            if (req.method != "POST") {
+                complete(api::error_response(405, "method not allowed"));
+            } else if (!submitter_) {
+                complete(api::error_response(503, "submission service unavailable"));
+            } else {
+                api::send_message(req, sessions_, *submitter_, complete);
+            }
             return true;
         }
         if (req.path == "/api/mailboxes") {
@@ -130,6 +142,7 @@ private:
     AuthService& auth_;
     SessionStore& sessions_;
     MailService& mail_;
+    ISmtpSubmitter* submitter_;
 };
 
 } // namespace mail_system::webmail

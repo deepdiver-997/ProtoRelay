@@ -38,7 +38,7 @@ nlohmann::json mailbox_json(const MailboxSummary& mb) {
 
 nlohmann::json mail_item_json(const MailListItem& m) {
     return {{"id", m.id},
-            {"subject", m.subject},
+            {"subject", mime_view::decode_header(m.subject)},
             {"sender", m.sender},
             {"recipients", m.recipients},
             {"send_time", static_cast<int64_t>(m.send_time)},
@@ -164,7 +164,7 @@ void get_message(const pr::http::HttpRequest& req, SessionStore& sessions,
             }
             complete(json_response(200, nlohmann::json{
                 {"message", {{"id", out.id},
-                             {"subject", out.subject},
+                             {"subject", mime_view::decode_header(out.subject)},
                              {"sender", out.sender},
                              {"recipients", out.recipients},
                              {"send_time", static_cast<int64_t>(out.send_time)},
