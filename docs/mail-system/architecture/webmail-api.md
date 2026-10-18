@@ -1,7 +1,7 @@
 # Webmail HTTP API
 
 `webmailServer` 是复用邮件引擎的第四个协议前端。当前支持 cookie 登录会话、
-邮箱列表、邮件分页、MIME 正文读取与清洗、通过本机 SMTP submit 写信。
+邮箱列表、邮件分页、MIME 正文读取与清洗、通过共享 MailSubmissionService 写信。
 附件下载、附件上传、搜索、标记已读、文件夹管理、自动保存发件箱副本和 SPA 尚未完成。
 
 ## 启动与装配
@@ -11,14 +11,13 @@
 ./build-release/webmailServer config/webmailConfig.json 8081 ./config/webmail
 ```
 
-参数顺序为配置文件、HTTP 端口、静态根目录。`webmail_submission_port` 配置
-默认 587，允许 1..65535 的整数；SMTP 目标始终为 `127.0.0.1`，不解析 DNS，
-不接受请求指定上游地址。可在没有低端口绑定权限的开发环境中指向本机高端口
-SMTP listener；该 listener 必须开启 AUTH 并提供 PLAIN。配置由 webmail 入口
-装配，框架配置与静态 HTTP demo 不需要知道提交端口。
-
-静态根目录不能指向邮件或附件存储。数据库、存储与 SMTP 服务共享现有配置；
-HTTP 服务没有数据库写邮件的旁路。TLS 终结与 Secure cookie 的装配仍待完成。
+参数顺序为配置文件、HTTP 端口、静态根目录。`webmail_node_id` 为 0..1023
+的写节点编号，默认 1；所有写同一邮件库的节点须唯一，避开 SMTP 默认 0。
+生产配置 `use_database=true`，在 shard 0 应用 `migration_web_sessions.sql`。
+原 `webmail_submission_port` 不再读取。Webmail 自己装配配额、外域开关、存储和
+outbound 配置，须与 SMTP 一致。详见
+[共享会话与提交服务](webmail-sessions-and-submission.md)。
+TLS/Secure cookie 感知装配仍待补；静态目录不能指向邮件正文存储。
 
 ## 端点
 
@@ -31,7 +30,7 @@ HTTP 服务没有数据库写邮件的旁路。TLS 终结与 Secure cookie 的�
 | `GET /api/mailboxes` | 本人邮箱及 total/unread |
 | `GET /api/mailboxes/{id}/messages?page=1&page_size=50` | 邮件分页；每页上限 100 |
 | `GET /api/mailboxes/{id}/messages/{mail_id}` | 邮件元数据、解码正文、附件清单 |
-| `POST /api/send` | 生成 MIME，按当前用户 AUTH 后提交本机 SMTP |
+| `POST /api/send` | 生成 MIME，按会话身份提交共享 MailSubmissionService |
 
 邮件列表与详情的 `subject` 解码 UTF-8/ASCII RFC 2047 B/Q encoded-word；
 未知 charset 保留原文。HTML 正文经过白名单清洗；前端仍须使用无脚本、
@@ -55,42 +54,42 @@ curl -b /tmp/webmail.cookies -H 'Content-Type: application/json' \
 HTTP JSON 请求上限 1 MiB。正文转 CRLF 后使用每行 76 字节的 base64；主题使用
 折行 encoded-word，日期为 UTC，Message-ID 和 boundary 使用 CSPRNG。
 
-`from` 与未知字段返回 400；发件人与 SMTP AUTH 用户始终取自已认证会话。
+`from` 与未知字段返回 400；发件人始终取自已认证会话。
 `bcc` 当前也返回 400：引擎的 IMAP/读信 API 仍将信封收件人列表用于展示，
 在读侧隐私契约完成前不开放密送。附件上传/原始 MIME/自定义邮件头不在此接口中。
 
-登录成功后，SMTP 密码以不可复制的缓冲随进程内会话保留，避免每次发信重新输入。
-密码不落盘、不进入 API 响应或日志；注销/淘汰释放会话引用，最后一个在途提交
-释放引用时擦除该缓冲。TTL 到期后不再允许使用；当前 LRU 没有定时清扫过期条目，
-过期条目可能保留到淘汰/进程退出。每次提交均重新 AUTH，SMTP 返回 535 时删除
-该 webmail 会话并清 cookie。改密即时生效仍受 SMTP AuthCache TTL 窗口约束。
+生产会话使用 shard 0 的 `web_sessions` 表：一次登录一行，保存 token 摘要，
+支持多个设备、多个 Webmail 节点和服务重启；logout 只撤销当前会话。
+不在 users 中保存单个 token，不保留 SMTP 密码。每次请求核对账号最新状态和
+密码版本，DB 不可用返回 503。详细迁移与部署约定见
+[共享会话与提交服务](webmail-sessions-and-submission.md)。
 
 ## 提交结果
 
-成功只在 DATA 最终得到 250 后返回：
+默认提交后端确认持久化事务完成后返回：
 
 ```json
 {"status":"accepted","message_id":"<random@example.com>"}
 ```
 
-HTTP 状态为 **202**，表示本机提交服务接受；持久化时点遵循 SMTP 的
-`inbound_ack_mode` 配置，不表示外域收件人已经收到。配额、发件人约束、持久化、
-投递与 DKIM 继续由现有 SMTP 链处理。客户端不会自行重试。
+HTTP 状态为 **202**，表示已确认持久化，不表示外域收件人已经收到。
+共同策略经 AccountPolicy 执行，正文/元数据经现有存储和 PersistentQueue，
+出站继续用 outbox/MX/DKIM。客户端不自行重试；超时不能假设未投递。
 
 | HTTP 状态 | 含义 |
 | --- | --- |
-| 400 / 413 / 415 | 请求校验失败 / 超限 / 媒体类型错误，未提交 SMTP |
-| 401 | 未登录、会话过期或 SMTP 验密失败；后者清 cookie |
-| 422 | SMTP 5xx 明确拒绝；包含 smtp_code、stage |
+| 400 / 413 / 415 | 请求校验失败 / 超限 / 媒体类型错误，未进入提交服务 |
+| 401 | 未登录、会话过期/撤销、账号禁用或凭据版本失效 |
+| 422 | 提交政策明确拒绝；包含 smtp_code、stage |
 | 502 | SMTP 协议不兼容或响应畸形 |
-| 503 | 提交前 I/O 故障或 SMTP 4xx 明确拒绝，可重试 |
-| 504 | DATA 开始后连接丢失/超时，结果未知，retryable=false |
+| 503 | 会话/提交服务或持久化失败，可重试 |
+| 504 | 等待持久化超时，结果未知，retryable=false |
 
 提交失败响应包含 `message_id`，方便核对邮件。收到结果未知时提示用户核实投递，
-不能自动重试。SMTP 提交本身不生成发件箱副本（传统客户端另用 IMAP APPEND），
-自动保存副本是后续工作。多收件人中任一 RCPT 被拒绝就断开，不进入 DATA，
-避免只给部分收件人发送。一次提交总 deadline 为 30 秒，SMTP 响应最多 64 KiB；
-socket/timer 均在同一个 strand 上操作，不阻塞 HTTP 或 worker 线程。
+不能自动重试。当前不自动生成 Sent 副本。等待持久化 deadline 取自
+`inbound_persist_wait_timeout_ms`；超时不撤销在途持久化。
+LoopbackSmtpSubmitter 继续作为可注入的兼容适配器，其 SMTP 协议限制和结果映射
+仍由专项测试覆盖，默认 Webmail 不使用该路径。
 
 部署已有库时须已执行 `config/sql/migration_mail_subject_len.sql`，使
 `mails.subject` 为 varchar(998)；旧 255 字符列可能拒绝合法的编码主题。
@@ -108,5 +107,6 @@ python3 test/scripts/webmail_send_smoke.py --build-dir build-release
 `smtp_submitter_test` 使用真实 loopback TCP 脚本对端，验证 AUTH、信封、DATA
 点透明、拒绝与结果未知；`webmail_test` 验证鉴权、发送者绑定和 MIME 读回。
 Python 的 email 标准库独立验证编码。带 `--db-config` 的烟测会使用临时高端口
-启动真实 SMTP/webmail 服务、创建随机账号、完成提交/配额/To/Cc 收件箱读信，
+启动两个 Webmail 与一个 SMTP 服务、创建随机账号、验证共享会话、重启、
+跨节点提交/读信、别名与跨协议配额、注销、状态/到期/改密，
 随后清理自身数据和进程。

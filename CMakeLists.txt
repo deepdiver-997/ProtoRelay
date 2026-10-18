@@ -298,6 +298,8 @@ set(COMMON_SRCS
     src/mail_system/back/mailServer/outbound/outbound_smtp_session.cpp
     src/mail_system/back/smtp_client/client_session.cpp
     src/mail_system/back/common/bcrypt.cpp
+    src/mail_system/back/common/account_policy.cpp
+    src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp
@@ -418,6 +420,8 @@ if(BUILD_OBJECT_ONLY)
         src/mail_system/back/webmail/api/mail_api.cpp
         src/mail_system/back/webmail/api/compose_api.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
+        src/mail_system/back/webmail/session_store.cpp
+        src/mail_system/back/webmail/direct_submitter.cpp
         src/mail_system/back/common/mime_composer.cpp
         test/server/webmail_main.cpp
     )
@@ -490,6 +494,8 @@ else()
         src/mail_system/back/webmail/api/mail_api.cpp
         src/mail_system/back/webmail/api/compose_api.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
+        src/mail_system/back/webmail/session_store.cpp
+        src/mail_system/back/webmail/direct_submitter.cpp
         src/mail_system/back/common/mime_composer.cpp
         test/server/webmail_main.cpp
     )
@@ -629,8 +635,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         src/mail_system/back/webmail/api/mail_api.cpp
         src/mail_system/back/webmail/api/compose_api.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
+        src/mail_system/back/webmail/session_store.cpp
+        src/mail_system/back/webmail/direct_submitter.cpp
         src/mail_system/back/common/mime_composer.cpp
         test/unit/webmail_test.cpp
+        test/unit/webmail_submission_test.cpp
     )
     target_include_directories(webmail_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(webmail_test)

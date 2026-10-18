@@ -57,7 +57,7 @@ public:
                 complete(api::error_response(405, "method not allowed"));
                 return true;
             }
-            complete(api::logout(req, sessions_));
+            api::logout(req, sessions_, complete);
             return true;
         }
         if (req.path == "/api/me") {
@@ -65,7 +65,7 @@ public:
                 complete(api::error_response(405, "method not allowed"));
                 return true;
             }
-            complete(api::me(req, sessions_));
+            api::me(req, sessions_, complete);
             return true;
         }
         if (req.path == "/api/send") {

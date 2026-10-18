@@ -512,11 +512,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     auto addr_end   = session->get_last_command_args().find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
     if (addr_start != std::string::npos && addr_end != std::string::npos) {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
-        if (ctx->is_authenticated && !ctx->client_username.empty()) {
-            ctx->sender_address = ctx->client_username;
-        } else {
-            ctx->sender_address = session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1);
-        }
+        ctx->sender_address = AccountPolicy::submission_sender(
+            ctx->is_authenticated ? ctx->client_username : "",
+            session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1));
         ctx->recipient_addresses.clear();
         ctx->spf_checked = false;
 
@@ -679,7 +677,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         if (at != std::string::npos) domain = recipient.substr(at + 1);
         const bool is_local =
             algorithm::to_lower(algorithm::trim(domain)) == algorithm::to_lower(cfg->system_domain);
-        if (!cfg->external_delivery_enabled && !is_local) {
+        if (!AccountPolicy::recipient_allowed(recipient, cfg->system_domain, cfg->external_delivery_enabled)) {
             LOG_SMTP_INFO("RCPT external delivery disabled: {}", recipient);
             session->do_async_write("550 5.7.1 External delivery disabled\r\n",
                 [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
@@ -1181,76 +1179,10 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     const std::string& password, AuthCallback cb)
 {
-    if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); cb(false, 0); return; }
-
-    // bcrypt 是几十~几百 ms 的纯 CPU：绝不能在共享 io 线程上算 —— 那会把
-    // 同线程其他会话的读写/握手/定时器全部卡住（与 IMAP LOGIN 同一修复）。
-    // 整段认证（缓存 / DB 查询 / 验密 / last_login）作为一个任务丢给 worker
-    // 线程池；回调在 worker 触发，pause 期间独占 session —— 调用方回调里
-    // drain_buffered_commands 的契约不变。
-    auto router = m_shardRouter;
-    auto cache = m_authCache;
-    auto task =
-        [session, mail_address, password, router, cache,
-         cb = std::move(cb)]() mutable {
-            int shard = 0;
-            if (router) { int r = router->route(mail_address); if (r >= 0) shard = r; }
-
-            AuthCacheEntry ce;
-            if (cache->lookup(mail_address, ce)) {
-                if (ce.status != 1) { cb(false, 0); return; }
-                shard = ce.shard;
-                const bool ok = verify_password_hash(password, ce.password_hash);
-                cb(ok, ok ? shard : 0);
-                return;
-            }
-
-            // DB 走 async_query 链（而非 sq 同步桥）：真实连接池的默认实现
-            // 内联执行 → 查询与下面的 bcrypt 都在本 worker 线程；延迟实现
-            // （MockDbPool 手动 fire）也保持兼容 —— 回调链不挑线程。
-            auto db_pool = router->get_db_pool(static_cast<size_t>(shard));
-            if (!db_pool) { LOG_AUTH_ERROR("No DB pool for shard {}", shard); cb(false, 0); return; }
-            auto conn = db_pool->acquire_connection();
-            if (!conn->is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); cb(false, 0); return; }
-
-            (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},
-                [mail_address, password, shard, conn, cache,
-                 cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-                    if (!result || result->get_row_count() == 0) {
-                        LOG_AUTH_WARN("User not found: {}", mail_address);
-                        cb(false, 0);
-                        return;
-                    }
-                    // safe_stoull：status 列 NULL/脏值 → 0 → 按"禁用"拒绝（fail-closed）。
-                    // 裸 std::stoi 在这个 worker 任务里抛出会直接 std::terminate 整进程。
-                    int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
-                    if (status != 1) {
-                        LOG_AUTH_WARN("User account disabled: {}", mail_address);
-                        cb(false, 0);
-                        return;
-                    }
-                    std::string stored = result->get_value(0, "password");
-                    AuthCacheEntry entry{stored, status, 0, shard};
-                    cache->store(mail_address, entry);
-                    if (!verify_password_hash(password, stored)) { cb(false, 0); return; }
-                    // 验密通过：MD5/明文历史行 → bcrypt 回写 + 刷缓存（已是 bcrypt 则直通），
-                    // 再记 last_login，最后回调。见 common/password_rehash.h 的契约说明。
-                    rehash_password_if_needed_async(conn, cache, mail_address, password, stored, entry,
-                        [conn, mail_address, shard, cb = std::move(cb)]() mutable {
-                            (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                                [conn, cb = std::move(cb), shard](bool) { cb(true, shard); });
-                        });
-                });
-        };
-
-    // 暂停流水线：worker 执行期间不消费新命令（无 worker 池时内联执行，
-    // pause/回调契约相同）
+    if (!session) { cb(false, 0); return; }
     session->set_paused(true);
-    if (auto* pool = session->get_server()->m_workerThreadPool.get()) {
-        pool->post(std::move(task));
-    } else {
-        task();
-    }
+    account_policy_->login_async(mail_address, password,
+        [session, cb = std::move(cb)](AccountAuthResult out) { cb(out.ok, out.ok ? out.shard : 0); });
 }
 
 
@@ -1260,38 +1192,9 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
     std::function<void(bool exists)> cb)
 {
     if (!session) { cb(false); return; }
-
-    int shard = 0;
-    if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
-
-    // 快路径：缓存命中（含负缓存 status=0）直接回调
-    AuthCacheEntry ce;
-    if (m_recipientCache->lookup(mail_address, ce)) { cb(ce.status == 1); return; }
-
-    // 缓存未命中，查 DB
-    std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
-    if (!pool) { LOG_SMTP_WARN("RCPT check no DB pool for shard {}", shard); cb(false); return; }
-    auto conn = pool->acquire_connection();
-    if (!conn->is_valid()) { LOG_SMTP_WARN("RCPT check failed to get DB connection"); cb(false); return; }
-
-    // 暂停流水线：DB 查询期间不消费新命令，回调中 drain_buffered_commands()
     session->set_paused(true);
-
-    std::string sql = db::sql::build_recipient_exists_query();
-    (*conn)->async_query(sql, {mail_address},
-        [this, session, mail_address, conn,
-         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (!result || result->get_row_count() == 0) {
-                // 负缓存：不存在
-                m_recipientCache->store(mail_address, {"", 0, 0, 0});
-                cb(false);
-                return;
-            }
-            // safe_stoull：脏 status → 0 → 负缓存 + 550 User unknown（fail-closed），不抛
-            int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
-            m_recipientCache->store(mail_address, {"", status, 0, 0});
-            cb(status == 1);
-        });
+    account_policy_->user_exists_async(mail_address,
+        [session, cb = std::move(cb)](bool exists) { cb(exists); });
 }
 
 // RCPT TO 收件人解析：用户（缓存→DB）→ 别名（缓存→DB）→ 空（550）。
@@ -1324,31 +1227,9 @@ void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& alias_address,
     std::function<void(std::vector<std::string>)> cb)
 {
-    std::vector<std::string> cached;
-    bool stale = false;
-    if (m_aliasCache->get(alias_address, cached, stale) && !stale) { cb(std::move(cached)); return; }
-
-    int shard = 0;
-    if (m_shardRouter) { int r = m_shardRouter->route(alias_address); if (r >= 0) shard = r; }
-    std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
-    if (!pool) { LOG_SMTP_WARN("alias check no DB pool for shard {}", shard); cb({}); return; }
-    auto conn = pool->acquire_connection();
-    if (!conn->is_valid()) { LOG_SMTP_WARN("alias check failed to get DB connection"); cb({}); return; }
-
     if (session) session->set_paused(true);
-
-    std::string sql = db::sql::build_alias_targets_query();
-    (*conn)->async_query(sql, {alias_address},
-        [this, session, alias_address, conn,
-         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            std::vector<std::string> targets;
-            if (result) {
-                for (size_t i = 0; i < result->get_row_count(); ++i)
-                    targets.push_back(result->get_value(i, "target_address"));
-                m_aliasCache->put(alias_address, targets);
-            }
-            cb(std::move(targets));
-        });
+    account_policy_->alias_targets_async(alias_address,
+        [session, cb = std::move(cb)](std::vector<std::string> targets) mutable { cb(std::move(targets)); });
 }
 
 
@@ -1363,40 +1244,13 @@ void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
     const std::string& mail_address,
     std::function<void(bool allowed)> cb)
 {
-    if (!session) { if (cb) cb(true); return; }
     if (!cb) return;
-
+    if (!session) { cb(true); return; }
     auto cfg = std::atomic_load(&session->get_server()->m_config);
-    if (!cfg || cfg->smtp_daily_send_limit <= 0) { cb(true); return; }  // 0 = 不限
-    int daily_limit = cfg->smtp_daily_send_limit;
-
-    int shard = 0;
-    if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
-
-    std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
-    if (!pool) { LOG_SMTP_WARN("quota check: no DB pool for shard {} (fail-open)", shard); cb(true); return; }
-    auto conn = pool->acquire_connection();
-    if (!conn->is_valid()) { LOG_SMTP_WARN("quota check: DB connection failed (fail-open)"); cb(true); return; }
-
-    std::string sql = db::sql::build_increment_sent_today_query();
-    (*conn)->async_execute(sql, {mail_address, std::to_string(daily_limit)},
-        [conn, cb = std::move(cb)](bool ok) mutable {
-            if (!ok) {
-                LOG_SMTP_WARN("quota check: conditional update failed (fail-open)");
-                cb(true);
-                return;
-            }
-            // 同一连接读 ROW_COUNT()：1 = 占用成功，0 = 配额已超
-            (*conn)->async_query(db::sql::build_select_row_count(),
-                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
-                    size_t affected = 0;
-                    if (r && r->get_row_count() > 0) {
-                        try { affected = static_cast<size_t>(std::stoull(r->get_value(0, "affected"))); }
-                        catch (...) { affected = 0; }
-                    }
-                    cb(affected > 0);
-                });
-        });
+    if (!cfg || cfg->smtp_daily_send_limit <= 0) { cb(true); return; }
+    session->set_paused(true);
+    account_policy_->check_send_quota_async(mail_address, cfg->smtp_daily_send_limit,
+        [session, cb = std::move(cb)](bool allowed) { cb(allowed); });
 }
 
 

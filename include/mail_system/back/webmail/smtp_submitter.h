@@ -16,6 +16,9 @@ struct SubmitRequest {
     SessionPasswordPtr password;
     std::vector<std::string> recipients;
     std::string raw;
+    uint64_t user_id = 0;
+    std::string subject;
+    std::string message_id;
 };
 
 enum class SubmitStatus { Accepted, AuthFailed, Rejected, Unavailable, ProtocolError, OutcomeUnknown };

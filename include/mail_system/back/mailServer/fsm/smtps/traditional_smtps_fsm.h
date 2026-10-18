@@ -11,6 +11,7 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/auth_cache.h"
+#include "mail_system/back/common/account_policy.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
@@ -57,6 +58,8 @@ public:
     std::shared_ptr<LruCache<std::string, std::vector<std::string>>> m_aliasCache =
         std::make_shared<LruCache<std::string, std::vector<std::string>>>(10000, std::chrono::seconds(300));
 
+    std::shared_ptr<AccountPolicy> account_policy_;
+
     TraditionalSmtpsFsm(
         std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
         std::shared_ptr<pr::ThreadPoolBase> worker_thread_pool,
@@ -66,6 +69,8 @@ public:
         m_workerThreadPool(worker_thread_pool),
         m_shardRouter(std::move(shard_router)),
         m_persistentQueue(persistent_queue) {
+        account_policy_ = std::make_shared<AccountPolicy>(m_shardRouter, m_authCache, m_workerThreadPool);
+        account_policy_->set_recipient_caches(m_recipientCache, m_aliasCache);
         init_transition_table();
         init_state_handlers();
     }

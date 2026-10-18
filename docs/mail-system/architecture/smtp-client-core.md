@@ -105,3 +105,11 @@ ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan -R 'smtp_client_test|smt
 已落实持久化完成订阅与 SMTP after_persist 接入，见
 [持久化完成通知](persistence-completion.md)。Webmail 仍经现有 SMTP 提交；共享
 账号政策与完整 MailSubmissionService、可信 listener、请求级持久化幂等仍未实现。
+
+## 2026-10-18 续：共享账号政策与会话已落地
+
+AccountPolicy 已从 SMTP/Webmail 认证、别名、配额路径收口；Webmail 默认使用
+注入的 MailSubmissionService，确认 PersistentQueue 终态后响应。共享 DB 会话
+支持跨节点/设备和重启，生产不保留 SMTP 密码。详见
+[共享会话与提交服务](webmail-sessions-and-submission.md)。可信 TLS listener、
+自定义协议、幂等键/配额补偿、会话管理 API 仍未实现。

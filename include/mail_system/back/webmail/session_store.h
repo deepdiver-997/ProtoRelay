@@ -1,22 +1,11 @@
-#ifndef MAIL_SYSTEM_WEBMAIL_SESSION_STORE_H
-#define MAIL_SYSTEM_WEBMAIL_SESSION_STORE_H
-
-// ================================================================
-// SessionStore — webmail 登录态（kickoff §三 目录结构）
-//
-// 为什么是 cookie 而不是 Authorization header（kickoff 设计决策 6）：
-// JWT 放 Authorization 时 <a href> 下载链接带不上它；cookie 同源导航自动
-// 携带，附件下载（带鉴权 handler 流式吐出）零额外机制。token 只存在于
-// HttpOnly cookie —— 页面脚本读不到，XSS 偷不走会话。
-//
-// Secure 标志暂不默认加：本地/内网明文部署会直接失联，等 TLS 感知装配
-// （listener 类型判断）落地后再补。
-// ================================================================
-
+#pragma once
 #include "framework/cache/lru_cache.h"
 #include "framework/http/http_types.hpp"
 #include "mail_system/back/webmail/session_password.h"
 
+#include "mail_system/back/router/i_shard_router.h"
+#include "framework/thread_pool/thread_pool_base.h"
+#include <functional>
 #include <chrono>
 #include <cstdint>
 #include <openssl/rand.h>
@@ -27,11 +16,11 @@ namespace mail_system::webmail {
 struct WebSessionInfo {
     uint64_t user_id = 0;
     std::string address;
+    std::string credential_stamp;
+    int shard = 0;
 };
 
-// 单实例内存会话表。容量上限防登录风暴吃穿内存；TTL 到期条目按 LruCache
-// 的 stale 语义判失效（get 返回 stale=true 视为未登录）。会话不落盘：
-// 进程重启全员重新登录，与"踢会话全踢语义"（MVP-3）同一收益。
+// 生产装配使用共享 DB；内存构造仅供嵌入和测试。固定 TTL，不滑动续期。
 class SessionStore {
 public:
     static constexpr std::chrono::seconds kDefaultTtl{24 * 3600};
@@ -41,6 +30,20 @@ public:
                           std::chrono::seconds ttl = kDefaultTtl)
         : cache_(capacity, ttl), ttl_(ttl) {}
 
+    SessionStore(std::shared_ptr<router::IShardRouter> router,
+                 std::shared_ptr<pr::ThreadPoolBase> workers,
+                 std::chrono::seconds ttl = kDefaultTtl)
+        : cache_(1, ttl), ttl_(ttl), router_(std::move(router)), workers_(std::move(workers)), database_(true) {}
+    struct LookupResult {
+        bool found = false;
+        bool server_error = false;
+        WebSessionInfo user;
+        SessionPasswordPtr password; // only explicit in-memory/loopback compatibility
+    };
+    bool database_backed() const { return database_; }
+    void put_async(std::string token, WebSessionInfo user, SessionPasswordPtr password, std::function<void(bool)> cb);
+    void lookup_async(std::string token, std::function<void(LookupResult)> cb) const;
+    void erase_async(std::string token, std::function<void(bool)> cb);
     std::chrono::seconds ttl() const { return ttl_; }
 
     // 256 位 CSPRNG token，hex 编码 64 字符。RAND_bytes 失败返回空串
@@ -60,14 +63,15 @@ public:
 
     void put(const std::string& token, uint64_t user_id, const std::string& address,
              SessionPasswordPtr password = nullptr) {
-        cache_.put(token, Entry{{user_id, address}, std::move(password)});
+        if (database_) throw std::logic_error("use async DB session API");
+        cache_.put(token, Entry{{user_id, address, {}, 0}, std::move(password)});
     }
 
     // 命中且未过期返回 true。滑动续期 MVP 不做（固定 TTL，到期重新登录）。
     bool lookup(const std::string& token, WebSessionInfo& out,
                 SessionPasswordPtr* password = nullptr) const {
         if (password) password->reset();
-        if (token.empty()) return false;
+        if (database_ || token.empty()) return false;
         bool stale = false;
         Entry entry;
         if (!cache_.get(token, entry, stale) || stale) return false;
@@ -76,7 +80,10 @@ public:
         return true;
     }
 
-    void erase(const std::string& token) { cache_.invalidate(token); }
+    void erase(const std::string& token) {
+        if (database_) throw std::logic_error("use async DB session API");
+        cache_.invalidate(token);
+    }
 
     size_t size() const { return cache_.size(); }
 
@@ -122,8 +129,9 @@ private:
     };
     pr::LruCache<std::string, Entry> cache_;
     std::chrono::seconds ttl_;
+    std::shared_ptr<router::IShardRouter> router_;
+    std::shared_ptr<pr::ThreadPoolBase> workers_;
+    bool database_ = false;
 };
 
 } // namespace mail_system::webmail
-
-#endif // MAIL_SYSTEM_WEBMAIL_SESSION_STORE_H

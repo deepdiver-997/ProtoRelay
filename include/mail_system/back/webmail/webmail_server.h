@@ -18,13 +18,14 @@
 #include "mail_system/back/webmail/mail_service.h"
 #include "mail_system/back/webmail/session_store.h"
 
+#include "mail_system/back/persist_storage/persistent_queue.h"
 #include <memory>
 
 namespace mail_system::webmail {
 
 class WebmailServer : public pr::http::HttpServer {
 public:
-    // auth_cache / sessions 缺省自建（多 server 共享登录态时从装配根传入）
+    // DB 模式缺省装配共享会话及直接提交；依赖仍可从装配根注入。
     WebmailServer(const mail_system::ServerConfig& config,
                   std::string doc_root,
                   std::shared_ptr<pr::ThreadPoolBase> io_pool,
@@ -32,17 +33,23 @@ public:
                   std::shared_ptr<router::IShardRouter> shard_router,
                   std::shared_ptr<AuthCache> auth_cache = nullptr,
                   std::shared_ptr<SessionStore> sessions = nullptr,
-                  std::shared_ptr<ISmtpSubmitter> submitter = nullptr);
+                  std::shared_ptr<ISmtpSubmitter> submitter = nullptr,
+                  uint16_t submission_node_id = 1);
+    ~WebmailServer() override;
 
     SessionStore& sessions() { return *sessions_; }
 
+protected:
+    void stop(pr::ServerState state = pr::ServerState::Pausing) override;
 private:
+    std::shared_ptr<persist_storage::PersistentQueue> persist_queue_;
+    std::shared_ptr<outbound::OutboundServer> outbound_;
     std::shared_ptr<AuthCache> auth_cache_;    // 保活（AuthService 内部按值持有拷贝）
     std::shared_ptr<SessionStore> sessions_;
-    std::unique_ptr<AuthService> auth_service_;
-    std::unique_ptr<MailService> mail_service_;
+    std::shared_ptr<AuthService> auth_service_;
+    std::shared_ptr<MailService> mail_service_;
     std::shared_ptr<ISmtpSubmitter> submitter_;
-    ApiRouter router_;
+    std::shared_ptr<ApiRouter> router_;
 };
 
 } // namespace mail_system::webmail

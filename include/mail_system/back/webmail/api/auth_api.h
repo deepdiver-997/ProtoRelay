@@ -20,13 +20,13 @@ namespace mail_system::webmail::api {
 
 using Complete = std::function<void(pr::http::HttpResponse)>;
 
-// 同步端点：直接返回响应（session 的 complete 由路由层调用）
+// 健康检查同步；会话操作异步，DB 故障返回 503。
 pr::http::HttpResponse health();
-pr::http::HttpResponse logout(const pr::http::HttpRequest& req, SessionStore& sessions);
-pr::http::HttpResponse me(const pr::http::HttpRequest& req, SessionStore& sessions);
+void logout(const pr::http::HttpRequest& req, SessionStore& sessions, const Complete& complete);
+void me(const pr::http::HttpRequest& req, SessionStore& sessions, const Complete& complete);
 
 // 异步端点：认证在 worker 线程跑（bcrypt），完成后经 complete 回吐。
-// complete 恰好调用一次；回调线程 = worker 线程（响应写经 exec_ctx_ 串行化）。
+// complete 恰好调用一次；响应写经 exec_ctx_ 串行化。
 void login(const pr::http::HttpRequest& req, AuthService& auth, SessionStore& sessions,
            const Complete& complete);
 

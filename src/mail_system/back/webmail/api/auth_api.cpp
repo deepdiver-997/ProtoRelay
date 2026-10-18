@@ -9,19 +9,19 @@ pr::http::HttpResponse health() {
     return json_response(200, nlohmann::json{{"status", "ok"}});
 }
 
-pr::http::HttpResponse logout(const pr::http::HttpRequest& req, SessionStore& sessions) {
-    sessions.erase(SessionStore::token_from_request(req));
-    return json_response(200, nlohmann::json{{"ok", true}},
-                         SessionStore::clear_cookie_header());
+void logout(const pr::http::HttpRequest& req, SessionStore& sessions, const Complete& complete) {
+    sessions.erase_async(SessionStore::token_from_request(req), [complete](bool ok) {
+        if (!ok) { complete(error_response(503, "session store unavailable")); return; }
+        complete(json_response(200, {{"ok", true}}, SessionStore::clear_cookie_header()));
+    });
 }
 
-pr::http::HttpResponse me(const pr::http::HttpRequest& req, SessionStore& sessions) {
-    WebSessionInfo info;
-    const std::string token = SessionStore::token_from_request(req);
-    if (token.empty() || !sessions.lookup(token, info))
-        return error_response(401, "not authenticated");
-    return json_response(200, nlohmann::json{
-        {"user", {{"id", info.user_id}, {"address", info.address}}}});
+void me(const pr::http::HttpRequest& req, SessionStore& sessions, const Complete& complete) {
+    sessions.lookup_async(SessionStore::token_from_request(req), [complete](SessionStore::LookupResult r) {
+        if (r.server_error) { complete(error_response(503, "session store unavailable")); return; }
+        if (!r.found) { complete(error_response(401, "not authenticated")); return; }
+        complete(json_response(200, {{"user", {{"id", r.user.user_id}, {"address", r.user.address}}}}));
+    });
 }
 
 void login(const pr::http::HttpRequest& req, AuthService& auth, SessionStore& sessions,
@@ -41,7 +41,8 @@ void login(const pr::http::HttpRequest& req, AuthService& auth, SessionStore& se
         return;
     }
 
-    auto submission_password = std::make_shared<SessionPassword>(password);
+    // Production DB sessions never retain the SMTP password.
+    auto submission_password = sessions.database_backed() ? nullptr : std::make_shared<SessionPassword>(password);
     auth.login_async(address, password,
         [&sessions, complete, submission_password](AuthOutcome out) {
             if (out.server_error) {
@@ -58,10 +59,12 @@ void login(const pr::http::HttpRequest& req, AuthService& auth, SessionStore& se
                 complete(error_response(500, "token generation failed"));
                 return;
             }
-            sessions.put(token, out.user_id, out.address, submission_password);
-            complete(json_response(200, nlohmann::json{
-                {"user", {{"id", out.user_id}, {"address", out.address}}}},
-                sessions.issue_cookie_header(token)));
+            sessions.put_async(token, {out.user_id, out.address, out.credential_stamp, out.shard}, submission_password,
+                [&sessions, token, out, complete](bool ok) {
+                    if (!ok) { complete(error_response(503, "session store unavailable")); return; }
+                    complete(json_response(200, {{"user", {{"id", out.user_id}, {"address", out.address}}}},
+                        sessions.issue_cookie_header(token)));
+                });
         });
 }
 

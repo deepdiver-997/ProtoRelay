@@ -32,7 +32,7 @@ int main(int argc, char* argv[]) {
     if (argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         std::cout << "Usage: webmailServer [config_json] [port] [doc_root]\n"
                      "Defaults: config/webmailConfig.json, 8081, ./config/webmail\n"
-                     "Config: webmail_submission_port (1..65535, default 587); SMTP host is always 127.0.0.1.\n";
+                     "Config: webmail_node_id (0..1023, default 1); use a distinct Snowflake node ID per writer.\nShared DB sessions and direct durable submission require use_database=true.\n";
         return 0;
     }
     std::string config_path = argc > 1 ? argv[1] : "config/webmailConfig.json";
@@ -46,17 +46,17 @@ int main(int argc, char* argv[]) {
 
     try {
         ServerConfig config;
-        uint16_t submission_port = 587;
+        uint16_t submission_node_id = 1;
         if (std::filesystem::exists(config_path) && config.loadFromFile(config_path)) {
             LOG_SERVER_INFO("Loaded webmail config: {}", config_path);
             // webmail 专属装配配置留在入口，不扩散进 framework/ServerConfig。
             std::ifstream input(config_path);
             auto web_config = nlohmann::json::parse(input);
-            if (web_config.contains("webmail_submission_port")) {
-                const auto& value = web_config["webmail_submission_port"];
-                if (!value.is_number_integer() || value < 1 || value > 65535)
-                    throw std::invalid_argument("webmail_submission_port must be an integer in 1..65535");
-                submission_port = value.get<uint16_t>();
+            if (web_config.contains("webmail_node_id")) {
+                const auto& value = web_config["webmail_node_id"];
+                if (!value.is_number_integer() || value < 0 || value > 1023)
+                    throw std::invalid_argument("webmail_node_id must be an integer in 0..1023");
+                submission_node_id = value.get<uint16_t>();
             }
         } else {
             LOG_SERVER_WARN("Config {} not loadable — minimal in-memory config (DB off)",
@@ -90,8 +90,7 @@ int main(int argc, char* argv[]) {
 
         g_server = std::make_unique<webmail::WebmailServer>(
             config, doc_root, res.io_pool, res.worker_pool, res.shard_router,
-            nullptr, nullptr, std::make_shared<webmail::LoopbackSmtpSubmitter>(
-                [io_pool] { return io_pool->get_io_context().get_executor(); }, submission_port));
+            nullptr, nullptr, nullptr, submission_node_id);
         g_server->start();
 
         LOG_SERVER_INFO("webmail API ready. try: curl http://localhost:{}/api/health", port);

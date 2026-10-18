@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""独立 Python email 消费者验证 MIME；可选本地 DB + 真实 HTTP→587→读信闭环。
+"""独立 Python email 消费者验证 MIME；可选本地 DB + 双节点会话/提交/读信闭环。
 
 python3 test/scripts/webmail_send_smoke.py --build-dir build-release
 .venv/bin/python test/scripts/webmail_send_smoke.py --db-config config/db_config.json
@@ -7,10 +7,12 @@ python3 test/scripts/webmail_send_smoke.py --build-dir build-release
 """
 import argparse
 import http.cookiejar
+import hashlib
 import json
 from pathlib import Path
 import secrets
 import socket
+import smtplib
 import subprocess
 import tempfile
 import time
@@ -53,21 +55,26 @@ def check_local_e2e(build_dir, db_config_path, temp):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        second_port = probe.getsockname()[1]
     db = mysql.connector.connect(
         **{key: db_config[key] for key in ("host", "port", "user", "password", "database") if key in db_config},
         connection_timeout=3, autocommit=True,
     )
     suffix = secrets.token_hex(8)
     addresses = [f"wm-{suffix}-{role}@webmail.test" for role in ("sender", "to", "cc")]
+    alias = f"wm-{suffix}-group@webmail.test"
     password = secrets.token_urlsafe(24)
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=4)).decode()
     processes, logs = [], []
+    cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        urllib.request.HTTPCookieProcessor(cookie_jar))
     base = f"http://127.0.0.1:{port}"
 
-    def api(path, body=None, client=None, content_type="application/json"):
-        request = urllib.request.Request(base + path,
+    def api(path, body=None, client=None, content_type="application/json", node=None):
+        request = urllib.request.Request((f"http://127.0.0.1:{node}" if node else base) + path,
             data=None if body is None else json.dumps(body).encode(),
             headers={} if body is None else {"Content-Type": content_type})
         try:
@@ -103,6 +110,8 @@ def check_local_e2e(build_dir, db_config_path, temp):
             for address in addresses:
                 cursor.execute("INSERT INTO users (mail_address,password,name,status) VALUES (%s,%s,%s,1)",
                                (address, hashed, "webmail smoke"))
+            for address in addresses[1:]:
+                cursor.execute("INSERT INTO mail_aliases (alias_address,target_address,is_active) VALUES (%s,%s,1)", (alias,address))
         common = {
             "address": "127.0.0.1", "system_domain": "webmail.test", "use_database": True,
             "db_config_file": str(db_config_path), "io_thread_count": 2, "worker_thread_count": 2,
@@ -114,11 +123,15 @@ def check_local_e2e(build_dir, db_config_path, temp):
         smtp_config = {**common, "listeners": [{"type": "tcp", "port": smtp_port, "auth_policy": "on", "advertise_starttls": False}],
                        "smtp_daily_send_limit": 1, "external_delivery_enabled": False,
                        "persist_min_available_memory_mb": 0, "inbound_ack_mode": "after_persist"}
-        web_config = {**common, "listeners": [{"type": "tcp", "port": port}], "webmail_submission_port": smtp_port}
+        web_config = {**common, "listeners": [{"type": "tcp", "port": port}], "webmail_node_id": 1,
+                      "smtp_daily_send_limit": 1, "external_delivery_enabled": False,
+                      "persist_min_available_memory_mb": 0}
         for name, config in (("smtp", smtp_config), ("web", web_config)):
             (temp / f"{name}.json").write_text(json.dumps(config))
         commands = [[str(build_dir / "smtpsServer"), str(temp / "smtp.json")],
                     [str(build_dir / "webmailServer"), str(temp / "web.json"), str(port), str(temp / "public")]]
+        (temp / "web-second.json").write_text(json.dumps({**web_config, "webmail_node_id": 2}))
+        commands.append([str(build_dir / "webmailServer"), str(temp / "web-second.json"), str(second_port), str(temp / "public")])
         (temp / "public").mkdir()
         for index, command in enumerate(commands):
             log = (temp / f"server-{index}.log").open("w+")
@@ -126,24 +139,45 @@ def check_local_e2e(build_dir, db_config_path, temp):
             processes.append(subprocess.Popen(command, cwd=temp, stdout=log, stderr=subprocess.STDOUT))
         wait_ready(smtp_ready)
         wait_ready(lambda: api("/api/health")[0] == 200)
-        payload = {"to": [addresses[1]], "cc": [addresses[2], addresses[1]],
+        wait_ready(lambda: api("/api/health", node=second_port)[0] == 200)
+        payload = {"to": [alias], "cc": [addresses[2], addresses[1]],
                    "subject": "中文主题往返 " * 12, "text": "hello\n.\nlast",
                    "html": "<script>bad()</script><b>ok</b>"}
         assert api("/api/send", payload)[0] == 401
         assert api("/api/login", {"address": addresses[0], "password": password})[0] == 200
+        cross_status, cross = api("/api/me", node=second_port)
+        assert cross_status == 200, ("cross-node session must be valid", cross_status, cross)
         assert api("/api/send", {**payload, "from": "spoof@webmail.test"})[0] == 400
         assert api("/api/send", {**payload, "bcc": [addresses[2]]})[0] == 400
         assert api("/api/send", payload, content_type="text/plain")[0] == 415
-        status, sent = api("/api/send", payload)
+        # Independent login on a second device must not replace the first session.
+        second_client = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        assert api("/api/login", {"address": addresses[0], "password": password}, client=second_client, node=second_port)[0] == 200
+        assert api("/api/me")[0] == 200
+        assert api("/api/logout", {}, client=second_client)[0] == 200
+        assert api("/api/me", client=second_client, node=second_port)[0] == 401
+        assert api("/api/me", node=second_port)[0] == 200
+        # Restart a node: session continuity requires the DB rather than any local cache.
+        processes[-1].terminate()
+        processes[-1].wait(timeout=10)
+        processes[-1] = subprocess.Popen(commands[-1], cwd=temp, stdout=logs[-1], stderr=subprocess.STDOUT)
+        wait_ready(lambda: api("/api/me", node=second_port)[0] == 200)
+        status, sent = api("/api/send", payload, node=second_port)
         assert status == 202 and sent["status"] == "accepted", (status, sent)
         status, denied = api("/api/send", payload)
         assert status == 422 and denied["smtp_code"] == 550 and denied["stage"] == "mail", (status, denied)
+        # SMTP and direct HTTP must charge the same account quota, including a forged MAIL FROM.
+        with smtplib.SMTP("127.0.0.1", smtp_port, timeout=5) as smtp:
+            smtp.login(addresses[0], password)
+            code, _ = smtp.mail("spoof@webmail.test")
+            assert code == 550, code
         with db.cursor() as cursor:
             cursor.execute("SELECT sent_today FROM users WHERE mail_address=%s", (addresses[0],))
             assert cursor.fetchone()[0] == 1
             cursor.execute("SELECT recipient FROM mail_recipients WHERE sender=%s", (addresses[0],))
             assert sorted(row[0] for row in cursor.fetchall()) == sorted(addresses[1:])
-        # SMTP 提交本身不自动保存 Sent（传统客户端通常另用 IMAP APPEND）。
+        # 当前提交服务不自动保存 Sent（传统客户端通常另用 IMAP APPEND）。
         for address in addresses[1:]:
             assert api("/api/login", {"address": address, "password": password})[0] == 200
             status, boxes = api("/api/mailboxes")
@@ -158,9 +192,30 @@ def check_local_e2e(build_dir, db_config_path, temp):
             assert detail["message"]["subject"] == payload["subject"]
             assert detail["body"]["text"] == "hello\r\n.\r\nlast"
             assert detail["body"]["html"] == "<b>ok</b>"
-        assert api("/api/logout", {})[0] == 200
+        # Cross-node logout, disable, expiry and credential reset all reject old cookies.
+        assert api("/api/logout", {}, node=second_port)[0] == 200
         assert api("/api/send", payload)[0] == 401
-        print("PASS: real HTTP login → SMTP submit AUTH → queue/DB → To/Cc Inbox/read; sender binding, quota, logout")
+        assert api("/api/login", {"address": addresses[0], "password": password})[0] == 200
+        with db.cursor() as cursor:
+            cursor.execute("UPDATE users SET status=0 WHERE mail_address=%s", (addresses[0],))
+        assert api("/api/me", node=second_port)[0] == 401
+        with db.cursor() as cursor:
+            cursor.execute("UPDATE users SET status=1 WHERE mail_address=%s", (addresses[0],))
+            cursor.execute("UPDATE web_sessions SET expires_at=UTC_TIMESTAMP()-INTERVAL 1 SECOND WHERE account_address=%s", (addresses[0],))
+        assert api("/api/me")[0] == 401
+        assert api("/api/login", {"address": addresses[0], "password": password})[0] == 200
+        with db.cursor() as cursor:
+            cursor.execute("UPDATE users SET password=%s WHERE mail_address=%s", ("changed-for-smoke", addresses[0]))
+        assert api("/api/me", node=second_port)[0] == 401
+        assert api("/api/login", {"address": addresses[0], "password": password})[0] == 401
+        with db.cursor() as cursor:
+            cursor.execute("SELECT token_hash,credential_stamp FROM web_sessions WHERE account_address=%s", (addresses[0],))
+            records = cursor.fetchall()
+            assert records and all(len(t) == 64 and len(c) == 64 for t,c in records)
+            token = next(c.value for c in cookie_jar if c.name == "wb_session")
+            assert token not in {row[0] for row in records}
+            assert hashlib.sha256(token.encode()).hexdigest() in {row[0] for row in records}
+        print("PASS: two nodes + restart; independent devices; cross-node durable send/read/logout; shared SMTP quota; aliases; disable/expiry/password reset")
     except Exception:
         for index, log in enumerate(logs):
             log.seek(0)
@@ -186,7 +241,9 @@ def check_local_e2e(build_dir, db_config_path, temp):
                 cursor.execute("SELECT DISTINCT mail_id FROM mail_recipients WHERE sender=%s", (addresses[0],))
                 for (mail_id,) in cursor.fetchall():
                     cursor.execute("DELETE FROM mails WHERE id=%s", (mail_id,))
+                cursor.execute("DELETE FROM mail_aliases WHERE alias_address=%s", (alias,))
                 for address in addresses:
+                    cursor.execute("DELETE FROM web_sessions WHERE account_address=%s", (address,))
                     cursor.execute("DELETE FROM users WHERE mail_address=%s", (address,))
         finally:
             db.close()

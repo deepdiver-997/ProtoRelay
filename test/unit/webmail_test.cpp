@@ -865,7 +865,91 @@ static void test_compose_api_rejections() {
     std::cout << "  [PASS] compose_api_rejections" << std::endl;
 }
 
-int main() {
+// 2026-10-18: cross-node sessions, DB outage and stale-login credential regression.
+// Real two-process negative/positive verification: docs/bugfixes/2026-10-18-webmail-shared-sessions.md.
+static void test_database_sessions_and_fresh_auth() {
+    auto pool = std::make_shared<test::MockDbPool>();
+    auto router = std::make_shared<router::StaticShardRouter>(std::vector<std::pair<std::string,int>>{}, 0,
+        std::vector<std::shared_ptr<DBPool>>{pool}, std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+    auto conn = pool->mock_conn();
+    SessionStore sessions(router, nullptr);
+    auto token = SessionStore::generate_token();
+    auto registry = [] {
+        return std::make_shared<test::MockDbResult>(std::vector<std::map<std::string,std::string>>{
+            {{"user_id","42"},{"account_address","user@test.local"},{"account_shard","0"},
+             {"credential_stamp",credential_stamp("stored-credential")}}});
+    };
+    auto user = [](std::string status, std::string password) {
+        return std::make_shared<test::MockDbResult>(std::vector<std::map<std::string,std::string>>{
+            {{"id","42"},{"status",std::move(status)},{"password",std::move(password)}}});
+    };
+    int calls = 0;
+    conn->push_sync_result(registry()); conn->push_sync_result(user("1", "stored-credential"));
+    sessions.lookup_async(token, [&](SessionStore::LookupResult r) { ++calls; assert(r.found && !r.server_error && !r.password); assert(r.user.user_id == 42); });
+    assert(calls == 1);
+    for (auto row : {user("0", "stored-credential"), user("1", "changed-credential")}) {
+        conn->push_sync_result(registry()); conn->push_sync_result(row);
+        sessions.lookup_async(token, [&](SessionStore::LookupResult r) { ++calls; assert(!r.found && !r.server_error); });
+    }
+    conn->push_sync_result(nullptr);
+    sessions.lookup_async(token, [&](SessionStore::LookupResult r) { ++calls; assert(!r.found && r.server_error); });
+    conn->push_sync_result(registry()); conn->push_sync_result(nullptr);
+    sessions.lookup_async(token, [&](SessionStore::LookupResult r) { ++calls; assert(!r.found && r.server_error); });
+    sessions.lookup_async("malformed", [&](SessionStore::LookupResult r) { ++calls; assert(!r.found && !r.server_error); });
+    assert(calls == 6);
+
+    // Fresh web login must ignore a cached old credential and fail closed on DB errors.
+    auto cache = std::make_shared<AuthCache>();
+    cache->inject("user@test.local", {"old-password", 1, 42, 0});
+    AuthService auth(router, cache, nullptr, true);
+    bool completed = false;
+    auth.login_async("user@test.local", "old-password", [&](AuthOutcome r) { completed = true; assert(!r.ok && !r.server_error); });
+    assert(!completed && conn->has_pending_query());
+    conn->fire_query(user("1", bcrypt_hash("new-password")));
+    assert(completed);
+    completed = false;
+    auth.login_async("user@test.local", "old-password", [&](AuthOutcome r) { completed = true; assert(!r.ok && r.server_error); });
+    conn->fire_query(nullptr);
+    assert(completed);
+
+    // A password reset winning the legacy rehash CAS cannot mint a session for the old password.
+    completed = false;
+    auth.login_async("user@test.local", "legacy-password", [&](AuthOutcome r) { completed = true; assert(!r.ok); });
+    conn->fire_query(user("1", "legacy-password"));
+    assert(conn->has_pending_execute());
+    conn->fire_execute(true); // CAS success shape also includes zero affected rows.
+    assert(conn->has_pending_query());
+    conn->fire_query(user("1", bcrypt_hash("replacement-password")));
+    assert(completed && !conn->has_pending_execute()); // failed revalidation does not update last_login
+
+    // Protected HTTP endpoints distinguish unavailable DB (503) from unknown tokens (401).
+    MailService mail(router);
+    ApiRouter api(auth, sessions, mail);
+    conn->push_sync_result(nullptr);
+    Captured cap;
+    assert(api.handle(make_req("GET", "/api/me", {}, "wb_session=" + token), cap.complete()));
+    assert(cap.calls == 1 && cap.resp->status == 503);
+    SessionStore unavailable(nullptr, nullptr);
+    Captured logout_result;
+    api::logout(make_req("POST", "/api/logout", "{}", "wb_session=" + token), unavailable, logout_result.complete());
+    assert(logout_result.calls == 1 && logout_result.resp->status == 503);
+    bool issued = true;
+    unavailable.put_async(token, {42, "user@test.local", credential_stamp("stored"), 0}, nullptr,
+                          [&](bool ok) { issued = ok; });
+    assert(!issued);
+}
+
+void run_webmail_submission_tests();
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--auth-cache-regression") {
+        test_database_sessions_and_fresh_auth(); return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--auth-worker-regression") {
+        run_webmail_submission_tests(); return 0;
+    }
+    run_webmail_submission_tests();
+    test_database_sessions_and_fresh_auth();
     std::cout << "Running webmail tests..." << std::endl;
     test_session_store_basics();
     test_session_store_ttl_expiry();

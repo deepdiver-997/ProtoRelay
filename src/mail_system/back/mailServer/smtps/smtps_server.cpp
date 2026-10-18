@@ -1,3 +1,4 @@
+#include "mail_system/back/submission/outbound_config_factory.h"
 #include "mail_system/back/mailServer/smtps_server.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/connection/tcp_connection.h"
@@ -53,19 +54,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             // 全部通过这个 weak_ptr push，server 析构后自动失效。
             m_outboundServer->set_metrics(get_metrics());
             // 把 server_config 平铺字段组装成 OutboundConfig（含 static_routes）
-            outbound::OutboundConfig ob_cfg;
-            ob_cfg.helo_domain = cfg->outbound_helo_domain;
-            ob_cfg.mail_from_domain = cfg->outbound_mail_from_domain;
-            ob_cfg.rewrite_header_from = cfg->outbound_rewrite_header_from;
-            ob_cfg.dkim_enabled = cfg->outbound_dkim_enabled;
-            ob_cfg.dkim_selector = cfg->outbound_dkim_selector;
-            ob_cfg.dkim_domain = cfg->outbound_dkim_domain;
-            ob_cfg.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
-            ob_cfg.ports = cfg->outbound_ports;
-            ob_cfg.max_attempts = cfg->outbound_max_attempts;
-            ob_cfg.static_routes = std::move(cfg->outbound_static_routes);
-            ob_cfg.default_route = cfg->outbound_default_route;
-            m_outboundServer->set_config(std::move(ob_cfg));
+            m_outboundServer->set_config(submission::outbound_config(*cfg));
         }
         m_persistentQueue->set_outbound_server(m_outboundServer);
         LOG_SERVER_INFO("OutboundServer (new engine) wired into PersistentQueue");
