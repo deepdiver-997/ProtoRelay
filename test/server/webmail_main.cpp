@@ -91,7 +91,7 @@ int main(int argc, char* argv[]) {
         g_server = std::make_unique<webmail::WebmailServer>(
             config, doc_root, res.io_pool, res.worker_pool, res.shard_router,
             nullptr, nullptr, std::make_shared<webmail::LoopbackSmtpSubmitter>(
-                io_pool->get_io_context().get_executor(), submission_port));
+                [io_pool] { return io_pool->get_io_context().get_executor(); }, submission_port));
         g_server->start();
 
         LOG_SERVER_INFO("webmail API ready. try: curl http://localhost:{}/api/health", port);

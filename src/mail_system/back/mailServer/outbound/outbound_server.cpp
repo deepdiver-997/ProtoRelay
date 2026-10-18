@@ -9,7 +9,7 @@
 //   加重 include 链传播时间、且与同模块其它文件（outbound_smtp_session.h
 //   / outbound_smtp_fsm.h 模板类）混淆 .h/.cpp 范式
 // 拆后：.h 仅声明 + 成员，.cpp 实现 21 个函数
-// 模板类（OutboundSmtpSession / OutboundSmtpFsm）保持 .h 现状
+// SMTP 协议现由 smtp::ClientSession 共享内核实现；OutboundSmtpSession 是策略适配器。
 // ================================================================
 
 #include "mail_system/back/mailServer/outbound_server.h"
@@ -17,6 +17,8 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/router/i_shard_router.h"  // 解引用 m_shardRouter：server_base.h 已不再传递完整类型（泄漏清理）
 #include "mail_system/back/mailServer/outbound/dns_resolver.h"  // SyncDnsWrapper（MX 解析）
+#include <boost/asio/strand.hpp>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace mail_system {
@@ -26,73 +28,92 @@ namespace outbound {
 OutboundServer::OutboundServer(pr::ServerBase* server,
                                int max_per_mx,
                                int idle_timeout)
-    : server_(server)
+    : io_pool_(std::static_pointer_cast<pr::IOThreadPool>(server->m_ioThreadPool))
+    , worker_pool_(server->m_workerThreadPool)
+    , shard_router_(server->m_shardRouter)
+    , dns_resolver_(server->get_dns_resolver())
     , max_sessions_per_mx_(max_per_mx)
     , idle_timeout_sec_(idle_timeout)
     , worker_id_("ob-" + std::to_string(reinterpret_cast<uintptr_t>(this)))
-{}
+    , scheduler_executor_(boost::asio::make_strand(
+          io_pool_->get_io_context()))
+    , evict_timer_(std::make_shared<boost::asio::steady_timer>(scheduler_executor_))
+    , retry_timer_(std::make_shared<boost::asio::steady_timer>(scheduler_executor_))
+{
+    auto cfg = std::atomic_load(&server->m_config);
+    helo_domain_ = cfg && !cfg->outbound_helo_domain.empty() && cfg->outbound_helo_domain != "outbound.local"
+        ? cfg->outbound_helo_domain : server->m_domain;
+}
 
 OutboundServer::~OutboundServer() { stop(); }
 
 // ── 生命周期 ────────────────────────────────────────────────
 void OutboundServer::start() {
+    auto weak = weak_from_this();
+    if (weak.expired()) throw std::logic_error("OutboundServer::start requires shared ownership");
     if (running_.exchange(true)) return;
-
-    completion_cb_ = [this](uint64_t record_id, bool success) {
-        // DB 写入 post 到 worker 池，不阻塞 IO 线程
-        auto db = server_->m_shardRouter->get_db_pool(0);
-        if (db) {
-            server_->m_workerThreadPool->post([this, db, record_id, success]() {
-                auto conn = db->acquire_connection();
-                if (success)
-                    repo_.mark_sent(*db, record_id, "250 OK");
-                else
-                    repo_.mark_dead(*db, record_id, "500 permanent failure");
-            });
-        }
-
-        // 2026-08-27: 投递结果 metrics。domain label 在此 lambda 拿不到（task
-        // 已 reset），仅用 {} 标签。counts 数本身比按域分桶价值高（聚合告警阈值）。
-        if (auto m = m_metrics.lock()) {
-            m->inc_counter(success ? "protorelay_outbound_delivered_total"
-                                   : "protorelay_outbound_bounced_total",
-                           {}, 1);
-        }
-
-        // 计数递减和 try_pull 立即可执行（不依赖 DB 写入结果）
-        int64_t prev = pending_count_.fetch_sub(1) - 1;
-        if (prev < LOW_WATERMARK) try_pull();
+    completion_cb_ = [weak](uint64_t record_id, smtp::Result result) {
+        if (auto self = weak.lock(); self && self->running_.load())
+            self->on_delivery_complete(record_id, std::move(result));
     };
 
     // 初始拉取：post 到 worker 池，不占常驻线程
-    server_->m_workerThreadPool->post([this]() { try_pull(); });
+    worker_pool_->post([weak]() { if (auto self = weak.lock()) self->try_pull(); });
 
     // 空闲回收定时器
-    auto& io_ctx = static_cast<pr::IOThreadPool*>(
-        server_->m_ioThreadPool.get())->get_io_context();
-    evict_timer_ = std::make_unique<boost::asio::steady_timer>(io_ctx);
     schedule_evict();
 
     LOG_SMTP_INFO("OutboundServer started: worker={}", worker_id_);
+}
+
+void OutboundServer::on_delivery_complete(uint64_t record_id, smtp::Result result) {
+    const bool success = result.outcome == smtp::Outcome::Accepted;
+    const bool permanent = result.outcome == smtp::Outcome::Rejected || result.outcome == smtp::Outcome::AuthFailed;
+    const std::string response = std::to_string(result.code) + " " + result.stage + " " + result.error;
+    // DB 写入 post 到 worker 池，不阻塞 IO 线程
+    auto db = shard_router_->get_db_pool(0);
+    if (db) {
+        worker_pool_->post([db, record_id, success, permanent, response]() {
+            OutboxRepository repo;
+            const bool saved = success ? repo.mark_sent(*db, record_id, response) :
+                permanent ? repo.mark_dead(*db, record_id, response) : repo.mark_retry(*db, record_id, response, 30);
+            if (!saved) LOG_SMTP_ERROR("Outbound: result persistence failed record_id={} response={}", record_id, response);
+        });
+    } else LOG_SMTP_ERROR("Outbound: no database for completion record_id={}", record_id);
+
+    // 2026-08-27: 投递结果 metrics。domain label 在此 lambda 拿不到（task
+    // 已 reset），仅用 {} 标签。counts 数本身比按域分桶价值高（聚合告警阈值）。
+    if (auto m = m_metrics.lock()) {
+        m->inc_counter(success ? "protorelay_outbound_delivered_total"
+                               : permanent ? "protorelay_outbound_bounced_total"
+                                           : "protorelay_outbound_deferred_total",
+                       {}, 1);
+    }
+
+    // 计数递减和 try_pull 立即可执行（不依赖 DB 写入结果）
+    int64_t prev = pending_count_.fetch_sub(1) - 1;
+    if (prev < LOW_WATERMARK) try_pull();
 }
 
 void OutboundServer::stop() {
     if (!running_.exchange(false)) return;
 
     // 取消定时器
-    if (evict_timer_) evict_timer_->cancel();
-    if (retry_timer_) retry_timer_->cancel();
+    auto evict = evict_timer_;
+    auto retry = retry_timer_;
+    boost::asio::post(scheduler_executor_, [evict, retry] { evict->cancel(); retry->cancel(); });
 
     std::unique_lock<std::shared_mutex> lk(mutex_);
     for (auto& [mx, sessions] : mx_sessions_)
         for (auto& s : sessions)
-            if (s && s->is_connected()) s->close();
+            if (s) s->close();
     mx_sessions_.clear();
     LOG_SMTP_INFO("OutboundServer stopped");
 }
 
 // ── 投递入口 ────────────────────────────────────────────────
 void OutboundServer::submit(std::unique_ptr<MailDeliveryTask> task, int port) {
+    if (!running_.load()) { LOG_SMTP_WARN("Outbound: submit while stopped"); return; }
     std::string domain = extract_domain(task->recipient);
     if (domain.empty()) return;
 
@@ -124,6 +145,7 @@ void OutboundServer::submit(std::unique_ptr<MailDeliveryTask> task, int port) {
 
 // ── 拉取入口（水位检查 + CAS 抢占） ─────────────────────────
 void OutboundServer::try_pull() {
+    if (!running_.load()) return;
     // 快速路径：水位够高直接返回，无 CAS 开销
     if (pending_count_.load(std::memory_order_relaxed) >= LOW_WATERMARK)
         return;
@@ -147,7 +169,7 @@ void OutboundServer::evict_idle() {
         auto& sessions = it->second;
         sessions.erase(
             std::remove_if(sessions.begin(), sessions.end(),
-                [](const SessionPtr& s) { return !s || !s->is_connected(); }),
+                [](const SessionPtr& s) { return !s || (s->state() == SessionState::CLOSED && s->queue_size() == 0); }),
             sessions.end());
 
         bool all_idle = true;
@@ -167,7 +189,7 @@ void OutboundServer::evict_idle() {
             auto last = (li != last_active_.end()) ? li->second : now;
             if (now - last > std::chrono::seconds(idle_timeout_sec_)) {
                 for (auto& s : sessions) {
-                    if (s->is_connected()) s->close();
+                    s->close();
                 }
                 sessions.clear();
                 last_active_.erase(it->first);
@@ -190,7 +212,7 @@ void OutboundServer::evict_idle() {
             if (t < oldest_t) { oldest_t = t; oldest = mi; }
         }
         for (auto& s : oldest->second) {
-            if (s->is_connected()) s->close();
+            s->close();
         }
         last_active_.erase(oldest->first);
         mx_sessions_.erase(oldest);
@@ -236,7 +258,7 @@ std::string OutboundServer::resolve_target_host(const std::string& domain) const
 std::vector<std::string> OutboundServer::resolve_mx_pool(const std::string& domain) const {
     std::vector<std::string> out;
     if (domain.empty()) return out;
-    auto resolver = server_ ? server_->get_dns_resolver() : nullptr;
+    auto resolver = dns_resolver_;
     if (!resolver) return out;
     outbound::SyncDnsWrapper sync(*resolver);
     std::unordered_set<std::string> seen;
@@ -260,7 +282,7 @@ std::vector<std::string> OutboundServer::resolve_mx_pool(const std::string& doma
 
 // ── 私有：DB 拉取（发送到 worker 线程池） ────────────────────
 void OutboundServer::do_claim_batch() {
-    auto db = server_->m_shardRouter->get_db_pool(0);
+    auto db = shard_router_->get_db_pool(0);
     if (!db) {
         // DB 不可用，退还预占并放弃本次拉取周期
         pending_count_.fetch_sub(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
@@ -268,14 +290,18 @@ void OutboundServer::do_claim_batch() {
         return;
     }
 
-    server_->m_workerThreadPool->post([this, db]() {
-        auto records = repo_.claim_batch(*db, worker_id_, DEFAULT_BATCH_SIZE, 120);
-        on_claim_complete(std::move(records));
+    auto weak = weak_from_this();
+    worker_pool_->post([weak, db]() {
+        if (auto self = weak.lock(); self && self->running_.load()) {
+            auto records = self->repo_.claim_batch(*db, self->worker_id_, DEFAULT_BATCH_SIZE, 120);
+            self->on_claim_complete(std::move(records));
+        }
     });
 }
 
 // ── 私有：claim 回调 ────────────────────────────────────────
 void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
+    if (!running_.load()) return;
     int pulled = static_cast<int>(records.size());
     LOG_SMTP_INFO("Outbound: on_claim_complete pulled={}", pulled);
 
@@ -291,10 +317,12 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
     }
 
     // 有数据，重置退避延迟
-    retry_delay_sec_ = MIN_RETRY_DELAY_SEC;
+    boost::asio::post(scheduler_executor_, [weak = weak_from_this()] {
+        if (auto self = weak.lock()) self->retry_delay_sec_ = MIN_RETRY_DELAY_SEC;
+    });
 
     // 加载邮件并分发到 session
-    auto db = server_->m_shardRouter->get_db_pool(0);
+    auto db = shard_router_->get_db_pool(0);
     if (!db) {
         is_pulling_.store(false);
         return;
@@ -347,34 +375,40 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
 
 // ── 私有：退避重试（claim 返回空时） ─────────────────────────
 void OutboundServer::schedule_retry() {
-    retry_delay_sec_ = std::min(retry_delay_sec_ * 2, MAX_RETRY_DELAY_SEC);
-
-    auto& io_ctx = static_cast<pr::IOThreadPool*>(
-        server_->m_ioThreadPool.get())->get_io_context();
-    retry_timer_ = std::make_unique<boost::asio::steady_timer>(io_ctx);
-    retry_timer_->expires_after(std::chrono::seconds(retry_delay_sec_));
-    retry_timer_->async_wait([this](const boost::system::error_code& ec) {
-        if (ec || !running_.load(std::memory_order_relaxed)) return;
-        // is_pulling_ 仍为 true，直接重新预占并拉取
-        pending_count_.fetch_add(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
-        do_claim_batch();
+    auto weak = weak_from_this();
+    boost::asio::post(scheduler_executor_, [weak] {
+        auto self = weak.lock();
+        if (!self || !self->running_.load()) return;
+        self->retry_delay_sec_ = std::min(self->retry_delay_sec_ * 2, MAX_RETRY_DELAY_SEC);
+        self->retry_timer_->expires_after(std::chrono::seconds(self->retry_delay_sec_));
+        self->retry_timer_->async_wait([weak](const boost::system::error_code& ec) {
+            auto self = weak.lock();
+            if (ec || !self || !self->running_.load()) return;
+            self->pending_count_.fetch_add(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
+            self->do_claim_batch();
+        });
     });
 }
 
-// ── 私有：空闲回收定时器（30 秒周期） ───────────────────────
 void OutboundServer::schedule_evict() {
-    if (!running_.load(std::memory_order_relaxed)) return;
-    evict_timer_->expires_after(std::chrono::seconds(30));
-    evict_timer_->async_wait([this](const boost::system::error_code& ec) {
-        if (ec || !running_.load(std::memory_order_relaxed)) return;
-        evict_idle();
-        schedule_evict();  // 重新武装
+    auto weak = weak_from_this();
+    boost::asio::post(scheduler_executor_, [weak] {
+        auto self = weak.lock();
+        if (!self || !self->running_.load()) return;
+        self->evict_timer_->expires_after(std::chrono::seconds(30));
+        self->evict_timer_->async_wait([weak](const boost::system::error_code& ec) {
+            auto self = weak.lock();
+            if (ec || !self || !self->running_.load()) return;
+            self->evict_idle();
+            self->schedule_evict();
+        });
     });
 }
 
 // ── 私有：session 池管理 ────────────────────────────────────
 OutboundServer::SessionPtr OutboundServer::acquire_session(const std::string& mx, int port) {
     std::unique_lock<std::shared_mutex> lk(mutex_);
+    if (!running_.load()) return {};
     last_active_[mx] = std::chrono::steady_clock::now();
 
     auto it = mx_sessions_.find(mx);
@@ -382,7 +416,7 @@ OutboundServer::SessionPtr OutboundServer::acquire_session(const std::string& mx
         auto& sessions = it->second;
         sessions.erase(
             std::remove_if(sessions.begin(), sessions.end(),
-                [](const SessionPtr& s) { return !s || !s->is_connected(); }),
+                [](const SessionPtr& s) { return !s || (s->state() == SessionState::CLOSED && s->queue_size() == 0); }),
             sessions.end());
 
         SessionPtr best;
@@ -407,7 +441,11 @@ OutboundServer::SessionPtr OutboundServer::acquire_session(const std::string& mx
 }
 
 OutboundServer::SessionPtr OutboundServer::create_session(const std::string& mx, int port) {
-    auto s = std::make_shared<OutboundSmtpSession<pr::TcpConnection>>(server_, mx, port);
+    auto pool = io_pool_;
+    auto worker = worker_pool_;
+    auto s = std::make_shared<OutboundSmtpSession>(
+        [pool] { return pool->get_io_context().get_executor(); },
+        [worker](std::function<void()> job) { worker->post(std::move(job)); }, mx, port, helo_domain_, m_metrics);
     s->set_outbound_config(config_);
     if (completion_cb_) s->set_completion_cb(completion_cb_);
     return s;

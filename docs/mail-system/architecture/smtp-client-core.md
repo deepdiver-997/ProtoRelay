@@ -57,3 +57,44 @@ RCPT 放行中继，不能维持 AUTH 路径上的配额、发件人绑定、外
 先提取公共客户端，迁移 Submitter/Outbound 并接上 executor provider；保留既有
 Outbound 池与 MX/outbox 编排。通用连接池、Submitter 自动重试、共享提交服务、
 配额幂等与自定义 TLS 协议后续分步落地。本轮不更改公开 25/587 的受信策略。
+## 第一阶段实现（2026-10-18）
+
+- `smtp_client/client_session.{h,cpp}`：可复用的单连接异步客户端，支持明文、
+  implicit TLS、强制 STARTTLS（TLS 至少 1.2，验证 CA/主机名，升级后重新 EHLO），
+  可选 AUTH PLAIN、多 RCPT、DATA、QUIT、有界分片响应解析和每操作 deadline。
+  新连接由调用方提供 executor，内核建立固定 strand。取消操作持活旧连接及其
+  缓冲，直到挂起的 I/O 回调退出，允许安全重连；同连接同时发起第二个操作会返回 busy。
+- `smtp_client/secret.h`：进程内共享凭据及销毁擦除；Webmail 的 SessionPassword
+  保留原名称作为别名，内核不依赖 Webmail。
+- `LoopbackSmtpSubmitter` 已成为薄适配器：固定 loopback/AUTH、每次提交从
+  ExecutorProvider 取一次 executor，连接和事务共用原来的总时间预算；最终 250
+  后立即完成 HTTP 所需回调，QUIT 异步收尾不影响结果。仍然每请求独立连接。
+- `OutboundSmtpSession` 已成为出站策略适配器：保留 MX 候选、三轮连接重试、
+  最多 100 封后换连接、空闲 30 秒退出。加载/签名在 worker，队列和定时器在
+  控制 strand；每个新连接单独选 executor，连接完成后再回控制 strand 推进队列。
+  删除 `OutboundSmtpFsm` 及其事件/状态 enum，不保留第二套协议实现。
+- Outbound 完成结果改为结构化结果：Accepted→sent，5xx→dead，其余暂缓结果
+  （含 Unknown）→retry，延迟 30 秒并遵守现有 max_attempts。详见
+  [专项回归](../../bugfixes/2026-10-18-outbound-result-completion.md)。连接耗时指标
+  现在计量 resolve/连接/SMTP 就绪的完整尝试，不能直接与旧版仅 TCP 阶段数值比较。
+
+本阶段只实现全有或全无 RCPT 策略，失败即关闭；未提供部分投递和 RSET 复位 API。
+当前两个适配器仍使用既有明文 SMTP 端点（Webmail 仅 loopback），TLS 能力经公共
+内核 API 提供，未新增部署配置或自动更改现有端点。报文仍整体缓存在内存中；
+通用连接池、流式正文、自定义可信协议及共享提交服务留待后续。
+
+## 本轮验证
+
+```sh
+cmake --build build-release -j 8
+ctest --test-dir build-release -j 4 --output-on-failure
+.venv/bin/python test/scripts/webmail_send_smoke.py --db-config config/db_config.json
+cmake --build build-asan --target smtp_client_test smtp_submitter_test outbound_smoke -j 6
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan -R 'smtp_client_test|smtp_submitter_test|outbound_smoke' --output-on-failure
+```
+
+结果：Release 全构建通过，32/32 CTest 通过；三个专项在 ASan/UBSan 下通过
+（macOS 不支持该 leak detector，禁用 detect_leaks）。Outbound 复用/failover
+另以控制队列和连接分属不同 IO context/线程运行并通过 ASan/UBSan。Python
+独立 MIME 消费者及真实 HTTP 登录→SMTP AUTH→持久化→To/Cc 收件箱/正文读取、
+配额与注销检查均通过。测试只向本机投递，未作外部账号收信验收。

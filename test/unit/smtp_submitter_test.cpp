@@ -89,7 +89,7 @@ std::vector<Step> success_script() {
         {"RCPT TO:<hidden@test.local>\r\n", "251 Forwarded\r\n"},
         {"DATA\r\n", "354 Start mail\r\n"},
         {"..first\r\n..\r\nlast\r\n.\r\n", "250 Persisted\r\n", true},
-        {"QUIT\r\n", ""},
+        {"QUIT\r\n", "221 Bye\r\n"},
     };
 }
 
@@ -110,6 +110,36 @@ SubmitResult run(std::vector<Step> steps, std::string greeting = "220 test.local
     other.join();
     assert(calls == 1);
     return result;
+}
+
+void test_executor_provider() {
+    boost::asio::io_context peers_io, first_io, second_io;
+    auto first_guard = boost::asio::make_work_guard(first_io);
+    auto second_guard = boost::asio::make_work_guard(second_io);
+    std::atomic<int> selections{0}, calls{0}, thread_mask{0};
+    std::vector<std::shared_ptr<ScriptServer>> peers;
+    for (int i = 0; i < 4; ++i) {
+        peers.push_back(std::make_shared<ScriptServer>(peers_io, success_script(), "220 test.local\r\n"));
+        peers.back()->start();
+        auto submitter = std::make_shared<LoopbackSmtpSubmitter>([&]() -> boost::asio::any_io_executor {
+            return selections.fetch_add(1) % 2 ? second_io.get_executor() : first_io.get_executor();
+        }, peers.back()->port());
+        submitter->submit_async({"sender@test.local", std::make_shared<SessionPassword>("secret"),
+                                {"a@test.local", "hidden@test.local"}, ".first\r\n.\r\nlast\r\n"},
+            [&](SubmitResult result) {
+                assert(result.status == SubmitStatus::Accepted);
+                const int bit = first_io.get_executor().running_in_this_thread() ? 1 :
+                                second_io.get_executor().running_in_this_thread() ? 2 : 0;
+                thread_mask.fetch_or(bit);
+                if (calls.fetch_add(1) == 3) { first_guard.reset(); second_guard.reset(); }
+            });
+    }
+    std::thread first([&] { first_io.run(); });
+    std::thread second([&] { second_io.run(); });
+    peers_io.run(); first.join(); second.join();
+    assert(selections == 4 && calls == 4 && thread_mask == 3);
+    for (const auto& peer : peers) assert(peer->completed_steps == success_script().size());
+    std::cout << "  [PASS] executor provider: concurrent submissions distributed across two I/O contexts\n";
 }
 
 void test_protocol() {
@@ -218,5 +248,6 @@ int main(int argc, char** argv) {
     }
     test_composer();
     test_protocol();
+    test_executor_provider();
     std::cout << "All SMTP submission tests passed!\n";
 }

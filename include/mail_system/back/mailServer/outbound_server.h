@@ -16,6 +16,8 @@
 #include <chrono>
 #include <atomic>
 
+namespace pr { class IOThreadPool; }
+
 namespace mail_system {
 namespace outbound {
 
@@ -33,7 +35,7 @@ namespace outbound {
 //   实现：见 src/mail_system/back/mailServer/outbound/outbound_server.cpp
 //   (non-template 类，仅声明保留在头文件)
 // ================================================================
-class OutboundServer {
+class OutboundServer : public std::enable_shared_from_this<OutboundServer> {
 public:
     static constexpr int DEFAULT_MAX_SESSIONS_PER_MX = 4;
     static constexpr int DEFAULT_IDLE_TIMEOUT_SEC = 120;
@@ -88,12 +90,13 @@ private:
     // 存到会话的 MX failover 池，connect 逐个尝试。静态/默认路由命中时返回空（不走 MX）。
     std::vector<std::string> resolve_mx_pool(const std::string& domain) const;
 
-    using SessionPtr = std::shared_ptr<OutboundSmtpSession<pr::TcpConnection>>;
+    using SessionPtr = std::shared_ptr<OutboundSmtpSession>;
     using SessionList = std::vector<SessionPtr>;
-    using CompletionCb = OutboundSmtpSession<pr::TcpConnection>::CompletionCb;
+    using CompletionCb = OutboundSmtpSession::CompletionCb;
 
     // ── DB 拉取（发送到 worker 线程池） ───────────────────────
     void do_claim_batch();
+    void on_delivery_complete(uint64_t record_id, smtp::Result result);
 
     // ── claim 回调：修正水位 + 分发 + 续拉 / 退避重试 ────────
     void on_claim_complete(std::vector<OutboxRecord> records);
@@ -110,7 +113,11 @@ private:
     static std::string extract_domain(const std::string& addr);
 
     // ── 成员 ──────────────────────────────────────────────────
-    pr::ServerBase* server_;
+    std::shared_ptr<pr::IOThreadPool> io_pool_;
+    std::shared_ptr<pr::ThreadPoolBase> worker_pool_;
+    std::shared_ptr<router::IShardRouter> shard_router_;
+    std::shared_ptr<pr::IDnsResolver> dns_resolver_;
+    std::string helo_domain_;
     int max_sessions_per_mx_;
     int idle_timeout_sec_;
     std::string worker_id_;
@@ -127,8 +134,9 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> last_active_;
 
     std::atomic<bool> running_{false};
-    std::unique_ptr<boost::asio::steady_timer> evict_timer_;
-    std::unique_ptr<boost::asio::steady_timer> retry_timer_;
+    boost::asio::any_io_executor scheduler_executor_;
+    std::shared_ptr<boost::asio::steady_timer> evict_timer_;
+    std::shared_ptr<boost::asio::steady_timer> retry_timer_;
 
     // 2026-08-27: weak_ptr 持 metrics，outbound_server 析构后自动失效。
     std::weak_ptr<pr::MetricsServer> m_metrics;

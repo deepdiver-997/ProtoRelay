@@ -1,104 +1,109 @@
-// outbound_smoke — 出站 SMTP FSM/Session/Types 功能完整性验证
-#include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
-#include "mail_system/back/mailServer/session/outbound_smtp_session.h"
-#include "mail_system/back/mailServer/outbound/outbound_types.hpp"
-#include "mail_system/back/mailServer/outbound_server.h"
-
+// 2026-10-18：旧 outbound 在 MAIL/RCPT/DATA 的拒绝和连接重试耗尽时不完成任务，
+// 只靠租约超时恢复；此次迁移必须逐任务回调。回归与负验证见
+// docs/bugfixes/2026-10-18-outbound-result-completion.md。
+#undef NDEBUG
 #include <cassert>
 #include <iostream>
-#include <memory>
-#include <string>
-
+#include "smtp_test_peer.h"
+#include "mail_system/back/mailServer/session/outbound_smtp_session.h"
+#include <boost/asio/thread_pool.hpp>
 using namespace mail_system;
 using namespace mail_system::outbound;
+using namespace smtp_test;
 
-static int g_fail = 0;
-
-static void check(const char* name, bool cond) {
-    if (!cond) { std::cerr << "  FAIL: " << name << std::endl; ++g_fail; }
+std::vector<Step> tx(std::string result = "250 Stored\r\n") {
+    return {{"MAIL FROM:<sender@test.local>\r\n", "250 Sender\r\n"},
+            {"RCPT TO:<a@test.local>\r\n", "250 Recipient\r\n"},
+            {"DATA\r\n", "354 Send\r\n"},
+            {"Subject: outbound\r\n\r\n..payload\r\n.\r\n", std::move(result), true}};
 }
-
-#define SECTION(name) std::cout << "  " << name << " ..." << std::endl
-
-// ========== FSM 构造测试 ==========
-
-static void test_fsm_construction() {
-    SECTION("FSM construction and types");
-
-    auto fsm = std::make_shared<OutboundSmtpFsm<pr::TcpConnection>>();
-    check("fsm created", fsm != nullptr);
-}
-
-// ========== MailDeliveryTask 类型验证 ==========
-
-static void test_delivery_task_types() {
-    SECTION("MailDeliveryTask types");
-
+std::unique_ptr<MailDeliveryTask> task(uint64_t id) {
     auto task = std::make_unique<MailDeliveryTask>();
-    task->mail_id = 1;
-    task->record_id = 100;
-    task->sender = "alice@example.com";
-    task->recipient = "bob@example.com";
-    task->attempt_count = 0;
-    task->max_attempts = 8;
-
-    check("mail_id", task->mail_id == 1);
-    check("record_id", task->record_id == 100);
-    check("sender", task->sender == "alice@example.com");
-    check("recipient", task->recipient == "bob@example.com");
-    check("attempt_count", task->attempt_count == 0);
-    check("max_attempts", task->max_attempts == 8);
-    check("mail_ptr null initially", task->mail_ptr == nullptr);
+    task->mail_id = id; task->record_id = id;
+    task->sender = "sender@test.local"; task->recipient = "a@test.local";
+    task->mail_ptr = std::make_shared<::mail>();
+    task->mail_ptr->body = "Subject: outbound\r\n\r\n.payload\r\n";
+    return task;
 }
-
-// ========== OutboundSmtpEvent enum 完整性 ==========
-
-static void test_event_enum_values() {
-    SECTION("Event enum values");
-
-    check("CONNECT", static_cast<int>(OutboundSmtpEvent::CONNECT) >= 0);
-    check("CONNECTED", static_cast<int>(OutboundSmtpEvent::CONNECTED) >= 0);
-    check("GREETING_220", static_cast<int>(OutboundSmtpEvent::GREETING_220) >= 0);
-    check("EHLO_250", static_cast<int>(OutboundSmtpEvent::EHLO_250) >= 0);
-    check("MAIL_250", static_cast<int>(OutboundSmtpEvent::MAIL_250) >= 0);
-    check("RCPT_250", static_cast<int>(OutboundSmtpEvent::RCPT_250) >= 0);
-    check("DATA_354", static_cast<int>(OutboundSmtpEvent::DATA_354) >= 0);
-    check("ACCEPT_250", static_cast<int>(OutboundSmtpEvent::ACCEPT_250) >= 0);
-    check("QUIT_221", static_cast<int>(OutboundSmtpEvent::QUIT_221) >= 0);
-    check("ERROR_4XX", static_cast<int>(OutboundSmtpEvent::ERROR_4XX) >= 0);
-    check("ERROR_5XX", static_cast<int>(OutboundSmtpEvent::ERROR_5XX) >= 0);
-    check("CONNECTION_LOST", static_cast<int>(OutboundSmtpEvent::CONNECTION_LOST) >= 0);
+std::shared_ptr<OutboundSmtpSession> session(asio::io_context& io, asio::thread_pool& worker, uint16_t port,
+                                              asio::io_context* connection_io = nullptr) {
+    auto selections = std::make_shared<std::atomic<int>>(0);
+    return std::make_shared<OutboundSmtpSession>(
+        [&io, connection_io, selections]() -> asio::any_io_executor {
+            return connection_io && selections->fetch_add(1) > 0 ? connection_io->get_executor() : io.get_executor();
+        },
+        [&worker](std::function<void()> job) { asio::post(worker, std::move(job)); },
+        "127.0.0.1", port, "outbound.test");
 }
-
-// ========== OutboundSmtpState enum 完整性 ==========
-
-static void test_state_enum_values() {
-    SECTION("State enum values");
-
-    check("INIT", static_cast<int>(OutboundSmtpState::INIT) >= 0);
-    check("CONNECTING", static_cast<int>(OutboundSmtpState::CONNECTING) >= 0);
-    check("CONNECTED", static_cast<int>(OutboundSmtpState::CONNECTED) >= 0);
-    check("EHLO", static_cast<int>(OutboundSmtpState::EHLO) >= 0);
-    check("MAIL_FROM", static_cast<int>(OutboundSmtpState::MAIL_FROM) >= 0);
-    check("RCPT_TO", static_cast<int>(OutboundSmtpState::RCPT_TO) >= 0);
-    check("DATA", static_cast<int>(OutboundSmtpState::DATA) >= 0);
-    check("DATA_BODY", static_cast<int>(OutboundSmtpState::DATA_BODY) >= 0);
-    check("WAIT_ACCEPT", static_cast<int>(OutboundSmtpState::WAIT_ACCEPT) >= 0);
-    check("CLOSED", static_cast<int>(OutboundSmtpState::CLOSED) >= 0);
+void reuse() {
+    asio::io_context io, connection_io; asio::thread_pool worker(2);
+    auto connection_guard = asio::make_work_guard(connection_io);
+    std::thread connection_thread([&] { connection_io.run(); });
+    auto guard = asio::make_work_guard(io);
+    std::vector<Step> steps{{"EHLO outbound.test\r\n", "250-test\r\n250 SIZE 10000\r\n"}};
+    for (int i = 0; i < 2; ++i) { auto one = tx(); steps.insert(steps.end(), one.begin(), one.end()); }
+    auto peer = std::make_shared<Peer>(io, steps); peer->start();
+    auto client = session(io, worker, peer->port(), &connection_io);
+    client->set_mx_pool({"::1", "127.0.0.1"}); // 首候选拒连，第二候选成功
+    int calls = 0;
+    client->set_completion_cb([&](uint64_t id, smtp::Result result) {
+        assert(id == static_cast<uint64_t>(++calls));
+        assert(result.outcome == smtp::Outcome::Accepted && result.code == 250);
+        if (calls == 2) { client->close(); peer->stop(); guard.reset(); }
+    });
+    client->submit(task(1)); client->submit(task(2));
+    io.run(); connection_guard.reset(); connection_thread.join(); worker.join();
+    assert(calls == 2 && peer->completed == steps.size());
 }
-
+void failure(std::vector<Step> commands, smtp::Outcome outcome, int code, std::string stage) {
+    asio::io_context io; asio::thread_pool worker(1); auto guard = asio::make_work_guard(io);
+    commands.insert(commands.begin(), {"EHLO outbound.test\r\n", "250 Ready\r\n"});
+    auto peer = std::make_shared<Peer>(io, commands); peer->start();
+    auto client = session(io, worker, peer->port());
+    int calls = 0;
+    asio::steady_timer watchdog(io, std::chrono::seconds(3));
+    watchdog.async_wait([&](auto ec) { if (!ec) { std::cerr << "outbound completion lost\n"; std::abort(); } });
+    client->set_completion_cb([&](uint64_t id, smtp::Result r) {
+        assert(id == 17); ++calls;
+        assert(r.outcome == outcome && r.code == code && r.stage == stage);
+        watchdog.cancel(); client->close(); peer->stop(); guard.reset();
+    });
+    client->submit(task(17)); io.run(); worker.join();
+    assert(calls == 1 && peer->completed == commands.size());
+}
+void connect_exhausted() {
+    asio::io_context io; asio::thread_pool worker(1); auto guard = asio::make_work_guard(io);
+    // 释放一个本机端口，使三轮 connect 都得到 ECONNREFUSED。
+    tcp::acceptor reserved(io); reserved.open(tcp::v4()); reserved.bind({asio::ip::address_v4::loopback(), 0});
+    const auto port = reserved.local_endpoint().port(); reserved.close();
+    auto client = session(io, worker, port);
+    int calls = 0;
+    asio::steady_timer watchdog(io, std::chrono::seconds(5));
+    watchdog.async_wait([&](auto ec) { if (!ec) { std::cerr << "queued submit cancelled connection retry\n"; std::abort(); } });
+    client->set_completion_cb([&](uint64_t id, smtp::Result r) {
+        assert(id == static_cast<uint64_t>(++calls) && r.outcome == smtp::Outcome::TemporaryFailure && r.stage == "connect");
+        if (calls == 2) { watchdog.cancel(); client->close(); guard.reset(); }
+    });
+    client->submit(task(1));
+    // 重试退避中到达新任务，不能取消当前任务的 retry timer。
+    asio::steady_timer enqueue(io, std::chrono::milliseconds(100));
+    enqueue.async_wait([&](auto ec) { assert(!ec); client->submit(task(2)); });
+    io.run(); worker.join(); assert(calls == 2);
+}
 int main() {
-    std::cout << "Outbound Smoke Test Suite\n========================\n";
-
-    test_fsm_construction();
-    test_delivery_task_types();
-    test_event_enum_values();
-    test_state_enum_values();
-
-    if (g_fail == 0) {
-        std::cout << "\nAll outbound smoke tests passed.\n";
-        return 0;
-    }
-    std::cerr << '\n' << g_fail << " test(s) FAILED.\n";
-    return 1;
+    reuse();
+    auto commands = tx(); commands[1].reply = "550 Missing recipient\r\n"; commands.resize(2);
+    failure(commands, smtp::Outcome::Rejected, 550, "recipient");
+    commands[1].reply = "450 Later\r\n";
+    failure(commands, smtp::Outcome::TemporaryFailure, 450, "recipient");
+    commands = tx(); commands[0].reply = "550 Sender denied\r\n"; commands.resize(1);
+    failure(commands, smtp::Outcome::Rejected, 550, "mail");
+    commands = tx(); commands[2].reply = "451 Queue unavailable\r\n"; commands.resize(3);
+    failure(commands, smtp::Outcome::TemporaryFailure, 451, "data");
+    commands = tx("552 Too big\r\n");
+    failure(commands, smtp::Outcome::Rejected, 552, "body");
+    commands.back().disconnect = true;
+    failure(commands, smtp::Outcome::OutcomeUnknown, 0, "body");
+    connect_exhausted();
+    std::cout << "Outbound: MX failover, reuse, envelope/DATA failure completion, unknown outcome, retries passed\n";
 }

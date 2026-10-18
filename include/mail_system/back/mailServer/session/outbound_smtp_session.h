@@ -1,503 +1,61 @@
-#ifndef OUTBOUND_SMTP_SESSION_H
-#define OUTBOUND_SMTP_SESSION_H
+#pragma once
 
-#include "framework/session_base.h"
-#include "framework/connection/tcp_connection.h"
-#include "framework/metrics_server.h"
-#include "framework/thread_pool/io_thread_pool.h"
-#include "mail_system/back/mailServer/outbound/dns_resolver.h"
 #include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
-#include "mail_system/back/mailServer/outbound/outbound_utils.h"
-#include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
-#include "mail_system/back/common/logger.h"
-#include "mail_system/back/common/smtp_wire.h"
-#include <queue>
-#include <mutex>
-#include <memory>
-#include <string>
-#include <fstream>
-#include <sstream>
+#include "mail_system/back/smtp_client/client_session.h"
+#include <boost/asio/steady_timer.hpp>
 #include <atomic>
-#include <chrono>
+#include <queue>
 
-namespace mail_system {
-namespace outbound {
+namespace pr { class MetricsServer; }
 
-// ================================================================
-// OutboundSmtpSession — 出站 SMTP 会话
-//
-// 回调驱动的投递链: handle_accept_250 → deliver_next → ... → handle_accept_250
-// 队列空时保持连接空闲，新任务到达时自动重启投递链。
-// ================================================================
-template <typename ConnectionType = pr::TcpConnection>
-class OutboundSmtpSession : public pr::SessionBase<ConnectionType> {
+namespace mail_system::outbound {
+
+// 出站策略适配器：排队、MX failover、有限连接重试、worker 上加载/签名。
+// SMTP 协议和连接状态由 ClientSession 唯一实现，不再继承服务端 SessionBase。
+class OutboundSmtpSession : public std::enable_shared_from_this<OutboundSmtpSession> {
 public:
-    static constexpr int MAX_MAILS_PER_CONNECTION = 100;
-    static constexpr int MAX_CONNECT_RETRIES = 3;
-    static constexpr int CONNECT_BACKOFF_BASE_MS = 500;
-    static constexpr int IDLE_TIMEOUT_SEC = 30;
-    // 出站 TCP 连接超时：黑洞/丢包 MX 端点 SYN 长期无应答，无超时则 async_connect
-    // 卡在 OS 连接等待(~130s)才失败 → 单跳投递拉长到数分钟（QQ MX 实测）。
-    // 定时器到期 cancel socket → async_connect 以 operation_aborted 完成 → 快速 failover
-    // 到下一 MX / 触发重试退避。15s 对正常连接绰绰有余，对黑洞端点显著提速跳转。
-    static constexpr int CONNECT_TIMEOUT_SEC = 15;
-
-    OutboundSmtpSession(pr::ServerBase* server, const std::string& mx_host, int mx_port = 25)
-        : pr::SessionBase<ConnectionType>(nullptr, server)
-        , mx_host_(mx_host), mx_port_(mx_port)
-        , helo_domain_(resolve_helo(server))
-        , fsm_(std::make_shared<OutboundSmtpFsm<ConnectionType>>())
-    {
-        register_handlers();
-    }
-
-    static std::string resolve_helo(pr::ServerBase* server) {
-        // EHLO 名必须与出站 PTR/EHLO 三元组一致：优先 outbound.helo_domain（如 mx2.scut.email），
-        // 未配置则回落 system_domain
-        if (auto cfg = std::atomic_load(&server->m_config);
-            cfg && !cfg->outbound_helo_domain.empty() &&
-            cfg->outbound_helo_domain != "outbound.local")
-            return cfg->outbound_helo_domain;
-        return server->m_domain;
-    }
-
-    // 注入出站配置（DKIM 签名等）；由 OutboundServer 创建会话时调用
-    void set_outbound_config(const OutboundConfig& cfg) { ob_cfg_ = cfg; }
-
-    // 注入 MX failover 池（dispatch 对 DNS 直投目标同步解析 MX 得到的邮件服务器 IP 列表）。
-    // connect_to_mx 逐个尝试；空池 = 走静态/默认路由给出的具体 host（直接连 mx_host_）。
-    void set_mx_pool(std::vector<std::string> pool) {
-        mx_pool_ = std::move(pool);
-        mx_pool_idx_ = 0;
-    }
-
-    SessionState state() const { return state_; }
-
-    // ── 公开接口 ──────────────────────────────────────────────
-    void submit(std::unique_ptr<MailDeliveryTask> task) {
-        if (task->expired()) {
-            LOG_SMTP_WARN("Outbound: dropping expired task mail_id={}", task->mail_id);
-            if (completion_cb_) completion_cb_(task->record_id, false);
-            return;
-        }
-        bool need_start = false;
-        {
-            std::lock_guard<std::mutex> lk(queue_mu_);
-            queue_.push(std::move(task));
-            idle_timer_.reset();
-            if (state_ == SessionState::CONNECTED) {
-                state_ = SessionState::DELIVERING;
-                need_start = true;
-            } else if (state_ == SessionState::INIT || state_ == SessionState::CLOSED) {
-                state_ = SessionState::CONNECTING;
-                connect_retries_ = 0;
-                need_start = true;
-            }
-        }
-        // 放锁后启动——deliver_next/connect_to_mx 自己持锁
-        if (need_start) {
-            if (is_connected()) deliver_next();
-            else connect_to_mx();
-        }
-    }
-
-    size_t queue_size() const {
-        std::lock_guard<std::mutex> lk(queue_mu_);
-        return queue_.size();
-    }
-
-    using CompletionCb = std::function<void(uint64_t, bool)>;
-    void set_completion_cb(CompletionCb cb) { completion_cb_ = std::move(cb); }
-
-    const std::string& mx_host() const { return mx_host_; }
-    bool is_connected() const { return this->connection_ && this->connection_->is_open(); }
-    bool has_active_task() const { return current_task_ != nullptr; }
-
-    // ── pr::SessionBase 接口 ──────────────────────────────────────
-    void handle_read(const std::string& data) override {
-        response_buf_ += data;
-        if (is_response_complete(response_buf_)) {
-            OutboundSmtpEvent event = parse_response(response_buf_);
-            response_buf_.clear();
-            fsm_->process_event(this->shared_from_this(), event);
-        } else {
-            this->do_async_read();
-        }
-    }
-
-    void process_read() override {}
-    void* get_fsm() const override { return fsm_.get(); }
-    void* get_context() override { return nullptr; }
-    // 2026-08-26 fix: 之前全是 no-op，导致 OutboundSmtpFsm 读 session state 永远是 0 (INIT)。
-    // 现在用 atomic 真存（参考 smtps_session.tpp:108-110 + smtps_session.h:109）。
-    void set_current_state(int s) override {
-        fsm_state_.store(s, std::memory_order_release);
-    }
-    void set_next_event(int) override { /* outbound 是 client push，不缓存 next_event */ }
-    int  get_current_state() const override {
-        return fsm_state_.load(std::memory_order_acquire);
-    }
-    int  get_next_event() const override { return 0; }
-    std::string get_last_command_args() const override { return ""; }
-    std::chrono::milliseconds compute_reply_delay() const override { return std::chrono::milliseconds(0); }
-
-    bool has_buffered_input() const override {
-        return this->command_read_buffer_.find('\n') != std::string::npos;
-    }
-    std::string extract_one_line() override {
-        auto pos = this->command_read_buffer_.find('\n');
-        if (pos == std::string::npos) return {};
-        std::string line = this->command_read_buffer_.substr(0, pos + 1);
-        this->command_read_buffer_.erase(0, pos + 1);
-        return line;
-    }
-
+    using CompletionCb = std::function<void(uint64_t, smtp::Result)>;
+    using WorkerPost = std::function<void(std::function<void()>)>;
+    OutboundSmtpSession(smtp::ExecutorProvider executors, WorkerPost worker_post,
+                        std::string host, int port, std::string helo,
+                        std::weak_ptr<pr::MetricsServer> metrics = {});
+    void set_outbound_config(OutboundConfig config);
+    void set_mx_pool(std::vector<std::string> pool);
+    void set_completion_cb(CompletionCb complete);
+    void submit(std::unique_ptr<MailDeliveryTask> task);
+    void close(); // shutdown 不回写未完成租约，由 outbox lease 恢复
+    size_t queue_size() const { return pending_.load(); }
+    bool has_active_task() const { return active_.load(); }
+    bool is_connected() const { return state() == SessionState::CONNECTED || state() == SessionState::DELIVERING; }
+    SessionState state() const { return state_.load(); }
 private:
-    static bool is_response_complete(const std::string& buf) {
-        if (buf.size() < 5) return false;
-        auto last_nl = buf.rfind("\r\n");
-        if (last_nl == std::string::npos || last_nl < 4) return false;
-        auto line_start = buf.rfind("\r\n", last_nl - 1);
-        size_t start = (line_start == std::string::npos) ? 0 : line_start + 2;
-        return (start + 3 < buf.size()) && buf[start + 3] == ' ';
-    }
-
-    OutboundSmtpEvent parse_response(const std::string& buf) {
-        if (buf.size() < 3) return OutboundSmtpEvent::CONNECTION_LOST;
-        char c = buf[0];
-        if (c == '2') {
-            if (strncmp(buf.c_str(), "220", 3) == 0) return OutboundSmtpEvent::GREETING_220;
-            if (strncmp(buf.c_str(), "221", 3) == 0) return OutboundSmtpEvent::QUIT_221;
-            if (strncmp(buf.c_str(), "250", 3) == 0) {
-                // 2026-08-26 fix: 之前所有 250 一律映射 EHLO_250，导致 handler 表里
-                // (MAIL_FROM, MAIL_250) / (RCPT_TO, RCPT_250) / (WAIT_ACCEPT, ACCEPT_250)
-                // 全部死代码。现在按当前 FSM 状态区分：同样的 250 码在不同状态对应不同事件。
-                auto st = static_cast<OutboundSmtpState>(fsm_state_.load(std::memory_order_acquire));
-                switch (st) {
-                    case OutboundSmtpState::EHLO:        return OutboundSmtpEvent::EHLO_250;
-                    case OutboundSmtpState::MAIL_FROM:   return OutboundSmtpEvent::MAIL_250;
-                    case OutboundSmtpState::RCPT_TO:     return OutboundSmtpEvent::RCPT_250;
-                    case OutboundSmtpState::DATA_BODY:   return OutboundSmtpEvent::ACCEPT_250;  // body 末 250
-                    case OutboundSmtpState::WAIT_ACCEPT: return OutboundSmtpEvent::ACCEPT_250;  // 链式第二封+
-                    default:                            return OutboundSmtpEvent::ACCEPT_250;
-                }
-            }
-            return OutboundSmtpEvent::ACCEPT_250;
-        }
-        if (c == '3') return OutboundSmtpEvent::DATA_354;
-        if (c == '4') return OutboundSmtpEvent::ERROR_4XX;
-        if (c == '5') return OutboundSmtpEvent::ERROR_5XX;
-        return OutboundSmtpEvent::CONNECTION_LOST;
-    }
-
-    void register_handlers() {
-        using S = OutboundSmtpState;
-        using E = OutboundSmtpEvent;
-        auto h = [this](auto handler) {
-            return [this, handler](auto s) { (this->*handler)(s); };
-        };
-        fsm_->add_handler(S::CONNECTED,  E::GREETING_220, h(&OutboundSmtpSession::handle_greeting_220));
-        fsm_->add_handler(S::EHLO,       E::EHLO_250,     h(&OutboundSmtpSession::handle_ehlo_250));
-        fsm_->add_handler(S::MAIL_FROM,  E::MAIL_250,     h(&OutboundSmtpSession::handle_mail_250));
-        fsm_->add_handler(S::RCPT_TO,    E::RCPT_250,     h(&OutboundSmtpSession::handle_rcpt_250));
-        fsm_->add_handler(S::DATA,       E::DATA_354,     h(&OutboundSmtpSession::handle_data_354));
-        fsm_->add_handler(S::WAIT_ACCEPT,E::ACCEPT_250,   h(&OutboundSmtpSession::handle_accept_250));
-        fsm_->add_handler(S::DATA_BODY,  E::ACCEPT_250,   h(&OutboundSmtpSession::handle_accept_250));  // 2026-08-26: body 末 250 也走 handle_accept_250
-        fsm_->add_handler(S::WAIT_ACCEPT,E::ERROR_4XX,    h(&OutboundSmtpSession::handle_temp_error));
-        fsm_->add_handler(S::WAIT_ACCEPT,E::ERROR_5XX,    h(&OutboundSmtpSession::handle_perm_error));
-        fsm_->add_handler(S::CLOSED,     E::CONNECTION_LOST, h(&OutboundSmtpSession::handle_closed));
-    }
-
-    // ── 连接 ──────────────────────────────────────────────────
-    void connect_to_mx() {
-        // 2026-08-27: 记 connect 起点。async_connect 完成时算 duration（秒）。
-        // 用 steady_clock 不受墙钟跳变影响；不存 start_ 会有 dns_resolve 时间算进去，
-        // 这里仅测 TCP 三次握手 + 立即 connect 完成时间。
-        connect_start_ = std::chrono::steady_clock::now();
-        // 选择当前候选：MX failover 池逐个尝试（每 IP 一次 CONNECT_TIMEOUT_SEC 超时）；
-        // 池空（静态/默认路由给出的具体 host）→ 用 mx_host_。
-        const std::string host = pick_connect_host();
-        auto& io_ctx = static_cast<pr::IOThreadPool*>(this->m_server->m_ioThreadPool.get())->get_io_context();
-        // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时，mx_host_.local
-        // 直接替换为 127.0.0.1，跳过 boost resolver 和系统 mDNS。
-        // 让 A→B（b.local）在 e2e 测试里无需配置 mDNS responder。
-        const std::string resolve_host = local_shortcut_if_enabled(host);
-        auto resolver = std::make_shared<boost::asio::ip::tcp::resolver>(io_ctx);
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-        resolver->async_resolve(resolve_host, std::to_string(mx_port_),
-            [self, resolver](const boost::system::error_code& ec,
-                             boost::asio::ip::tcp::resolver::results_type endpoints) mutable {
-                if (ec || endpoints.empty()) { self->handle_connect_failure_or_next(); return; }
-                auto& io_ctx2 = static_cast<pr::IOThreadPool*>(
-                    self->m_server->m_ioThreadPool.get())->get_io_context();
-                auto sock = std::make_unique<boost::asio::ip::tcp::socket>(io_ctx2);
-                // 先取裸指针再 move：实参求值顺序不确定，`async_connect(*sock, ...,
-                // [sock = std::move(sock)]...)` 里若 handler 实参先求值，*sock 解引用的
-                // 是已置空的 unique_ptr → socket 对象落在 0 地址，process() 内 +8 偏移
-                // 处空指针崩（si_addr=0x8，2026-09-11 RackNerd 三个 core 均为此现场）。
-                auto* sock_raw = sock.get();
-                // 连接超时快手围栏：到点 cancel socket → 下面 async_connect 以 operation_aborted
-                // 完成 → 走同一 handle_connect_failure（不重复记账），不等 OS 的 ~130s 黑洞超时。
-                // raw 指针仅此段安全：timer 必先于 socket 迁入 connection_ 前被 cancel（见下），
-                // 超时路径执行时 socket 仍由 sock 独占持有。
-                auto ctm = std::make_shared<boost::asio::steady_timer>(
-                    io_ctx2, std::chrono::seconds(CONNECT_TIMEOUT_SEC));
-                ctm->async_wait([sock_raw](const boost::system::error_code& ec) {
-                    if (!ec) { boost::system::error_code ig; sock_raw->cancel(ig); }
-                });
-                boost::asio::async_connect(*sock_raw, endpoints,
-                    [self, sock = std::move(sock), ctm](const boost::system::error_code& ec,
-                                                        boost::asio::ip::tcp::endpoint) mutable {
-                        ctm->cancel();  // 成功或失败都解除等待（asio steady_timer::cancel 无参）
-                        if (ec) { self->handle_connect_failure_or_next(); return; }
-                        // 2026-08-27: 推 connect_duration。失败路径推 connect_attempts_failed_total
-                        // 留给后续 e2e 故事测试（需要 mock resolver 失败，难单测）。
-                        if (auto m = self->m_server->get_metrics().lock()) {
-                            auto dur = std::chrono::duration<double>(
-                                std::chrono::steady_clock::now() - self->connect_start_).count();
-                            m->observe("protorelay_outbound_connect_duration_seconds", {}, dur);
-                        }
-                        LOG_SMTP_INFO("Outbound: connected to {}", self->mx_host_);
-                        self->connection_ = std::make_unique<pr::TcpConnection>(std::move(sock));
-                        self->mails_sent_on_conn_ = 0;
-                        // 2026-08-26: 派 CONNECT + CONNECTED 两阶段走完 INIT→CONNECTING→CONNECTED，
-                        // 否则单派 CONNECTED 时 transition (INIT, CONNECTED) 不在表里。
-                        // (INIT,CONNECT) / (CONNECTING,CONNECTED) 在 register_handlers 里没注册 handler，
-                        // 走 on_handler_not_found 默认空实现（仅用于状态推进，无副作用）。
-                        self->fsm_->process_event(self, OutboundSmtpEvent::CONNECT);
-                        self->fsm_->process_event(self, OutboundSmtpEvent::CONNECTED);
-                        self->do_async_read();
-                    });
-            });
-    }
-
-    // ── MX 池：取当前候选，推进索引 ──────────────────────────────────
-    std::string pick_connect_host() {
-        if (!mx_pool_.empty() && mx_pool_idx_ < mx_pool_.size())
-            return mx_pool_[mx_pool_idx_++];
-        return mx_host_;
-    }
-    // 失败分流：池里还有候选 → 立即试下一个（IO post 链式，不深递归）；
-    // 池耗尽（或本就走静态/默认路由）→ 落回 handle_connect_failure（退避重试，idx 重置）。
-    void handle_connect_failure_or_next() {
-        if (!mx_pool_.empty() && mx_pool_idx_ < mx_pool_.size()) {
-            auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-            auto& io_ctx = static_cast<pr::IOThreadPool*>(
-                self->m_server->m_ioThreadPool.get())->get_io_context();
-            boost::asio::post(io_ctx, [self]() {
-                if (self) self->connect_to_mx();
-            });
-            return;
-        }
-        handle_connect_failure();
-    }
-
-    void handle_connect_failure() {
-        connect_retries_++;
-        mx_pool_idx_ = 0;  // 退避重试从头重试 MX 池（下一轮可能命中可达端点）
-        {
-            std::lock_guard<std::mutex> lk(queue_mu_);
-            if (current_task_) { queue_.push(std::move(current_task_)); }
-        }
-        if (connect_retries_ < MAX_CONNECT_RETRIES) {
-            int delay_ms = CONNECT_BACKOFF_BASE_MS * (1 << (connect_retries_ - 1));
-            LOG_SMTP_INFO("Outbound: connect to {} failed, retry {}/{} in {}ms",
-                          mx_host_, connect_retries_, MAX_CONNECT_RETRIES, delay_ms);
-            auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-            auto& io_ctx = static_cast<pr::IOThreadPool*>(
-                this->m_server->m_ioThreadPool.get())->get_io_context();
-            retry_timer_ = std::make_shared<boost::asio::steady_timer>(
-                io_ctx, std::chrono::milliseconds(delay_ms));
-            retry_timer_->async_wait([self](const boost::system::error_code& ec) {
-                if (!ec) self->connect_to_mx();
-            });
-        } else {
-            LOG_SMTP_ERROR("Outbound: connect to {} failed after {} retries", mx_host_, MAX_CONNECT_RETRIES);
-            state_ = SessionState::CLOSED;
-        }
-    }
-
-    // ── 投递链 (回调驱动，每次 pop 一个任务) ──────────────────
-    // 调用方无需持锁
-    void deliver_next() {
-        std::unique_ptr<MailDeliveryTask> task;
-        {
-            std::lock_guard<std::mutex> lk(queue_mu_);
-            // 跳过过期任务
-            while (!queue_.empty() && queue_.front()->expired()) {
-                auto& t = queue_.front();
-                LOG_SMTP_WARN("Outbound: skipping expired task mail_id={}", t->mail_id);
-                if (completion_cb_) completion_cb_(t->record_id, false);
-                queue_.pop();
-            }
-            if (queue_.empty()) {
-                state_ = SessionState::CONNECTED;
-                schedule_idle_timeout();
-                return;
-            }
-            task = std::move(queue_.front());
-            queue_.pop();
-        }
-        // 放锁后发 MAIL FROM
-        current_task_ = std::move(task);
-        mails_sent_on_conn_++;
-        // 2026-08-26: 发 MAIL FROM 之前显式 set state=MAIL_FROM，否则 parse_response
-        // 看 state 还是 WAIT_ACCEPT（链式第二封+），会把 MAIL FROM 250 错认成 ACCEPT_250
-        // → 立即 handle_accept_250 → 漏发 RCPT/DATA。
-        this->set_current_state(static_cast<int>(OutboundSmtpState::MAIL_FROM));
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-        this->do_async_write("MAIL FROM:<" + current_task_->sender + ">\r\n",
-            [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
-    }
-
-    void schedule_idle_timeout() {
-        if (!is_connected()) return;
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-        auto& io_ctx = static_cast<pr::IOThreadPool*>(
-            this->m_server->m_ioThreadPool.get())->get_io_context();
-        idle_timer_ = std::make_shared<boost::asio::steady_timer>(
-            io_ctx, std::chrono::seconds(IDLE_TIMEOUT_SEC));
-        idle_timer_->async_wait([self](const boost::system::error_code& ec) {
-            if (ec) return;
-            LOG_SMTP_INFO("Outbound: idle timeout, closing {}", self->mx_host_);
-            self->do_graceful_quit();
-        });
-    }
-
-    void do_graceful_quit() {
-        state_ = SessionState::CLOSING;
-        if (!is_connected()) { state_ = SessionState::CLOSED; return; }
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-        this->do_async_write("QUIT\r\n",
-            [self](auto, const boost::system::error_code&) mutable {
-                self->state_ = SessionState::CLOSED;
-                self->fsm_->process_event(self, OutboundSmtpEvent::QUIT_221);
-            });
-    }
-
-    // ── 邮件正文 ──────────────────────────────────────────────
-    std::string load_and_stuff_body() {
-        if (!current_task_ || !current_task_->mail_ptr) return ".\r\n";
-        const auto& m = *current_task_->mail_ptr;
-        std::string raw;
-        if (!m.body.empty()) {
-            raw = m.body;
-        } else {
-            std::ifstream file(m.body_path, std::ios::binary);
-            if (!file.is_open()) { LOG_SMTP_ERROR("Outbound: cannot open {}", m.body_path); return ".\r\n"; }
-            std::ostringstream ss; ss << file.rdbuf();
-            raw = ss.str();
-        }
-        std::string sign_err;
-        std::string payload = sign_payload_if_dkim(raw, ob_cfg_, &sign_err);
-        if (!sign_err.empty())
-            LOG_SMTP_WARN("Outbound: DKIM sign skipped for mail {}: {}", m.id, sign_err);
-        return smtp::dot_stuff(payload) + "\r\n.\r\n";
-    }
-
-    // ── 状态处理器 ────────────────────────────────────────────
-    void handle_greeting_220(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        self->do_async_write("EHLO " + self->helo_domain_ + "\r\n",
-            [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
-    }
-
-    void handle_ehlo_250(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        self->deliver_next();  // 自己持锁
-    }
-
-    void handle_mail_250(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        self->do_async_write("RCPT TO:<" + self->current_task_->recipient + ">\r\n",
-            [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
-    }
-
-    void handle_rcpt_250(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        self->do_async_write("DATA\r\n",
-            [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
-    }
-
-    void handle_data_354(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        std::string body = self->load_and_stuff_body();
-        self->do_async_write(body,
-            [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
-    }
-
-    void handle_accept_250(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-        auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        LOG_SMTP_INFO("Outbound: mail {} accepted by {}", self->current_task_->mail_id, self->mx_host_);
-        if (self->completion_cb_) self->completion_cb_(self->current_task_->record_id, true);
-        self->current_task_.reset();
-        if (self->mails_sent_on_conn_ >= MAX_MAILS_PER_CONNECTION) {
-            self->do_graceful_quit();
-            return;
-        }
-        self->deliver_next();  // 链式启动下一封（自己持锁）
-    }
-
-    void handle_temp_error(std::shared_ptr<pr::SessionBase<ConnectionType>>) {
-        LOG_SMTP_WARN("Outbound: 4xx temp error for {} to {}", current_task_->mail_id, mx_host_);
-        // 2026-08-27: deferred 计数。handle_perm_error 不在此处推 bounced_total，
-        // 那是 OutboundServer completion_cb 的事（统一收口，避免重复）。
-        if (auto m = this->m_server->get_metrics().lock()) {
-            m->inc_counter("protorelay_outbound_deferred_total",
-                           {{"mx", mx_host_}}, 1);
-        }
-        deliver_next();
-    }
-
-    void handle_perm_error(std::shared_ptr<pr::SessionBase<ConnectionType>>) {
-        LOG_SMTP_WARN("Outbound: 5xx perm error for {} to {}", current_task_->mail_id, mx_host_);
-        if (completion_cb_) completion_cb_(current_task_->record_id, false);
-        current_task_.reset();
-        deliver_next();
-    }
-
-    void handle_closed(std::shared_ptr<pr::SessionBase<ConnectionType>>) {
-        LOG_SMTP_INFO("Outbound: connection to {} closed", mx_host_);
-        if (current_task_) {
-            std::lock_guard<std::mutex> lk(queue_mu_);
-            queue_.push(std::move(current_task_));
-        }
-        state_ = SessionState::CLOSED;
-    }
-
-    // ── 成员 ──────────────────────────────────────────────────
-    std::string mx_host_;
-    int mx_port_;
-    // MX failover 池：dispatch 对 DNS 直投目标同步解析 MX 得到的一组邮件服务器 IP。
-    // connect_to_mx 按 mx_pool_idx_ 逐个尝试（每 IP 一个 CONNECT_TIMEOUT_SEC 超时），
-    // 失败推进下一个；池耗尽走 handle_connect_failure（退避重试时 idx 重置再试）。
-    // 空池 = 静态/默认路由给出的具体 host，直接连 mx_host_。
+    void pump();
+    void prepare();
+    void connect();
+    void send();
+    void complete(smtp::Result result);
+    void idle();
+    void quit();
+    smtp::ExecutorProvider executors_;
+    WorkerPost worker_post_;
+    boost::asio::any_io_executor executor_;
+    boost::asio::steady_timer timer_;
+    std::string host_, helo_;
+    int port_;
+    OutboundConfig config_;
+    CompletionCb complete_;
+    std::weak_ptr<pr::MetricsServer> metrics_;
     std::vector<std::string> mx_pool_;
-    size_t mx_pool_idx_ = 0;
-    std::string helo_domain_;
-    OutboundConfig ob_cfg_;
-    std::shared_ptr<OutboundSmtpFsm<ConnectionType>> fsm_;
-    std::string response_buf_;
-
-    mutable std::mutex queue_mu_;
+    size_t mx_index_ = 0;
+    int retries_ = 0, sent_ = 0;
+    bool stopped_ = false;
     std::queue<std::unique_ptr<MailDeliveryTask>> queue_;
-    SessionState state_ = SessionState::INIT;
-    CompletionCb completion_cb_;
-
-    std::unique_ptr<MailDeliveryTask> current_task_;
-    int mails_sent_on_conn_ = 0;
-    int connect_retries_ = 0;
-    std::shared_ptr<boost::asio::steady_timer> retry_timer_;
-    std::shared_ptr<boost::asio::steady_timer> idle_timer_;
-    // 2026-08-26: FSM 真状态。跨 io 线程读（parse_response L129-142）+ 单 io 线程写
-    // （process_event 派发后自动 set；deliver_next 显式 set MAIL_FROM）。atomic 足够。
-    std::atomic<int> fsm_state_{static_cast<int>(OutboundSmtpState::INIT)};
-    // 2026-08-27: connect 起点。connect_to_mx 入口记，async_connect 成功 callback 算 duration。
-    std::chrono::steady_clock::time_point connect_start_{};
+    std::unique_ptr<MailDeliveryTask> task_;
+    std::shared_ptr<const std::string> payload_;
+    std::shared_ptr<smtp::ClientSession> client_;
+    std::atomic<size_t> pending_{0};
+    std::atomic<bool> active_{false};
+    std::atomic<SessionState> state_{SessionState::INIT};
 };
-
-} // namespace outbound
-} // namespace mail_system
-
-#endif // OUTBOUND_SMTP_SESSION_H
+} // namespace mail_system::outbound

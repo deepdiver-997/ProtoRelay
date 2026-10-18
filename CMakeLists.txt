@@ -295,6 +295,8 @@ set(COMMON_SRCS
     src/mail_system/back/mailServer/outbound/mx_routing_utils.cpp
     src/mail_system/back/mailServer/outbound/cares_dns_resolver.cpp
     src/mail_system/back/mailServer/outbound/outbound_server.cpp
+    src/mail_system/back/mailServer/outbound/outbound_smtp_session.cpp
+    src/mail_system/back/smtp_client/client_session.cpp
     src/mail_system/back/common/bcrypt.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
@@ -641,7 +643,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(http_session_read_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(http_session_read_test)
 
+    add_executable(smtp_client_test src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_test.cpp)
+    setup_mail_target(smtp_client_test)
+
     add_executable(smtp_submitter_test
+        src/mail_system/back/smtp_client/client_session.cpp
         src/mail_system/back/common/mime_composer.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
         test/unit/smtp_submitter_test.cpp
@@ -759,7 +765,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(dispatch_bench test/bench/fsm/dispatch_bench.cpp)
     target_compile_features(dispatch_bench PRIVATE cxx_std_17)
 
-    add_executable(outbound_smoke test/unit/outbound_smoke.cpp)
+    add_executable(outbound_smoke ${COMMON_SRCS} test/unit/outbound_smoke.cpp)
     setup_mail_target(outbound_smoke)
     target_include_directories(outbound_smoke PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
 endif()
@@ -775,6 +781,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME pop3_fsm_test    COMMAND pop3_fsm_test)
     add_test(NAME inbound_verifier COMMAND test_inbound_verifier)
     add_test(NAME outbound_smoke   COMMAND outbound_smoke)
+    set_tests_properties(outbound_smoke PROPERTIES TIMEOUT 20)
     add_test(NAME sql_queries_test COMMAND sql_queries_test)
     add_test(NAME mime_parser_test COMMAND mime_parser_test)
     add_test(NAME mail_body_writer_test COMMAND mail_body_writer_test)
@@ -797,6 +804,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME password_rehash_test COMMAND password_rehash_test)
     add_test(NAME safe_parse_test COMMAND safe_parse_test)
     add_test(NAME webmail_test COMMAND webmail_test)
+    add_test(NAME smtp_client_test COMMAND smtp_client_test)
+    set_tests_properties(smtp_client_test PROPERTIES TIMEOUT 20)
     add_test(NAME smtp_submitter_test COMMAND smtp_submitter_test)
     add_test(NAME http_session_read_test COMMAND http_session_read_test)
     set_tests_properties(smtp_submitter_test PROPERTIES TIMEOUT 15)
@@ -834,6 +843,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         safe_parse_test
         webmail_test
         smtp_submitter_test
+        smtp_client_test
         http_session_read_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
@@ -847,7 +857,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             intrusion_detector_test server_config_test mapped_file_test
             thread_pool_test session_base_test server_base_test
             outbound_utils_test metrics_core_test bcrypt_test
-            webmail_test smtp_submitter_test http_session_read_test)
+            webmail_test smtp_submitter_test smtp_client_test http_session_read_test)
         foreach(_t IN LISTS _asan_tests)
             # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)

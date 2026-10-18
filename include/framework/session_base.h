@@ -82,7 +82,7 @@ public:
 
     // 该会话是否计入 ServerBase 的 active_connections_（入站客户端连接计数 / maxConnections 限流）。
     // 仅入站 accept 路径（TCP/SSL/STARTTLS handoff）在 increment_connection_count() 处置 true；
-    // 出站会话（OutboundSmtpSession：由 OutboundServer 自建、非 accept 计数）保持 false，
+    // 非 accept 管理的内部会话保持 false，
     // close() 时便不会 decrement —— 否则无符号 size_t 在 0 上 fetch_sub 下溢成 SIZE_MAX(≈18E18),
     // 使 `active >= maxConnections(200)` 恒真，整机拒绝所有新连接（2026-09-11 RackNerd 事故根因）。
     void set_tracks_connection_count(bool v) { tracks_connection_count_ = v; }

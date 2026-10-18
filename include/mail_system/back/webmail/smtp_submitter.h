@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mail_system/back/webmail/session_password.h"
+#include "mail_system/back/smtp_client/client_session.h"
 #include <boost/asio/any_io_executor.hpp>
 #include <chrono>
 #include <cstdint>
@@ -32,17 +33,18 @@ public:
     virtual void submit_async(SubmitRequest request, Complete complete) = 0;
 };
 
-// 固定 127.0.0.1，无 DNS/任意 host 配置；明文 AUTH 仅跨本机 loopback。
-// 采用 outbound SMTP 的逐响应推进形状，共用 base64 / DATA transparency。
-// socket/timer 统一在独立 strand 上发起，worker/HTTP 调用线程不碰 I/O 对象。
+// 固定 loopback 提交策略；连接/协议由公共 SMTP 内核负责。
 class LoopbackSmtpSubmitter final : public ISmtpSubmitter {
 public:
     explicit LoopbackSmtpSubmitter(boost::asio::any_io_executor executor,
                                   uint16_t port = 587,
                                   std::chrono::milliseconds timeout = std::chrono::seconds(30));
+    explicit LoopbackSmtpSubmitter(smtp::ExecutorProvider executor_provider,
+                                  uint16_t port = 587,
+                                  std::chrono::milliseconds timeout = std::chrono::seconds(30));
     void submit_async(SubmitRequest request, Complete complete) override;
 private:
-    boost::asio::any_io_executor executor_;
+    smtp::ExecutorProvider executor_provider_;
     uint16_t port_;
     std::chrono::milliseconds timeout_;
 };

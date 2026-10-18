@@ -7,6 +7,10 @@
 > - 详见 [`ARCHITECTURE.md`](../../architecture/ARCHITECTURE.md) §4.2 和
 >   [`architecture-evolution.md`](../../architecture/architecture-evolution.md) §阶段H
 
+> **2026-10-18 实现更新**：Outbound/Webmail 现在共用 SMTP 客户端内核，旧出站
+> FSM 已删除。以 [共享内核与提交服务边界](smtp-client-core.md) 的第一阶段实现为准；
+> 本文其余 worker/重试设计保留为演进背景。
+
 ## 1. 设计范围
 
 本文档定义 Mail System V8 的出站投递模块（SMTP Client）的最小可行设计（MVP）。

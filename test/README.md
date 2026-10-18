@@ -336,7 +336,7 @@ Mock 测试（`smtps_mock.json` / `imaps_mock.json`）配置 `use_database: fals
 
 ### 1. Apple clang 17 Debug 模式 `std::make_shared` 编译失败
 
-**现象**：`-O0` 时 `OutboundSmtpSession` / `SmtpsSession` / `ImapsSession` 的
+**历史现象**：`-O0` 时旧 `OutboundSmtpSession` / `SmtpsSession` / `ImapsSession` 的
 `std::make_shared` 报错：
 ```
 error: incompatible pointer types assigning to '__shared_weak_count *'
@@ -348,7 +348,8 @@ from 'std::__shared_ptr_emplace<...> *'
 内部控制块类型转换 bug。`-O3` 时优化器消除了相关中间路径，不会触发。
 
 **影响范围**：
-- `OutboundSmtpSession` — 间接继承 `SessionBase` → `enable_shared_from_this`
+- 旧 `OutboundSmtpSession` — 间接继承 `SessionBase` → `enable_shared_from_this`；
+  2026-10-18 已改为公共 SMTP 内核的策略适配器，不再使用该继承链
 - `SmtpsSession` — 同样继承链
 - `ImapsSession` — 同样继承链
 
