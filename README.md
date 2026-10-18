@@ -55,7 +55,7 @@ FastFsm, IO/worker pools, watchdog) carries a second protocol family:
 - `h2web` — HTTP/2 multi‑stream static files (HPACK + flow control)
 Business docs: [`docs/web-server/README.md`](docs/web-server/README.md).
 
-`webmailServer` supports shared DB cookie sessions, mailbox/message lists, MIME reading, and durable submission through an injected MailSubmissionService (text/HTML, To/Cc). Apply `config/sql/migration_web_sessions.sql` on shard 0 and give every writer a distinct `webmail_node_id` (0..1023; default 1, SMTP defaults to 0). Attachment downloads/uploads, search, and the SPA remain pending. See the [Webmail API contract](docs/mail-system/architecture/webmail-api.md) for configuration and verification commands.
+`webmailServer` supports a shared DB session per account (new logins revoke previous cookies), mailbox/message lists, MIME reading, and durable submission through an injected MailSubmissionService (text/HTML, To/Cc). Apply `config/sql/migration_web_sessions.sql` on shard 0 (existing multi-session tables also need `migration_web_sessions_single_login.sql` after stopping old Webmail writers) and give every writer a distinct `webmail_node_id` (0..1023; default 1, SMTP defaults to 0). Attachment downloads/uploads, search, and the SPA remain pending. See the [Webmail API contract](docs/mail-system/architecture/webmail-api.md) for configuration and verification commands.
 
 ## Extensibility by Design
 

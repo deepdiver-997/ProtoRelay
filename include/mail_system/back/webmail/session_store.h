@@ -6,6 +6,7 @@
 #include "mail_system/back/router/i_shard_router.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include <functional>
+#include <mutex>
 #include <chrono>
 #include <cstdint>
 #include <openssl/rand.h>
@@ -28,12 +29,12 @@ public:
 
     explicit SessionStore(size_t capacity = 100000,
                           std::chrono::seconds ttl = kDefaultTtl)
-        : cache_(capacity, ttl), ttl_(ttl) {}
+        : cache_(capacity, ttl), current_tokens_(capacity, ttl), ttl_(ttl) {}
 
     SessionStore(std::shared_ptr<router::IShardRouter> router,
                  std::shared_ptr<pr::ThreadPoolBase> workers,
                  std::chrono::seconds ttl = kDefaultTtl)
-        : cache_(1, ttl), ttl_(ttl), router_(std::move(router)), workers_(std::move(workers)), database_(true) {}
+        : cache_(1, ttl), current_tokens_(1, ttl), ttl_(ttl), router_(std::move(router)), workers_(std::move(workers)), database_(true) {}
     struct LookupResult {
         bool found = false;
         bool server_error = false;
@@ -64,7 +65,7 @@ public:
     void put(const std::string& token, uint64_t user_id, const std::string& address,
              SessionPasswordPtr password = nullptr) {
         if (database_) throw std::logic_error("use async DB session API");
-        cache_.put(token, Entry{{user_id, address, {}, 0}, std::move(password)});
+        put_memory(token, {user_id, address, {}, 0}, std::move(password));
     }
 
     // 命中且未过期返回 true。滑动续期 MVP 不做（固定 TTL，到期重新登录）。
@@ -72,9 +73,12 @@ public:
                 SessionPasswordPtr* password = nullptr) const {
         if (password) password->reset();
         if (database_ || token.empty()) return false;
+        std::lock_guard lock(memory_mutex_);
         bool stale = false;
         Entry entry;
         if (!cache_.get(token, entry, stale) || stale) return false;
+        std::string current;
+        if (!current_tokens_.get(account_key(entry.user), current, stale) || stale || current != token) return false;
         out = entry.user;
         if (password) *password = entry.password;
         return true;
@@ -82,10 +86,18 @@ public:
 
     void erase(const std::string& token) {
         if (database_) throw std::logic_error("use async DB session API");
+        std::lock_guard lock(memory_mutex_);
+        Entry entry;
+        bool stale = false;
+        if (cache_.get(token, entry, stale)) {
+            const auto key = account_key(entry.user);
+            std::string current;
+            if (current_tokens_.get(key, current, stale) && current == token) current_tokens_.invalidate(key);
+        }
         cache_.invalidate(token);
     }
 
-    size_t size() const { return cache_.size(); }
+    size_t size() const { std::lock_guard lock(memory_mutex_); return cache_.size(); }
 
     // ── cookie 帮助 ─────────────────────────────────────────────
     // 登录成功：HttpOnly + SameSite=Lax（kickoff 设计决策 6）。
@@ -127,7 +139,21 @@ private:
         WebSessionInfo user;
         SessionPasswordPtr password;
     };
+    static std::string account_key(const WebSessionInfo& user) {
+        return std::to_string(user.shard) + ":" + std::to_string(user.user_id);
+    }
+    void put_memory(const std::string& token, WebSessionInfo user, SessionPasswordPtr password) {
+        std::lock_guard lock(memory_mutex_);
+        const auto key = account_key(user);
+        bool stale = false;
+        std::string previous;
+        if (current_tokens_.get(key, previous, stale)) cache_.invalidate(previous);
+        cache_.put(token, Entry{std::move(user), std::move(password)});
+        current_tokens_.put(key, token);
+    }
     pr::LruCache<std::string, Entry> cache_;
+    pr::LruCache<std::string, std::string> current_tokens_;
+    mutable std::mutex memory_mutex_;
     std::chrono::seconds ttl_;
     std::shared_ptr<router::IShardRouter> router_;
     std::shared_ptr<pr::ThreadPoolBase> workers_;

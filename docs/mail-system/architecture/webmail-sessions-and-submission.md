@@ -9,13 +9,22 @@ SMTP 和 Webmail 共用 `AccountPolicy` 的认证口径、认证身份绑定发�
 叫法；别名/邮件组只是其中一项规则。SMTP 的 session pause 与回复仍留在 FSM。
 Webmail 的 HTTP 状态映射留在 API/DirectSubmitter；公共服务不持有 SMTP server。
 
-## 一次登录一条会话
+## 每个账号只保留一个当前会话
 
-生产配置 `use_database=true` 时使用独立 `web_sessions` 表，而不是 `users.token`。
-每次登录生成新的 256 位 CSPRNG token；cookie 持有原 token，数据库只持有 SHA-256
-摘要。新登录增加一行，不覆盖旧设备。普通 logout 只删除当前 token 的行。
-进程重启保留会话，任意 Webmail 节点均可校验和撤销。同一浏览器 cookie jar 会
-用新 cookie 替换旧 cookie，不等于撤销其他设备；当前没有会话管理/全设备注销 API。
+用户已确认“防多地登录”：**新登录踢掉旧会话**。生产配置 `use_database=true`
+时仍使用独立 `web_sessions` 表，而不是 `users.token`。每次成功登录生成新的
+256 位 CSPRNG token，cookie 持有原 token，数据库只持有 SHA-256 摘要。
+`(account_shard,user_id)` 唯一键保证每个账号只有一行当前会话；登录通过一条
+原子 upsert 替换 token、凭据摘要和到期时间，提交成功后才发送 cookie。
+不会先独立删除旧记录再插入。
+
+多个节点并发登录由 InnoDB 唯一键串行化，以 **DB 成功写入顺序** 为准，最后一次
+写入的 token 唯一有效。并发 HTTP 响应的到达顺序不代表登录先后，较早一次成功
+响应所带 cookie 可能已被另一次登录替换。旧 cookie 后续在任意节点访问 me、
+邮箱或发信均返回 401；固定 TTL 到期和新会话注销都不会恢复旧 token。
+普通 logout 按 token 摘要删除：被踢的旧设备再注销，匹配不到新 token，不能
+误删新会话。错误密码不轮转会话。进程重启保留当前会话，不同账号及不同 shard
+上重复的用户 ID 各自独立。内存测试后端遵循相同的单会话策略。
 
 集中会话表位于路由器的 **shard 0**，行记录账号地址、用户 ID、账号 shard、到期
 时间和凭据版本摘要。用户本身仍在账号 shard。注册表没有跨库外键。查询先释放
@@ -75,8 +84,14 @@ SMTP 与 Webmail 共用 OutboundConfig 构造。多个出站实例通过 DB 租�
 
 ## 迁移、配置与验证
 
-在 **shard 0** 运行 `config/sql/migration_web_sessions.sql`（幂等）。新建数据库的
-两份建表脚本也包含此表。无须在 users 添加 token 列。旧内存会话部署切换后需重登。
+新建库在 **shard 0** 运行 `config/sql/migration_web_sessions.sql`；两份建表脚本
+同样包含账号唯一键。已部署上一版多会话表时，**先停止旧 Webmail 写入节点**，
+再运行 `config/sql/migration_web_sessions_single_login.sql`，随后一起升级服务。
+迁移按账号保留 created_at 最新一条，同秒时按 token 摘要排序决出一条，删除其余
+会话，并把旧普通索引替换为账号唯一键；可重复执行。被清掉的旧设备需要重登。
+无须在 users 添加 token 列，也不改账号或邮件数据。新登录在写入前核对唯一键，
+缺少迁移、索引不正确或元数据查询失败时返回 503，不签发可能共存的新会话。
+
 服务应定期清理闲置环境中过期行，例如 `DELETE FROM web_sessions WHERE
 expires_at <= UTC_TIMESTAMP() LIMIT 10000`；正常登录也会小批清理。
 
@@ -92,6 +107,7 @@ SMTP 默认节点 0；多 Webmail 节点分别配 1、2 等。当前 SMTP 全局
 cmake --build build-release -j 8
 ctest --test-dir build-release -j 4 --output-on-failure
 .venv/bin/python test/scripts/webmail_send_smoke.py --db-config config/db_config.json
+.venv/bin/python test/scripts/webmail_single_login_migration_test.py --db-config config/db_config.json
 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan -R '^(webmail_test|smtps_fsm_concurrency_test)$' --output-on-failure
 ```
 
@@ -99,6 +115,10 @@ ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan -R '^(webmail_test|smtps
 [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)。
 
 本地 smoke 创建两个 Webmail、一个 SMTP 临时进程和随机账号，测跨节点互认、
-独立设备、节点重启、B 发信 A 读信、跨节点注销、禁用/到期/改密、别名去重及
+新登录互踢、8 个并发登录仅一有效、旧设备注销保护、节点重启、跨节点发信/读信、
+跨节点注销、禁用/到期/改密、别名去重及
 SMTP/HTTP 共享配额；无外域邮件。账号、别名、会话、邮件和临时目录均自动清理。
 故障状态和 stale-cache/rehash-CAS 竞争由 webmail_test 的 MockDb 场景覆盖。
+
+单会话专项负验证、迁移去重/重跑验证见
+[单会话回归记录](../../bugfixes/2026-10-18-webmail-single-login.md)。

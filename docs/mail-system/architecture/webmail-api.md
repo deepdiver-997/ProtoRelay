@@ -13,7 +13,8 @@
 
 参数顺序为配置文件、HTTP 端口、静态根目录。`webmail_node_id` 为 0..1023
 的写节点编号，默认 1；所有写同一邮件库的节点须唯一，避开 SMTP 默认 0。
-生产配置 `use_database=true`，在 shard 0 应用 `migration_web_sessions.sql`。
+生产配置 `use_database=true`，在 shard 0 应用 `migration_web_sessions.sql`；
+上一版多会话表还须停旧节点后运行 `migration_web_sessions_single_login.sql`。
 原 `webmail_submission_port` 不再读取。Webmail 自己装配配额、外域开关、存储和
 outbound 配置，须与 SMTP 一致。详见
 [共享会话与提交服务](webmail-sessions-and-submission.md)。
@@ -24,7 +25,7 @@ TLS/Secure cookie 感知装配仍待补；静态目录不能指向邮件正文�
 | 方法与路径 | 行为 |
 | --- | --- |
 | `GET /api/health` | 存活探针 |
-| `POST /api/login` | `{address, password}` → HttpOnly、SameSite=Lax cookie |
+| `POST /api/login` | `{address, password}` → 新 cookie，撤销该账号旧会话 |
 | `POST /api/logout` | 删除会话并清 cookie |
 | `GET /api/me` | 当前用户 id/address |
 | `GET /api/mailboxes` | 本人邮箱及 total/unread |
@@ -58,8 +59,9 @@ HTTP JSON 请求上限 1 MiB。正文转 CRLF 后使用每行 76 字节的 base6
 `bcc` 当前也返回 400：引擎的 IMAP/读信 API 仍将信封收件人列表用于展示，
 在读侧隐私契约完成前不开放密送。附件上传/原始 MIME/自定义邮件头不在此接口中。
 
-生产会话使用 shard 0 的 `web_sessions` 表：一次登录一行，保存 token 摘要，
-支持多个设备、多个 Webmail 节点和服务重启；logout 只撤销当前会话。
+生产会话使用 shard 0 的 `web_sessions` 表：每个账号只保留一个 token 摘要，
+新登录原子替换旧会话，旧 cookie 后续在所有节点返回 401。多个 Webmail 节点和
+服务重启均认可同一当前会话；旧设备的 logout 不会撤销新会话。
 不在 users 中保存单个 token，不保留 SMTP 密码。每次请求核对账号最新状态和
 密码版本，DB 不可用返回 503。详细迁移与部署约定见
 [共享会话与提交服务](webmail-sessions-and-submission.md)。
@@ -107,6 +109,6 @@ python3 test/scripts/webmail_send_smoke.py --build-dir build-release
 `smtp_submitter_test` 使用真实 loopback TCP 脚本对端，验证 AUTH、信封、DATA
 点透明、拒绝与结果未知；`webmail_test` 验证鉴权、发送者绑定和 MIME 读回。
 Python 的 email 标准库独立验证编码。带 `--db-config` 的烟测会使用临时高端口
-启动两个 Webmail 与一个 SMTP 服务、创建随机账号、验证共享会话、重启、
+启动两个 Webmail 与一个 SMTP 服务、创建随机账号、验证共享会话、新登录互踢/并发单会话、重启、
 跨节点提交/读信、别名与跨协议配额、注销、状态/到期/改密，
 随后清理自身数据和进程。

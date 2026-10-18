@@ -18,6 +18,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from email import policy
 from email.parser import BytesParser
 
@@ -68,9 +69,12 @@ def check_local_e2e(build_dir, db_config_path, temp):
     password = secrets.token_urlsafe(24)
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=4)).decode()
     processes, logs = [], []
-    cookie_jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-        urllib.request.HTTPCookieProcessor(cookie_jar))
+    def new_client():
+        jar = http.cookiejar.CookieJar()
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(jar)), jar
+
+    opener, cookie_jar = new_client()
     base = f"http://127.0.0.1:{port}"
 
     def api(path, body=None, client=None, content_type="application/json", node=None):
@@ -150,14 +154,45 @@ def check_local_e2e(build_dir, db_config_path, temp):
         assert api("/api/send", {**payload, "from": "spoof@webmail.test"})[0] == 400
         assert api("/api/send", {**payload, "bcc": [addresses[2]]})[0] == 400
         assert api("/api/send", payload, content_type="text/plain")[0] == 415
-        # Independent login on a second device must not replace the first session.
-        second_client = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        # A new login revokes the old cookie on every node.
+        second_client, _ = new_client()
         assert api("/api/login", {"address": addresses[0], "password": password}, client=second_client, node=second_port)[0] == 200
-        assert api("/api/me")[0] == 200
-        assert api("/api/logout", {}, client=second_client)[0] == 200
+        old_status, old_session = api("/api/me")
+        assert old_status == 401, ("new login must revoke old cookie", old_status, old_session)
+        assert api("/api/me", node=second_port)[0] == 401
+        assert api("/api/mailboxes")[0] == 401
+        assert api("/api/send", payload)[0] == 401
+        assert api("/api/logout", {})[0] == 200 # logging out the revoked cookie preserves the new login
+        assert api("/api/me", client=second_client)[0] == 200
+        assert api("/api/login", {"address": addresses[0], "password": password + "wrong"})[0] == 401
+        assert api("/api/me", client=second_client, node=second_port)[0] == 200
+        assert api("/api/login", {"address": addresses[0], "password": password})[0] == 200
         assert api("/api/me", client=second_client, node=second_port)[0] == 401
+        assert api("/api/logout", {}, client=second_client)[0] == 200
         assert api("/api/me", node=second_port)[0] == 200
+        # Concurrent logins across nodes serialize on the unique account key.
+        contenders = [new_client() for _ in range(8)]
+        def concurrent_login(index):
+            client, _ = contenders[index]
+            return api("/api/login", {"address": addresses[0], "password": password}, client=client,
+                       node=port if index % 2 else second_port)[0]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            statuses = list(executor.map(concurrent_login, range(len(contenders))))
+        assert statuses == [200] * len(contenders), statuses
+        surviving = [(client, jar) for client, jar in contenders if api("/api/me", client=client)[0] == 200]
+        assert len(surviving) == 1, ("exactly one concurrent login must survive", len(surviving))
+        assert api("/api/me")[0] == 401 # previous sequential login was also replaced
+        assert api("/api/logout", {})[0] == 200
+        opener, cookie_jar = surviving[0]
+        for client, _ in contenders:
+            if client is not opener:
+                assert api("/api/me", client=client, node=second_port)[0] == 401
+                assert api("/api/logout", {}, client=client)[0] == 200
+        assert api("/api/me", node=second_port)[0] == 200
+        with db.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM web_sessions WHERE account_shard=0 AND user_id=(SELECT id FROM users WHERE mail_address=%s)", (addresses[0],))
+            assert cursor.fetchone()[0] == 1
+
         # Restart a node: session continuity requires the DB rather than any local cache.
         processes[-1].terminate()
         processes[-1].wait(timeout=10)
@@ -179,19 +214,21 @@ def check_local_e2e(build_dir, db_config_path, temp):
             assert sorted(row[0] for row in cursor.fetchall()) == sorted(addresses[1:])
         # 当前提交服务不自动保存 Sent（传统客户端通常另用 IMAP APPEND）。
         for address in addresses[1:]:
-            assert api("/api/login", {"address": address, "password": password})[0] == 200
-            status, boxes = api("/api/mailboxes")
+            reader, _ = new_client()
+            assert api("/api/login", {"address": address, "password": password}, client=reader)[0] == 200
+            status, boxes = api("/api/mailboxes", client=reader)
             assert status == 200
             box = next(b for b in boxes["mailboxes"] if b["box_type"] == 1)
-            status, page = api(f"/api/mailboxes/{box['id']}/messages")
+            status, page = api(f"/api/mailboxes/{box['id']}/messages", client=reader)
             assert status == 200 and page["total"] == 1, (status, page)
             item = page["messages"][0]
             assert item["subject"] == payload["subject"]
-            status, detail = api(f"/api/mailboxes/{box['id']}/messages/{item['id']}")
+            status, detail = api(f"/api/mailboxes/{box['id']}/messages/{item['id']}", client=reader)
             assert status == 200 and detail["body_available"], (status, detail)
             assert detail["message"]["subject"] == payload["subject"]
             assert detail["body"]["text"] == "hello\r\n.\r\nlast"
             assert detail["body"]["html"] == "<b>ok</b>"
+        assert api("/api/me")[0] == 200 # other accounts have independent session slots
         # Cross-node logout, disable, expiry and credential reset all reject old cookies.
         assert api("/api/logout", {}, node=second_port)[0] == 200
         assert api("/api/send", payload)[0] == 401
@@ -215,7 +252,7 @@ def check_local_e2e(build_dir, db_config_path, temp):
             token = next(c.value for c in cookie_jar if c.name == "wb_session")
             assert token not in {row[0] for row in records}
             assert hashlib.sha256(token.encode()).hexdigest() in {row[0] for row in records}
-        print("PASS: two nodes + restart; independent devices; cross-node durable send/read/logout; shared SMTP quota; aliases; disable/expiry/password reset")
+        print("PASS: two nodes + restart; single login + 8 concurrent logins; cross-node durable send/read/logout; shared SMTP quota; aliases; disable/expiry/password reset")
     except Exception:
         for index, log in enumerate(logs):
             log.seek(0)

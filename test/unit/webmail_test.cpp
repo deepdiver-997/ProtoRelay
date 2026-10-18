@@ -939,9 +939,62 @@ static void test_database_sessions_and_fresh_auth() {
     assert(!issued);
 }
 
+// 2026-10-18: a new login must revoke the previous token, including stale logout races.
+// Evidence: docs/bugfixes/2026-10-18-webmail-single-login.md.
+static void test_single_login_replacement() {
+    SessionStore store;
+    auto first = SessionStore::generate_token();
+    auto second = SessionStore::generate_token();
+    auto other = SessionStore::generate_token();
+    WebSessionInfo user;
+    store.put(first, 42, "user@test.local");
+    store.put(other, 43, "other@test.local");
+    store.put(second, 42, "user@test.local");
+    assert(!store.lookup(first, user));
+    assert(store.lookup(second, user) && user.user_id == 42);
+    assert(store.lookup(other, user) && user.user_id == 43);
+    store.erase(first); // stale device's logout cannot revoke the new login
+    assert(store.lookup(second, user));
+    auto other_shard = SessionStore::generate_token();
+    bool stored = false;
+    store.put_async(other_shard, {42, "user@other-shard.local", {}, 1}, nullptr, [&](bool ok) { stored = ok; });
+    assert(stored && store.lookup(other_shard, user) && user.shard == 1);
+    assert(store.lookup(second, user)); // IDs can repeat on different account shards
+    store.erase(second);
+    assert(!store.lookup(second, user));
+
+    auto pool = std::make_shared<test::MockDbPool>();
+    auto router = std::make_shared<router::StaticShardRouter>(std::vector<std::pair<std::string,int>>{}, 0,
+        std::vector<std::shared_ptr<DBPool>>{pool}, std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+    SessionStore database(router, nullptr);
+    auto index = [](std::string unique_flag) {
+        return std::make_shared<test::MockDbResult>(std::vector<std::map<std::string,std::string>>{
+            {{"Non_unique",unique_flag},{"Seq_in_index","1"},{"Column_name","account_shard"}},
+            {{"Non_unique",unique_flag},{"Seq_in_index","2"},{"Column_name","user_id"}}});
+    };
+    // Missing/incorrect schema or metadata-query outage must fail closed before issuing a cookie.
+    for (auto rows : {std::shared_ptr<IDBResult>{}, std::shared_ptr<IDBResult>(std::make_shared<test::MockDbResult>()),
+                      std::shared_ptr<IDBResult>(index("1"))}) {
+        pool->mock_conn()->push_sync_result(rows);
+        int calls = 0;
+        database.put_async(first, {42, "user@test.local", credential_stamp("stored"), 0}, nullptr,
+            [&](bool ok) { ++calls; assert(!ok); });
+        assert(calls == 1);
+    }
+    pool->mock_conn()->push_sync_result(index("0"));
+    int calls = 0;
+    database.put_async(second, {42, "user@test.local", credential_stamp("stored"), 0}, nullptr,
+        [&](bool ok) { ++calls; assert(ok); });
+    assert(calls == 1);
+}
+
 void run_webmail_submission_tests();
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--single-login-regression") {
+        test_single_login_replacement(); return 0;
+    }
+    test_single_login_replacement();
     if (argc == 2 && std::string(argv[1]) == "--auth-cache-regression") {
         test_database_sessions_and_fresh_auth(); return 0;
     }

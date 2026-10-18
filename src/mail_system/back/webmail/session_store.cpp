@@ -12,6 +12,22 @@ bool valid_token(const std::string &token) {
                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
            });
 }
+// Refuse the old multi-session schema rather than silently losing the single-login invariant.
+bool single_login_schema(IDBConnection *db) {
+    auto indexes = db->query("SHOW INDEX FROM web_sessions WHERE Key_name='uk_web_sessions_account'");
+    if (!indexes || indexes->get_row_count() != 2)
+        return false;
+    bool shard = false, user = false;
+    for (size_t i = 0; i < 2; ++i) {
+        if (indexes->get_value(i, "Non_unique") != "0")
+            return false;
+        auto position = indexes->get_value(i, "Seq_in_index");
+        auto column = indexes->get_value(i, "Column_name");
+        shard = shard || (position == "1" && column == "account_shard");
+        user = user || (position == "2" && column == "user_id");
+    }
+    return shard && user;
+}
 void run(const std::shared_ptr<pr::ThreadPoolBase> &workers, std::function<void()> task) {
     if (workers)
         workers->post(std::move(task));
@@ -23,7 +39,7 @@ void run(const std::shared_ptr<pr::ThreadPoolBase> &workers, std::function<void(
 void SessionStore::put_async(std::string token, WebSessionInfo user, SessionPasswordPtr password,
                              std::function<void(bool)> cb) {
     if (!database_) {
-        put(token, user.user_id, user.address, std::move(password));
+        put_memory(token, std::move(user), std::move(password));
         cb(true);
         return;
     }
@@ -37,12 +53,25 @@ void SessionStore::put_async(std::string token, WebSessionInfo user, SessionPass
             cb(false);
             return;
         }
-        bool ok =
-            (*conn)->execute("INSERT INTO web_sessions "
-                             "(token_hash,user_id,account_address,account_shard,credential_stamp,created_at,expires_at) "
-                             "VALUES (?,?,?,?,?,UTC_TIMESTAMP(),TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP()))",
-                             {credential_stamp(token), std::to_string(user.user_id), user.address,
-                              std::to_string(user.shard), user.credential_stamp, std::to_string(ttl)});
+        if (!single_login_schema(conn->operator->())) {
+            LOG_AT("WEBAPI", err,
+                   "single-login session constraint missing or unavailable user_id={}; apply "
+                   "migration_web_sessions_single_login.sql",
+                   user.user_id);
+            cb(false);
+            return;
+        }
+        bool ok = (*conn)->execute(
+            "INSERT INTO web_sessions "
+            "(token_hash,user_id,account_address,account_shard,credential_stamp,created_at,expires_at) "
+            "VALUES (?,?,?,?,?,UTC_TIMESTAMP(),TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP())) "
+            "ON DUPLICATE KEY UPDATE "
+            "token_hash=IF(account_shard=VALUES(account_shard) AND "
+            "user_id=VALUES(user_id),VALUES(token_hash),NULL), "
+            "account_address=VALUES(account_address),credential_stamp=VALUES(credential_stamp), "
+            "created_at=VALUES(created_at),expires_at=VALUES(expires_at)",
+            {credential_stamp(token), std::to_string(user.user_id), user.address, std::to_string(user.shard),
+             user.credential_stamp, std::to_string(ttl)});
         if (!ok)
             LOG_AT("WEBAPI", err, "session insert failed user_id={}", user.user_id);
         if (ok && !(*conn)->execute("DELETE FROM web_sessions WHERE expires_at<=UTC_TIMESTAMP() LIMIT 128"))
