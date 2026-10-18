@@ -110,8 +110,10 @@ systemctl is-active smtpserver imapserver
 ## 附件与实际送达验收
 
 生成已知 SHA-256 的文本/二进制附件，经真实 SMTP 发送，IMAP FETCH 原始 MIME，
-使用独立 email 解析器解码并核对文件名、长度和哈希。必要时验证 BODYSTRUCTURE/section
-与附件存储元数据。外域投递再核对边缘队列、对端 SMTP 最终响应及收件方实际附件。
+使用独立 email 解析器解码并核对文件名、长度和哈希。还须用独立 IMAP 客户端按
+BODYSTRUCTURE 字段发现附件，再 FETCH 对应 section 核对内容；仅检查结构存在或整封
+MIME 可下载不足以证明手机能识别附件。Webmail 另验附件存储元数据。外域投递再核对
+边缘队列、对端 SMTP 最终响应及收件方实际附件。
 
 对端 250 只证明对方接受，不证明进入收件箱；收件箱/垃圾箱归类须由收件人确认。
 个人 QQ 的一两次成功不能替代其他提供商、企业网关和长期运行的送达验证。
@@ -136,8 +138,10 @@ IMAP LOGIN/SASL 凭据在写入缓冲前脱敏，入站 literal 只记长度；�
 
 ## 2026-10-18 发布验证
 
-主站 SMTP/IMAP 与边缘 SMTP 已更新到代码提交 `78279b4b528c`，未部署 Webmail。
+主站 SMTP/IMAP 与边缘 SMTP 已更新到代码提交 `360b27ab9580`，未部署 Webmail。
 完成 TLS/AUTH、QQ 外发与公网回投、IMAP MIME/section 附件哈希和独立 DKIM 验签。
+手机补测修正多 section、异常 trace 与附件 BODYSTRUCTURE；旧 MIME sidecar 自动从
+原文重建，独立客户端在 993/143 上对旧、新邮件均识别并下载三个附件，哈希一致。
 验收同时确认了 Webmail 独立附件提取/索引及 DATA_END 验证结果应用的既有缺口；
 不能把这次 SMTP/IMAP 成功扩大为完整 Webmail 收件附件或完整入站 hard 策略验收。
 详情与成品指纹见 [发布验证](../reports/release-2026-10-18.md)。

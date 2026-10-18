@@ -234,7 +234,7 @@ Once connected, try:
 ## Known Limitations (Phase 2)
 
 1. **IDLE 推送** — 能进出 IDLE，但不会主动推送新邮件 EXISTS 通知（需后台轮询机制）
-2. **MIME FETCH 已实现** — BODYSTRUCTURE、BODY[]/HEADER/TEXT 与 MIME section；复杂合法 MIME 的兼容性仍由 fixture/fuzz 持续验证
+2. **MIME FETCH 已实现** — BODYSTRUCTURE、BODY[]/HEADER/TEXT 与多 MIME section；附件 disposition/文件名、Content-ID 及 RFC 2231 连续参数已补测。MIME sidecar 元数据版本 2，旧版按需从原始 MIME 原子重建。复杂 MIME（含 message/rfc822 嵌套结构）的兼容性仍需扩展，不能宣称完整 RFC 覆盖；见 [手机附件复盘](../../bugfixes/2026-10-18-imap-attachment-bodystructure.md)
 3. **INTERNALDATE** — 目前使用 mails.send_time；建议在 Date header 可用时优先使用
 4. **UID** — 直接使用 mail_id (Snowflake)；未来可改为每邮箱自增 UID
 5. **SEARCH** — 当前为已实现条件子集，不能把它等同于 Webmail 全库全文/语义检索

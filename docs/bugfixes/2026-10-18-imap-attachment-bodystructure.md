@@ -31,3 +31,8 @@ IMAP 直接从完整 MIME 提取 section，不依赖 Webmail 的独立附件文�
 boundary 的最小复刻在旧版单输入 2 秒超时，修复后立即完成，221 项断言通过。
 原始触发输入和最小复刻都通过修复后 sanitizer 单输入验证，最小种子纳入 MIME fuzz corpus。
 独立 IMAPClient 在修复前的生产 BODYSTRUCTURE 中识别到 0 个附件，期望为 3，作为客户端侧负验证。
+
+最终版本普通和 ASan+UBSan 构建均为 221 项通过，MIME fuzz 完成 130404 次运行；
+全量 CTest 34/34、真实 Webmail Chromium 7/7 通过。部署后独立 IMAPClient 在 993 TLS
+和 143 STARTTLS 上，对旧缓存邮件及新发邮件均发现三附件、多 section 下载并核对哈希
+通过。手机旧邮件可能保留客户端缓存，因此另发新邮件等待实机确认。
