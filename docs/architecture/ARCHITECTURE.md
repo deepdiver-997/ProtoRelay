@@ -1,5 +1,8 @@
 # ProtoRelay Architecture
 
+Updated: 2026-10-20. For the latest framework changes, commit boundaries and validation,
+see [backend decoupling](backend-decoupling.md).
+
 ## 1. Overview
 
 ProtoRelay is a C++17 multi-protocol mail server focused on reliable mail ingest, local persistence,
@@ -55,26 +58,34 @@ Current implementation status:
 | SessionBase   — async I/O, command buffering, lifecycle      |
 | FsmBase       — transition table, dispatch, virtual hooks    |
 | ServerBase    — config, metrics, intrusion, lifecycle        |
-| TcpServerBase — TCP/SSL acceptors, listener thread            |
+| TcpServerBase — transport-provider admission, TLS handoff    |
 | Connection    — IConnection, TcpConnection, SslConnection    |
-| ThreadPool    — ThreadPoolBase, IOThreadPool, BoostThreadPool|
+| net/          — executor/timer and server transport contracts |
+| ThreadPool    — Asio IO runtime, STD/BOOST worker backends    |
+| log/          — LogRecord/LogSink, selectable output backend |
 | db/storage/cache/http — generic interfaces and components    |
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
 | Platform                                                        |
-| Boost.Asio, OpenSSL, MySQL client, spdlog, nlohmann/json       |
+| Asio/OpenSSL adapters, MySQL/MariaDB, optional spdlog, JSON    |
 +--------------------------------------------------------------+
 ```
 
 ### 3.1 Framework vs Business
 
 `include/framework/` contains generic infrastructure plus transport/protocol component directories
-(`connection/`, `http/`). The lifecycle/FSM base classes do not know mail business types:
+(`connection/`, `net/`, `log/`, `http/`). Session/FSM infrastructure is independent of
+mail protocol handlers; ServerBase/config still reference application router/cache types:
 - `SessionBase<ConnectionType>` — manages one TCP/SSL connection lifecycle, async read/write, command buffering
 - `FsmBase<ConnectionType, State, Event>` — transition table + handler registry + dispatch loop
 - `ServerBase` — config, metrics, intrusion detection and lifecycle; requires injected pools/router
-- `TcpServerBase<TcpSession, SslSession>` — TCP/SSL acceptor loop, STARTTLS handoff
+- `TcpServerBase<TcpSession, SslSession>` — transport-provider admission, typed session factories and STARTTLS handoff
+
+`IConnection`, `IExecutor`/`ITimer` and `IServerTransport` define the backend boundary.
+The Asio adapter owns native sockets, acceptors, listener context/thread and TLS contexts.
+`TcpConnection`/`SslConnection` are ownership facades used by existing session factories.
+IOThreadPool remains the current production Asio runtime; a deployable native backend is not yet supplied.
 
 Business code in `include/mail_system/back/` inherits from these:
 - `SmtpsSession` / `ImapsSession` : public `SessionBase`
@@ -104,7 +115,7 @@ Key points:
 - Session logic is built around async callbacks and strict ownership rules.
 - Validation and protocol responses are generated with SMTP utility helpers.
 
-**Multi-listener architecture:** `TcpServerBase` manages vectors of TCP and SSL acceptors, each bound to a listener config that specifies per-port security policy. IP ban checks run at accept time (before session creation), reducing FSM complexity. Accepted sockets are bound to `IOThreadPool` io_contexts for load distribution.
+**Multi-listener architecture:** `TcpServerBase` obtains an `IServerTransport` from the injected runtime's provider. It applies admission checks and creates sessions using each listener's security policy. The Asio transport internally manages TCP/SSL acceptors on one listener context/thread; accepted sockets are distributed across IOThreadPool contexts. STARTTLS consumes the plain connection while preserving its serialized executor, tracing and listener policy.
 
 | Port | Type | STARTTLS | AUTH policy | SPF/DKIM/DMARC | Use case |
 |------|------|----------|-------------|----------------|----------|
@@ -251,8 +262,12 @@ virtual void async_rollback(ExecuteCallback);              // → bool
 
 Default behavior: callback fires before `async_xxx` returns (= synchronous).
 The MySQL compatibility engine retains synchronous defaults. The optional MariaDB Connector/C
-engine already implements nonblocking start/cont operations on its executor; this is not a future
-implementation. Select it explicitly with DB `achieve=mariadb` and install/build the connector.
+engine already implements nonblocking start/cont operations: IO-thread calls wait through Asio
+POSIX descriptors/timers, while worker calls use blocking `poll`. Connector/C owns socket I/O;
+the application waits for readiness and continues its state machine. Select it explicitly with DB
+`achieve=mariadb` and install/build the connector. Native readiness backends and Windows portability
+for this path are deferred. SQLite is not currently implemented, and the mail schema/queries use
+MySQL-specific SQL; a SQLite driver alone would not make the mail application portable.
 See [DB async design](../mail-system/architecture/database-async-design.md).
 
 **Callback types** (in `db_service.h`):
@@ -269,8 +284,13 @@ using ExecuteCallback = std::function<void(bool success)>;
 
 ## 4.5 Logging Subsystem
 
-Built on spdlog with `LOG_AT("module", level, ...)` and registered string modules.
+The framework owns `LogLevel`, `LogRecord` and `LogSink`, with `LOG_AT("module", level, ...)`
+and registered string modules. `PROTORELAY_LOG_BACKEND` selects SPDLOG (default), STANDARD or NONE;
+STANDARD/NONE do not require spdlog/fmt. Users may inject a sink or record callback, including with
+NONE. Explicit injection is retained across bootstrap initialization. Callback/flush exceptions
+are isolated; user callbacks may execute concurrently and must synchronize their own state.
 Application legacy macro aliases remain compatibility shims; framework modules do not use mail enums.
+See [logging interfaces and configuration](../build-deploy/logging-guide.md).
 
 **Log compression toolchain** (see [log-transform-toolchain.md](../build-deploy/log-transform-toolchain.md)):
 build-time transformation replaces `LOG_*` macros with `LOG_PURE(hash, args, ts)`,
@@ -288,7 +308,7 @@ Sink strategy:
 
 - Console sink for supervisor capture (journald/launchd stdout/stderr).
 - Rotating file sink for standalone or file-centric environments.
-- If both sinks are disabled by mistake, logger falls back to console sink.
+- Disabling both default sinks disables output; NONE also disables the default sink, while allowing user injection.
 
 Recommended production profile under systemd:
 
@@ -341,9 +361,10 @@ A companion FastAPI service (`register-service/`) provides invite-code-based acc
 
 ### 5.1 Thread Pools
 
-- **IO threads** (`IOThreadPool`): round-robin socket dispatch. Handle `async_read`/`async_write` callbacks. Should never block — heavy work must be delegated.
-- **Worker threads** (`BoostThreadPool`): CPU-intensive or blocking tasks (DB queries, file I/O, DNS resolution, MIME parsing). `PersistentQueue` and `OutboundServer` post work here.
-- **Listener thread**: dedicated thread for TCP/SSL acceptors.
+- **IO threads** (`IOThreadPool`, currently Asio): round-robin socket dispatch. Connections use serialized executors for I/O and timer callbacks. Should never block — heavy work must be delegated.
+- **Worker threads** (`WorkerThreadPool`): STD selects `StdThreadPool` by default; BOOST retains `BoostThreadPool`. They run CPU-intensive or blocking work. PersistentQueue and OutboundServer post work here.
+- **Listener thread**: the Asio transport owns the context/thread shared by a server's TCP/SSL acceptors.
+- **Ownership**: composition roots start and stop shared pools; individual servers do not stop injected runtimes. Standard Worker is not a replacement for an I/O runtime.
 
 ### 5.2 Paused Pipeline Gate (Async DB from IO Thread)
 
@@ -382,7 +403,7 @@ data, but the while-loop refuses to consume it.
 ### 5.4 PersistentQueue
 
 - **Lock-free queue**: `boost::lockfree::queue<capacity<16384>>` for multi-producer (SMTP sessions) single-consumer (worker thread).
-- **Worker thread**: dequeues tasks and submits DB work to `BoostThreadPool`.
+- **Worker thread**: dequeues tasks and submits DB work to the selected `WorkerThreadPool`.
 - **Async transaction chain**: `persist_mail_transactional_async` chains `begin → metadata → attachments → outbox → commit` via nested async callbacks. `shared_ptr<ScopedConnection>` keeps the DB connection alive across the chain.
 
 ## 6. Configuration and Startup
@@ -438,15 +459,19 @@ Local benchmark note (see `test/bench/bench-report.md` for full matrix):
 
 ## 7. Build-Time Feature Model
 
-Important CMake options:
+| CMake option | Values/default | Scope |
+|---|---|---|
+| `PROTORELAY_LOG_BACKEND` | SPDLOG (default), STANDARD, NONE | Default log adapter; STANDARD/NONE remove spdlog/fmt requirements |
+| `PROTORELAY_WORKER_BACKEND` | STD (default), BOOST | Business worker pool; does not select the I/O backend |
+| `PROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY` | OFF (default), ON | Standalone core/contract tests without Boost, OpenSSL, spdlog/fmt, c-ares or MySQL |
+| `ENABLE_HDFS_WEB_STORAGE` / `ENABLE_S3_STORAGE` | ON by default | Optional remote storage providers |
+| `BUILD_TESTS` | ON by default | Test and benchmark targets |
 
-- `ENABLE_HDFS_WEB_STORAGE` (default ON)
-
-Effects:
-
-- Controls whether WebHDFS provider is compiled.
-- Controls whether CURL is required and linked.
-- Exposed in version/help feature metadata (`+hdfs-web` or `-hdfs-web`).
+The production network backend, SMTP client and MariaDB I/O-thread readiness waits still use
+Asio. Full mail targets still share source/dependency lists; runtime DB disablement does not remove
+client-library build dependencies. Core-contract mode requires C++17, Threads and nlohmann_json,
+and does not produce a deployable Asio-free mail service. Build commands and validation are in
+[backend decoupling](backend-decoupling.md).
 
 ## 8. Deployment Topology
 
@@ -504,6 +529,7 @@ Implemented now:
 - POP3 retrieval and shared DB leases; Webmail SPA/API and direct durable submission.
 - Service-manager-friendly operation.
 - Transactional outbox creation with local lease-first hot dispatch.
+- Backend-independent server connection/listening/scheduling interfaces, optional spdlog, and standard-library Workers.
 
 Expected extension directions:
 
@@ -518,6 +544,7 @@ Expected extension directions:
 ## 11. Related Docs
 
 - `README.md` / `README_zh.md`
+- [Backend decoupling](backend-decoupling.md) — current interfaces, retained Asio paths and validation (2026-10-20)
 - `test/bench/bench-report.md`
 - `docs/framework-refactor.md` — framework extraction history (2026-07)
 - `docs/sharding-refactor.md`

@@ -4,6 +4,11 @@
 > [整体架构](../architecture/ARCHITECTURE.md) 和 [Webmail API](../mail-system/architecture/webmail-api.md)
 > 为准；旧类名、示例路径、缓存策略和阶段测试数应按当时背景阅读。
 
+> **2026-10-20 后续重构**：日志、标准 Worker、executor/timer、监听及 TCP/TLS 已建立
+> 后端边界，Asio 生产实现保留。本文下方“TcpServerBase 持有 acceptor/context”描述的是
+> 早期结构；当前职责、提交记录、兼容性和验证入口见
+> [日志、Worker 与网络后端解耦](backend-decoupling.md)。
+
 ## Summary
 
 Extracted a reusable server framework from the mail-system codebase. The framework is transport-agnostic (no TCP/SSL dependency in `ServerBase`), protocol-agnostic (no SMTP/IMAP knowledge in `SessionBase` or `FsmBase`), and lives in `include/framework/`.

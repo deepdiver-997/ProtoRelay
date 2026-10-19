@@ -27,6 +27,7 @@ docs/
 │   ├── ARCHITECTURE.md                # 整体架构
 │   ├── architecture-evolution.md      # 架构演进历史
 │   ├── framework-refactor.md          # 框架重构记录
+│   ├── backend-decoupling.md          # 日志/Worker/网络后端边界与构建验证
 │   ├── sharding-refactor.md           # 分片重构
 │   └── storage-abstraction.md         # 存储抽象
 ├── build-deploy/                      # 构建、部署、运维
@@ -49,7 +50,7 @@ docs/
     └── dev-summary.md                 # 开发总结
 ```
 
-## 当前实现入口（2026-10-18）
+## 当前实现入口（2026-10-20）
 
 SMTP/IMAP/POP3、共享 SMTP 内核、进程内提交与 React Webmail 均已落地。
 API/会话以邮件业务架构文档为准；前端运行见 [webmail/README.md](../webmail/README.md)，
@@ -57,6 +58,10 @@ API/会话以邮件业务架构文档为准；前端运行见 [webmail/README.md
 [2026-10-18 发布验证](reports/release-2026-10-18.md)。通用 DB/存储/cache/HTTP 位于
 `framework/`，应用旧路径保留兼容 shim。带日期的报告、复盘及阶段记录反映当时状态，
 历史测试数、旧类名和故障示例不代表当前能力。
+
+本次框架重构的提交、接口、线程拓扑和依赖边界见
+[日志、Worker 与网络后端解耦](architecture/backend-decoupling.md)。现有 Asio 后端继续可用，
+日志与 Worker 可选择标准库实现；独立契约构建不代表完整邮件服务已经可以去掉 Asio。
 
 ## 阅读指引
 
