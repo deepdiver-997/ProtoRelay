@@ -20,9 +20,13 @@ H2Session<ConnectionType>::H2Session(pr::ServerBase* server,
 
 template <typename ConnectionType>
 void H2Session<ConnectionType>::start(std::shared_ptr<H2Session> self) {
-    self->set_current_state(static_cast<int>(ConnState::PREFACE));
-    self->rearm(self->config_read_timeout());
-    self->do_async_read();
+    pr::SessionBase<ConnectionType>::do_handshake(self, pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::error_code& error) {
+            if (error) return;
+            session->set_current_state(static_cast<int>(ConnState::PREFACE));
+            session->rearm(session->config_read_timeout());
+            session->do_async_read();
+        });
 }
 
 // ================================================================

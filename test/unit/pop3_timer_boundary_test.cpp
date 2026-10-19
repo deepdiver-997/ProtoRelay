@@ -77,6 +77,76 @@ void test_sweeper_lifetime() {
         assert(timer->cancels == 1 && worker->tasks.empty());
     }
 }
+class GatedConnection final : public mail_system::MockConnection {
+public:
+    using MockConnection::MockConnection;
+    void async_handshake(pr::net::HandshakeRole role, HandshakeHandler handler) override {
+        assert(role == pr::net::HandshakeRole::server);
+        completion = std::move(handler);
+    }
+    void async_write(pr::net::ConstBuffer buffer, WriteHandler handler) override {
+        assert(!writing && "overlapping asynchronous writes on a POP3 connection");
+        writing = true; ++writes;
+        MockConnection::async_write(buffer, [this, handler = std::move(handler)](const std::error_code& error, size_t size) {
+            writing = false; handler(error, size);
+        });
+    }
+    bool writing = false;
+    int writes = 0;
+    HandshakeHandler completion;
+};
+void test_handshake_before_banner() {
+    using namespace mail_system;
+    for (bool succeeds : {true, false}) {
+        auto executor = std::make_shared<ManualExecutor>();
+        auto worker = std::make_shared<QueuedPool>();
+        auto fsm = std::make_shared<TraditionalPop3Fsm<GatedConnection>>(worker, worker, make_router());
+        auto connection = std::make_unique<GatedConnection>(executor);
+        auto* wire = connection.get(); wire->set_deferred_read(true);
+        auto session = std::make_shared<Pop3Session<GatedConnection>>(nullptr, std::move(connection), fsm);
+        Pop3Session<GatedConnection>::start(session);
+        executor->drain();
+        assert(wire->completion && wire->written().empty() && !wire->has_pending_read());
+        executor->post([&] {
+            auto complete = std::move(wire->completion);
+            complete(succeeds ? std::error_code{} : std::make_error_code(std::errc::protocol_error));
+        });
+        executor->drain();
+        if (succeeds) assert(wire->written().find("+OK") == 0 && wire->has_pending_read());
+        else assert(session->is_closed() && wire->written().empty());
+        session->set_trace_clean_close(); session->close(); executor->drain();
+        session.reset(); executor->drain();
+    }
+}
+void test_multiline_response_is_one_write() {
+    using namespace mail_system;
+    auto executor = std::make_shared<ManualExecutor>();
+    auto worker = std::make_shared<QueuedPool>();
+    auto fsm = std::make_shared<TraditionalPop3Fsm<GatedConnection>>(worker, worker, make_router());
+    auto connection = std::make_unique<GatedConnection>(executor);
+    auto* wire = connection.get(); wire->set_deferred_read(true); wire->set_deferred_write(true);
+    auto session = std::make_shared<Pop3Session<GatedConnection>>(nullptr, std::move(connection), fsm);
+    session->set_current_state(static_cast<int>(Pop3State::TRANSACTION));
+    auto* context = static_cast<Pop3Context*>(session->get_context());
+    for (int i = 1; i <= 2; ++i) {
+        Pop3Message message; message.mail_id = i; message.size = 100;
+        context->messages.push_back(message);
+    }
+    session->do_async_read(); executor->drain();
+    int commands = 0;
+    for (const auto* command : {"CAPA\r\n", "LIST\r\n", "UIDL\r\n"}) {
+        assert(wire->has_pending_read());
+        wire->trigger_deferred_read(command); executor->drain();
+        assert(wire->writing && wire->writes == ++commands && !wire->has_pending_read());
+        const auto response = wire->written();
+        assert(response.size() >= 3 && response.substr(response.size() - 3) == ".\r\n");
+        wire->trigger_deferred_write(); executor->drain();
+        assert(!wire->writing && wire->has_pending_read());
+        wire->clear_written();
+    }
+    session->set_trace_clean_close(); session->close(); executor->drain();
+    session.reset(); executor->drain();
+}
 void test_heartbeat_affinity() {
     using namespace mail_system;
     auto executor = std::make_shared<ManualExecutor>();
@@ -149,5 +219,7 @@ void test_heartbeat_affinity() {
 int main() {
     pr::Logger::get_instance().set_handler({});
     test_sweeper_lifetime();
+    test_handshake_before_banner();
+    test_multiline_response_is_one_write();
     test_heartbeat_affinity();
 }

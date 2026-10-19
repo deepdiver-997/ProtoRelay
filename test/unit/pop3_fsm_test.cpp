@@ -139,7 +139,7 @@ struct FsmTestFixture {
         auto session = std::make_shared<Pop3Session<MockConnection>>(
             server.get(), std::move(conn_u), fsm);
         // 发 +OK banner → AUTHORIZATION
-        fsm->process_event(session, Pop3Event::CONNECT);
+        Pop3Session<MockConnection>::start(session);
         conn_ptr->pump_executor();   // greeting 写经 exec_ctx_ 串行化(09-06),需排空才可见
         return {conn_ptr, session};
     }

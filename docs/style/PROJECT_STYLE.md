@@ -132,7 +132,12 @@ DKIM/SPF/DMARC 的每一次改动都走一遍完整验收，不要用「代码�
 不查找 Asio/Boost 或 OpenSSL；生产出站/DB 等尚未迁移的部分仍可依赖 Asio。
 服务器维护任务通过 `IExecutorProvider::next_executor()` 取得执行器，工作线程池不承担该职责。
 POP3 清扫/心跳的专项回归见 `test/unit/pop3_timer_boundary_test.cpp`（2026-10-19）：
-覆盖 worker/DB 回调后的定时器重排、关闭与到期成功回调竞态、排队初始化及析构取消。
+覆盖 worker/DB 回调后的定时器重排、关闭与到期成功回调竞态、排队初始化及析构取消，
+以及 POP3 在握手完成前不得发 banner、握手失败必须关闭且不进入命令读取。
+POP3 CAPA/LIST/UIDL/RETR 的完整多行响应只发起一次写入；逐行并发写会在 TLS 下
+重叠异步操作，并让多个完成回调重复恢复读。延迟写测试在第二次并发写时直接断言。
+HTTP/HTTP2 入口同样先完成连接握手再进入读取；HTTP 的握手成功/失败门控见
+`test/unit/http_session_read_test.cpp`。
 
 ### 11.2 两条都成立的正规异步续跑路径（别误判违规）
 

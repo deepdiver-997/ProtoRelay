@@ -58,10 +58,14 @@ HttpSession<ConnectionType>::HttpSession(pr::ServerBase* server,
 
 template <typename ConnectionType>
 void HttpSession<ConnectionType>::start(std::shared_ptr<HttpSession> self) {
-    self->set_current_state(static_cast<int>(HttpState::WAIT_REQUEST_LINE));
-    self->set_next_event(static_cast<int>(HttpEvent::REQUEST_LINE));
-    self->rearm(kRequestLineTimeout);   // 等待请求行
-    self->do_async_read();
+    pr::SessionBase<ConnectionType>::do_handshake(self, pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::error_code& error) {
+            if (error) return;
+            session->set_current_state(static_cast<int>(HttpState::WAIT_REQUEST_LINE));
+            session->set_next_event(static_cast<int>(HttpEvent::REQUEST_LINE));
+            session->rearm(kRequestLineTimeout);
+            session->do_async_read();
+        });
 }
 
 // ================================================================

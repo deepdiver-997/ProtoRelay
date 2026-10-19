@@ -15,6 +15,35 @@
 using Http = pr::http::HttpSession<mail_system::MockConnection>;
 using Fsm = pr::http::HttpFsm<mail_system::MockConnection>;
 
+// TLS transport initialization must finish before any HTTP read is initiated.
+class GatedHttpConnection final : public mail_system::MockConnection {
+public:
+    void async_handshake(pr::net::HandshakeRole role, HandshakeHandler handler) override {
+        assert(role == pr::net::HandshakeRole::server);
+        completion = std::move(handler);
+    }
+    HandshakeHandler completion;
+};
+static void handshake_gates_http_reads() {
+    using Session = pr::http::HttpSession<GatedHttpConnection>;
+    using StateMachine = pr::http::HttpFsm<GatedHttpConnection>;
+    for (bool succeeds : {true, false}) {
+        auto connection = std::make_unique<GatedHttpConnection>();
+        auto* wire = connection.get(); wire->set_deferred_read(true);
+        auto session = std::make_shared<Session>(nullptr, std::move(connection), std::make_shared<StateMachine>());
+        Session::start(session); wire->pump_executor();
+        assert(wire->completion && !wire->has_pending_read() && wire->written().empty());
+        wire->executor()->post([&] {
+            auto complete = std::move(wire->completion);
+            complete(succeeds ? std::error_code{} : std::make_error_code(std::errc::protocol_error));
+        });
+        wire->pump_executor();
+        if (succeeds) assert(wire->has_pending_read());
+        else assert(session->is_closed() && !wire->has_pending_read());
+        mail_system::finish_session(session);
+    }
+}
+
 static void fragmented_request(const std::vector<std::string>& chunks) {
     auto connection = std::make_unique<mail_system::MockConnection>();
     auto* conn = connection.get();
@@ -94,6 +123,7 @@ static void bounded_download(bool head, bool fail = false) {
 }
 
 int main() {
+    handshake_gates_http_reads();
     bounded_download(false); bounded_download(true); bounded_download(false, true);
     fragmented_request({"PO", "ST /api/echo HTTP/1.1\r\nHost: loc", "al\r\nConnection: close\r\nContent-Length: 7\r\n\r\n", "abc", "defg"});
     fragmented_request({"POST /api/echo HTTP/1.1\r\nHost: local\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n",

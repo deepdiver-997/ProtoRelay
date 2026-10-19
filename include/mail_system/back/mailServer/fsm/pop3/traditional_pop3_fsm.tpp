@@ -489,11 +489,8 @@ template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_capa(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
     if (!session) return;
-    send_line(session, "+OK Capability list follows");
-    send_line(session, "USER");
-    send_line(session, "UIDL");
-    send_line(session, "IMPLEMENTATION ProtoRelay-POP3");
-    send_line(session, ".");
+    send_line(session, "+OK Capability list follows\r\nUSER\r\nUIDL\r\n"
+                       "IMPLEMENTATION ProtoRelay-POP3\r\n.\r\n");
 }
 
 template <typename ConnectionType>
@@ -714,14 +711,14 @@ void TraditionalPop3Fsm<ConnectionType>::handle_list(
         if (ctx->deleted.count(m.mail_id)) continue;
         total += m.size; ++count;
     }
-    send_line(session, "+OK " + std::to_string(count) + " messages (" +
-                       std::to_string(total) + " octets)");
+    std::string response = "+OK " + std::to_string(count) + " messages (" +
+                           std::to_string(total) + " octets)\r\n";
     size_t n = 0;
     for (auto& m : ctx->messages) {
         if (ctx->deleted.count(m.mail_id)) continue;
-        send_line(session, std::to_string(++n) + " " + std::to_string(m.size));
+        response += std::to_string(++n) + " " + std::to_string(m.size) + "\r\n";
     }
-    send_line(session, ".");
+    send_line(session, response + ".\r\n");
 }
 
 template <typename ConnectionType>
@@ -748,13 +745,13 @@ void TraditionalPop3Fsm<ConnectionType>::handle_uidl(
         send_line(session, "-ERR no such message");
         return;
     }
-    send_line(session, "+OK Unique-ID listing follows");
+    std::string response = "+OK Unique-ID listing follows\r\n";
     size_t n = 0;
     for (auto& m : ctx->messages) {
         if (ctx->deleted.count(m.mail_id)) continue;
-        send_line(session, std::to_string(++n) + " " + std::to_string(m.mail_id));
+        response += std::to_string(++n) + " " + std::to_string(m.mail_id) + "\r\n";
     }
-    send_line(session, ".");
+    send_line(session, response + ".\r\n");
 }
 
 template <typename ConnectionType>
@@ -825,9 +822,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
             start = eol + 1;
         }
         if (!self || self->is_closed()) return;
-        send_line(self, "+OK " + std::to_string(target.size) + " octets");
-        self->do_async_write(out);
-        send_line(self, ".");
+        send_line(self, "+OK " + std::to_string(target.size) + " octets\r\n" + out + ".\r\n");
         if (srv) {
             if (auto m = srv->get_metrics().lock()) {
                 m->inc_counter("protorelay_pop3_retr_total", {}, 1);

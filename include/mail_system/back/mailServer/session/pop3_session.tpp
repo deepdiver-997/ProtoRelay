@@ -27,9 +27,14 @@ template <typename ConnectionType>
 void Pop3Session<ConnectionType>::start(std::shared_ptr<Pop3Session> self) {
     if (!self) return;
     self->rearm(self->config_read_timeout());   // 挂接看门狗：闲置/对端断电 over read_timeout 回收
-    // POP3 启动即发 +OK banner（INIT → AUTHORIZATION 自动转移）
-    auto fsm = std::static_pointer_cast<TraditionalPop3Fsm<ConnectionType>>(self->fsm_);
-    fsm->process_event(self, Pop3Event::CONNECT);
+    // TLS listeners must finish their handshake before sending the banner.
+    // Plain transports provide the same asynchronous no-op handshake contract.
+    pr::SessionBase<ConnectionType>::do_handshake(self, pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::error_code& error) {
+            if (error) return;
+            auto* fsm = static_cast<TraditionalPop3Fsm<ConnectionType>*>(session->get_fsm());
+            fsm->process_event(session, Pop3Event::CONNECT);
+        });
 }
 
 template <typename ConnectionType>
