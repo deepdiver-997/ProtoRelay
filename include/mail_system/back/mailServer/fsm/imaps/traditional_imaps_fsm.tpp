@@ -515,16 +515,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
                 LOG_IMAP_ERROR("Error sending LOGOUT reply: {}", ec.message());
                 return;
             }
-            auto io_ctx = s->get_server()->get_io_context();
-            if (io_ctx) {
-                auto timer = std::make_shared<boost::asio::steady_timer>(*io_ctx);
-                timer->expires_after(std::chrono::milliseconds(100));
-                timer->async_wait([s = std::move(s), timer](const std::error_code& ec) mutable {
-                    if (!ec) s->close();
-                });
-            } else {
-                s->close();  // no io_context (test mock) → close immediately
-            }
+            auto timer = s->get_connection().executor()->make_timer();
+            timer->expires_after(std::chrono::milliseconds(100));
+            timer->async_wait([s = std::move(s), timer](const std::error_code& error) mutable {
+                if (!error) s->close();
+            });
         }
     );
 }
@@ -1707,8 +1702,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
             }
             auto server = static_cast<ImapsServer*>(self->get_server());
             auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
-            auto tcp_sock = self->release_connection()->release_socket();
-            server->handoff_starttls_socket(std::move(tcp_sock), std::move(trace));
+            server->handoff_starttls(self->release_connection(), std::move(trace));
         }
     );
 }

@@ -9,7 +9,7 @@
 // 非装配职责）。
 // ─────────────────────────────────────────────────────────────────
 #include "framework/server_base.h"
-#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/net/server_transport.h"
 #include "framework/log/log_macros.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include <iostream>
@@ -91,9 +91,9 @@ void ServerBase::start_metrics_server() {
     auto cfg = std::atomic_load(&m_config);
     if (!cfg->metrics_enabled || m_metricsServer) return;
     try {
-        auto& io_ctx = std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context();
+        auto provider = std::dynamic_pointer_cast<net::IServerTransportProvider>(m_ioThreadPool);
         m_metricsServer = std::make_shared<MetricsServer>(
-            io_ctx,
+            std::move(provider),
             cfg->metrics_port, cfg->metrics_bind_address,
             [this]() -> std::string {
                 if (m_configFilePath.empty()) return "config file path not set";

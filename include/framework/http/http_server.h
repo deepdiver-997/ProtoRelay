@@ -24,7 +24,7 @@ public:
                std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
                std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
                std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
-    ~HttpServer() override = default;
+    ~HttpServer() override { stop(); }
 
     const std::string& doc_root() const { return doc_root_; }
 

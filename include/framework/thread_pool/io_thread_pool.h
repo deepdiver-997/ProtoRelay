@@ -3,6 +3,7 @@
 
 #include "thread_pool_base.h"
 #include "framework/net/executor.h"
+#include "framework/net/server_transport.h"
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
@@ -26,7 +27,7 @@ namespace pr {
  * 这个类使用Boost.Asio的io_context来实现IO线程池功能，
  * 适用于处理IO密集型任务，如网络通信、文件操作等。
  */
-class IOThreadPool : public ThreadPoolBase, public net::IExecutorProvider {
+class IOThreadPool : public ThreadPoolBase, public net::IExecutorProvider, public net::IServerTransportProvider {
 public:
     /**
      * @brief 构造函数
@@ -69,6 +70,7 @@ public:
     bool is_running() const override;
 
     std::shared_ptr<net::IExecutor> next_executor() override;
+    std::unique_ptr<net::IServerTransport> make_server_transport(const net::ServerTransportConfig& config) override;
 
     /**
      * @brief 获取io_context

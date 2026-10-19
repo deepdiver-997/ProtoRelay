@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.10)
 project(ProtoRelay LANGUAGES CXX)
 
+option(PROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY "Build framework contracts without any Asio backend or service dependencies" OFF)
+if(PROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY)
+    enable_testing()
+    add_subdirectory(test/backend_contract)
+    return()
+endif()
+
 set(PROTORELAY_VERSION "0.1.0-dev" CACHE STRING "ProtoRelay semantic version")
 
 # Prefer classic FindBoost module behavior to avoid Homebrew BoostConfig
@@ -317,6 +324,19 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # ===== 公共源文件 =====
+set(ASIO_NETWORK_SRCS src/framework/net/asio_connection.cpp src/framework/net/asio_server_transport.cpp)
+add_library(protorelay_asio STATIC ${ASIO_NETWORK_SRCS})
+target_include_directories(protorelay_asio PUBLIC "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(protorelay_asio SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
+target_link_libraries(protorelay_asio PRIVATE protorelay_logging Threads::Threads)
+if(TARGET OpenSSL::SSL)
+    target_link_libraries(protorelay_asio PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+elseif(OPENSSL_LIBRARIES)
+    target_include_directories(protorelay_asio SYSTEM PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(protorelay_asio PUBLIC ${OPENSSL_LIBRARIES})
+endif()
+list(APPEND LINK_LIBRARIES protorelay_asio)
+
 set(COMMON_SRCS
     src/mail_system/back/cli/help_text.cpp
     src/mail_system/back/db/distributed_mysql_pool.cpp
@@ -361,7 +381,7 @@ set(COMMON_SRCS
 # Cross-deployment transfers a single *_obj.dir tree. Keep logger objects in
 # that tree rather than requiring a separately transferred static archive.
 if(BUILD_OBJECT_ONLY)
-    list(APPEND COMMON_SRCS ${LOGGING_SRCS})
+    list(APPEND COMMON_SRCS ${LOGGING_SRCS} ${ASIO_NETWORK_SRCS})
 endif()
 
 if(ENABLE_HDFS_WEB_STORAGE)
@@ -751,14 +771,27 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(connection_interface_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
     add_test(NAME connection_interface_test COMMAND connection_interface_test)
 
+    # Full server/metrics interface exercised without linking any Asio backend.
+    add_executable(server_transport_test src/framework/server_base.cpp test/unit/server_transport_test.cpp)
+    target_include_directories(server_transport_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_link_libraries(server_transport_test PRIVATE protorelay_logging nlohmann_json::nlohmann_json)
+    add_test(NAME server_transport_test COMMAND server_transport_test)
+    set_tests_properties(server_transport_test PROPERTIES TIMEOUT 20)
+
     add_executable(asio_executor_test test/unit/asio_executor_test.cpp)
     target_include_directories(asio_executor_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
-    target_link_libraries(asio_executor_test PRIVATE Threads::Threads)
+    target_link_libraries(asio_executor_test PRIVATE Threads::Threads protorelay_asio)
     add_test(NAME asio_executor_test COMMAND asio_executor_test)
     add_executable(asio_error_test test/unit/asio_error_test.cpp)
     target_include_directories(asio_error_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(asio_error_test PRIVATE Threads::Threads)
     add_test(NAME asio_error_test COMMAND asio_error_test)
+    add_executable(asio_server_transport_test
+        src/framework/thread_pool/io_thread_pool.cpp src/framework/thread_pool/io_context_registry.cpp
+        test/unit/asio_server_transport_test.cpp)
+    target_link_libraries(asio_server_transport_test PRIVATE protorelay_asio protorelay_logging Threads::Threads)
+    add_test(NAME asio_server_transport_test COMMAND asio_server_transport_test)
+    set_tests_properties(asio_server_transport_test PROPERTIES TIMEOUT 20)
     set_tests_properties(logger_test std_thread_pool_test connection_interface_test asio_executor_test PROPERTIES TIMEOUT 20)
 
     # MariaDB 非阻塞 async 回归（阶段 2）：连接池 available 在批量 async 查询后回基线
@@ -926,8 +959,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         logger_test
         std_thread_pool_test
         connection_interface_test
+        server_transport_test
         asio_executor_test
         asio_error_test
+        asio_server_transport_test
         pop3_timer_boundary_test
         smtps_fsm_test
         smtps_fsm_concurrency_test
@@ -970,7 +1005,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
     if(ENABLE_ASAN)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
-            logger_test std_thread_pool_test connection_interface_test asio_executor_test asio_error_test pop3_timer_boundary_test
+            logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
@@ -987,6 +1022,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         target_compile_options(protorelay_logging PRIVATE
             -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
         target_link_options(protorelay_logging PUBLIC -fsanitize=address,undefined)
+        target_compile_options(protorelay_asio PRIVATE
+            -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
+        target_link_options(protorelay_asio PUBLIC -fsanitize=address,undefined)
     endif()
 
 endif()

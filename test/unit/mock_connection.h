@@ -257,7 +257,6 @@ public:
     }
     uint16_t get_local_port() const override { return 0; }
     std::string get_remote_ip() const override { return "127.0.0.1"; }
-    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() { return nullptr; }
 
 private:
     // deferred read：保存缓冲视图 + handler（缓冲指向 session 的 read_buffer_）

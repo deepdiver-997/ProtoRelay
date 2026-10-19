@@ -17,7 +17,6 @@
 #include <cstdio>
 #include <string>
 
-#include <boost/asio.hpp>
 
 #include "framework/metrics_server.h"
 
@@ -58,8 +57,7 @@ int main() {
     // 1. counter 增量：N 次 inc delta=1 ⇒ 终值 = N（不是三角形数）
     //    这是 2026-08-27 修复的 bug 的不变量回归测试。
     {
-        boost::asio::io_context io;
-        pr::MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(nullptr, 0, "127.0.0.1");
         // 不调 start()：本测试只验内部 map 渲染（scrape_text），不启 HTTP。
         for (int i = 0; i < 100; ++i) {
             m.inc_counter("mails_accepted_total", {}, 1);
@@ -70,8 +68,7 @@ int main() {
 
     // 1b. counter 多 label：按 label 维度独立累加
     {
-        boost::asio::io_context io;
-        pr::MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(nullptr, 0, "127.0.0.1");
         m.inc_counter("outbound_attempts_total", {{"domain", "a.local"}}, 1);
         m.inc_counter("outbound_attempts_total", {{"domain", "a.local"}}, 1);
         m.inc_counter("outbound_attempts_total", {{"domain", "b.local"}}, 1);
@@ -84,8 +81,7 @@ int main() {
 
     // 2. gauge：后写覆盖前写（瞬时值语义）
     {
-        boost::asio::io_context io;
-        pr::MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(nullptr, 0, "127.0.0.1");
         m.set_gauge("active_connections", {}, 1);
         m.set_gauge("active_connections", {}, 2);
         m.set_gauge("active_connections", {}, 5);
@@ -95,8 +91,7 @@ int main() {
 
     // 3. histogram：sum 累加，count 累加 1（输出 _sum / _count 两行）
     {
-        boost::asio::io_context io;
-        pr::MetricsServer m(io, 0, "127.0.0.1");
+        pr::MetricsServer m(nullptr, 0, "127.0.0.1");
         m.observe("request_latency_ms", {}, 2.0);
         m.observe("request_latency_ms", {}, 3.0);
         m.observe("request_latency_ms", {}, 5.0);

@@ -67,7 +67,7 @@ static constexpr size_t kSmallFileThreshold = 64 * 1024;
     // 与 SmtpsSession::start 同型：接收入口，设初态 + 首次读
     static void start(std::shared_ptr<HttpSession> self);
     // pr::TcpServerBase 的 TLS 交接点需要该静态入口（HTTP 无 STARTTLS，永不触发，
-    // 仅为通过 handoff_starttls_socket 的编译检查而存在）。
+    // 仅为通过 handoff_starttls 的编译检查而存在）。
     static void start_after_starttls(std::shared_ptr<HttpSession> self) { start(std::move(self)); }
 
     // ── pr::SessionBase 覆写 ────────────────────────────────────────

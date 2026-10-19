@@ -1,7 +1,11 @@
 #ifndef PR_FRAMEWORK_METRICS_SERVER_H
 #define PR_FRAMEWORK_METRICS_SERVER_H
 
-#include <boost/asio.hpp>
+#include "framework/net/server_transport.h"
+#include <array>
+#include <algorithm>
+#include <mutex>
+#include <stdexcept>
 #include <atomic>
 #include <functional>
 #include <map>
@@ -19,21 +23,20 @@ namespace pr {
 //   ServerBase 持有 shared_ptr<MetricsServer>
 //   各组件持有 weak_ptr<MetricsServer>，析构时自动失效
 //   组件在事件发生时 push: if (auto m = metrics.lock()) m->inc("x", ...);
-class MetricsServer {
+class MetricsServer : public std::enable_shared_from_this<MetricsServer> {
 public:
     using LabelMap = std::map<std::string, std::string>;
 
     using ReloadHandler    = std::function<std::string()>;
     using RefreshProvider   = std::function<void()>;  // render 前刷新慢变化指标
 
-    MetricsServer(boost::asio::io_context& io_ctx,
+    MetricsServer(std::shared_ptr<net::IServerTransportProvider> provider,
                   uint16_t port, const std::string& bind_address,
                   ReloadHandler reload_handler = nullptr,
                   RefreshProvider refresh = nullptr)
-        : io_ctx_(io_ctx), acceptor_(io_ctx_), port_(port)
-        , bound_port_(0)
-        , bind_address_(bind_address), reload_handler_(std::move(reload_handler))
-        , refresh_provider_(std::move(refresh)), running_(false) {}
+        : provider_(std::move(provider)), port_(port), bound_port_(0),
+          bind_address_(bind_address), reload_handler_(std::move(reload_handler)),
+          refresh_provider_(std::move(refresh)), running_(false) {}
 
     ~MetricsServer() { stop(); }
 
@@ -77,22 +80,38 @@ public:
     std::string scrape_text() { return build_metrics(); }
 
     void start() {
-        if (running_.exchange(true)) return;
-        boost::asio::ip::tcp::endpoint ep(
-            boost::asio::ip::make_address(bind_address_), port_);
-        acceptor_.open(ep.protocol());
-        acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-        acceptor_.bind(ep);
-        // bind 后读 OS 实际分配的端口（port=0 时才有意义；非 0 时 = port_）
-        bound_port_ = acceptor_.local_endpoint().port();
-        acceptor_.listen();
-        do_accept();
+        if (running_.load()) return;
+        if (!provider_) throw std::invalid_argument("metrics HTTP requires a server transport provider");
+        auto weak = weak_from_this();
+        if (weak.expired()) throw std::logic_error("running metrics HTTP requires shared ownership");
+        net::ServerTransportConfig config;
+        config.address = bind_address_;
+        config.listeners.emplace_back(ListenerType::TCP, port_);
+        transport_ = provider_->make_server_transport(config);
+        if (!transport_ || transport_->listeners().size() != 1)
+            throw std::runtime_error("metrics backend did not create a listener");
+        bound_port_ = transport_->listeners().front().port;
+        running_.store(true);
+        try {
+            transport_->start([weak](std::unique_ptr<IConnection> connection, const ListenerConfig&) {
+                if (auto self = weak.lock()) self->handle_request(std::move(connection));
+            });
+        } catch (...) { running_.store(false); throw; }
     }
 
     void stop() {
-        if (!running_.exchange(false)) return;
-        boost::system::error_code ec;
-        acceptor_.close(ec);
+        running_.store(false);
+        if (transport_) transport_->stop();
+        // Wait for any active render/reload callback before the server which
+        // supplied those callbacks can destroy its state.
+        std::lock_guard<std::mutex> requests(requests_mutex_);
+        std::vector<std::weak_ptr<IConnection>> connections;
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            connections.swap(connections_);
+        }
+        for (auto& weak : connections) if (auto connection = weak.lock())
+            connection->executor()->post([connection] { connection->close(); });
     }
 
 private:
@@ -185,74 +204,87 @@ private:
 
     // ── HTTP ────────────────────────────────────────────────────
 
-    void do_accept() {
-        auto socket = std::make_shared<boost::asio::ip::tcp::socket>(io_ctx_);
-        acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
-            if (!ec) handle_request(socket);
-            if (running_.load()) do_accept();
+    void handle_request(std::shared_ptr<IConnection> connection) {
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            connections_.erase(std::remove_if(connections_.begin(), connections_.end(),
+                [](const auto& weak) { return weak.expired(); }), connections_.end());
+            connections_.push_back(connection);
+        }
+        auto weak = weak_from_this();
+        connection->executor()->post([weak, connection] {
+            if (auto self = weak.lock(); self && self->running_.load())
+                self->read_headers(connection, std::make_shared<std::string>());
+            else connection->close();
         });
     }
-
-    void handle_request(std::shared_ptr<boost::asio::ip::tcp::socket> socket) {
-        auto buf = std::make_shared<boost::asio::streambuf>();
-        boost::asio::async_read_until(*socket, *buf, "\r\n\r\n",
-            [this, socket, buf](const boost::system::error_code& ec, std::size_t) {
-                if (ec) return;
-                std::string request;
-                std::istream is(buf.get());
-                std::getline(is, request);
-
-                std::string method, path;
-                size_t s = request.find(' '), e = request.find(' ', s + 1);
-                if (s != std::string::npos && e != std::string::npos) {
-                    method = request.substr(0, s);
-                    path   = request.substr(s + 1, e - s - 1);
-                }
-
-                std::string status, content_type, body;
-                if (path == "/metrics" || path == "/") {
-                    status = "200 OK";
-                    content_type = "text/plain; version=0.0.4";
-                    body = build_metrics();
-                } else if (path == "/status") {
-                    status = "200 OK";
-                    content_type = "application/json";
-                    body = build_status();
-                } else if (method == "POST" && path == "/reload" && reload_handler_) {
-                    std::string result = reload_handler_();
-                    status = (result.empty() || result == "OK") ? "200 OK" : "500 Internal Server Error";
-                    content_type = "text/plain";
-                    body = status == "200 OK" ? "OK" : result;
-                } else if (path == "/health" || path == "/health/live") {
-                    status = "200 OK"; content_type = "text/plain"; body = "OK";
-                } else if (path == "/health/ready") {
-                    body = build_metrics();
-                    status = body.empty() ? "503 Service Unavailable" : "200 OK";
-                    content_type = "text/plain";
-                } else {
-                    status = "404 Not Found"; content_type = "text/plain"; body = "Not Found";
-                }
-
-                auto resp = std::make_shared<std::string>();
-                resp->reserve(256 + body.size());
-                resp->append("HTTP/1.1 ").append(status).append("\r\n");
-                resp->append("Content-Type: ").append(content_type).append("\r\n");
-                resp->append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
-                resp->append("Connection: close\r\n\r\n");
-                resp->append(body);
-
-                boost::asio::async_write(*socket, boost::asio::buffer(*resp),
-                    [socket, resp](const boost::system::error_code&, std::size_t) {
-                        boost::system::error_code ignored;
-                        socket->shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
-                    });
+    void read_headers(std::shared_ptr<IConnection> connection, std::shared_ptr<std::string> request) {
+        auto buffer = std::make_shared<std::array<char, 4096>>();
+        auto weak = weak_from_this();
+        connection->async_read(net::buffer(buffer->data(), buffer->size()),
+            [weak, connection, request, buffer](const std::error_code& error, size_t size) {
+                auto self = weak.lock();
+                if (!self) { connection->close(); return; }
+                std::lock_guard<std::mutex> request_lock(self->requests_mutex_);
+                if (!self->running_.load() || error || size == 0) { connection->close(); return; }
+                request->append(buffer->data(), size);
+                if (request->size() > 64 * 1024) { connection->close(); return; }
+                if (request->find("\r\n\r\n") == std::string::npos)
+                    self->read_headers(connection, request);
+                else self->respond(connection, *request);
             });
     }
+    void respond(std::shared_ptr<IConnection> connection, const std::string& request) {
+        std::string method, path;
+        size_t s = request.find(' '), e = request.find(' ', s + 1);
+        if (s != std::string::npos && e != std::string::npos) {
+            method = request.substr(0, s);
+            path   = request.substr(s + 1, e - s - 1);
+        }
 
-    boost::asio::io_context& io_ctx_;
-    boost::asio::ip::tcp::acceptor acceptor_;
+        std::string status, content_type, body;
+        if (path == "/metrics" || path == "/") {
+            status = "200 OK";
+            content_type = "text/plain; version=0.0.4";
+            body = build_metrics();
+        } else if (path == "/status") {
+            status = "200 OK";
+            content_type = "application/json";
+            body = build_status();
+        } else if (method == "POST" && path == "/reload" && reload_handler_) {
+            std::string result = reload_handler_();
+            status = (result.empty() || result == "OK") ? "200 OK" : "500 Internal Server Error";
+            content_type = "text/plain";
+            body = status == "200 OK" ? "OK" : result;
+        } else if (path == "/health" || path == "/health/live") {
+            status = "200 OK"; content_type = "text/plain"; body = "OK";
+        } else if (path == "/health/ready") {
+            body = build_metrics();
+            status = body.empty() ? "503 Service Unavailable" : "200 OK";
+            content_type = "text/plain";
+        } else {
+            status = "404 Not Found"; content_type = "text/plain"; body = "Not Found";
+        }
+
+        auto resp = std::make_shared<std::string>();
+        resp->reserve(256 + body.size());
+        resp->append("HTTP/1.1 ").append(status).append("\r\n");
+        resp->append("Content-Type: ").append(content_type).append("\r\n");
+        resp->append("Content-Length: ").append(std::to_string(body.size())).append("\r\n");
+        resp->append("Connection: close\r\n\r\n");
+        resp->append(body);
+
+        connection->async_write(net::buffer(*resp),
+            [connection, resp](const std::error_code&, size_t) { connection->close(); });
+    }
+
+    std::shared_ptr<net::IServerTransportProvider> provider_;
+    std::unique_ptr<net::IServerTransport> transport_;
+    std::mutex connections_mutex_;
+    std::mutex requests_mutex_;
+    std::vector<std::weak_ptr<IConnection>> connections_;
     uint16_t port_;
-    uint16_t bound_port_;   // start() 后从 acceptor_.local_endpoint() 读出
+    uint16_t bound_port_;   // start() 后从后端监听器读出
     std::string bind_address_;
     ReloadHandler reload_handler_;
     RefreshProvider refresh_provider_;

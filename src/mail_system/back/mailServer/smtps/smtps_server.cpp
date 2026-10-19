@@ -112,16 +112,12 @@ bool SmtpsServer::should_reject_connection(std::string& reason, const std::strin
     // DNSBL 反垃圾检查
     if (!cfg->perf_mode && cfg->dnsbl_enabled && !client_ip.empty()) {
         std::string reversed;
-        try {
-            auto addr = boost::asio::ip::make_address(client_ip);
-            if (addr.is_v4()) {
-                auto bytes = addr.to_v4().to_bytes();
-                reversed = std::to_string(bytes[3]) + "." +
-                           std::to_string(bytes[2]) + "." +
-                           std::to_string(bytes[1]) + "." +
-                           std::to_string(bytes[0]);
-            }
-        } catch (...) {}
+        in_addr address{};
+        if (inet_pton(AF_INET, client_ip.c_str(), &address) == 1) {
+            const auto* bytes = reinterpret_cast<const unsigned char*>(&address.s_addr);
+            reversed = std::to_string(bytes[3]) + "." + std::to_string(bytes[2]) + "." +
+                       std::to_string(bytes[1]) + "." + std::to_string(bytes[0]);
+        }
 
         if (!reversed.empty()) {
             std::string query = reversed + ".zen.spamhaus.org";

@@ -17,7 +17,9 @@ class SessionBase;
 // Backend-independent connection contract. Initiate IO, close, and cancel on
 // executor(); completions run on that same serialized executor. Buffers and
 // the connection must remain alive through completion. Reads return available
-// bytes; successful writes send the entire buffer. EOF is net::IoErrc::end_of_stream,
+// bytes; successful writes send the entire buffer. Allow at most one pending
+// read and one pending write: serialized initiation does not serialize entire
+// asynchronous operations. EOF is net::IoErrc::end_of_stream,
 // cancellation is std::errc::operation_canceled.
 class IConnection {
 public:

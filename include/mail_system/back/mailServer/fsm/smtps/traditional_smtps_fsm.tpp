@@ -97,8 +97,7 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<pr::
     session->do_async_write(reply,
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) LOG_SMTP_DETAIL_ERROR("Error sending QUIT reply: {}", ec.message());
-            auto io_ctx = static_cast<SmtpsServer*>(s->get_server())->get_io_context();
-            auto timer = std::make_shared<boost::asio::steady_timer>(*io_ctx);
+            auto timer = s->get_connection().executor()->make_timer();
             timer->expires_after(std::chrono::milliseconds(100));
             timer->async_wait([s, timer](const std::error_code& ec) mutable {
                 if (!ec) s->close();
@@ -151,7 +150,7 @@ void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
     this->add_handler(SmtpsState::GREETING, SmtpsEvent::EHLO,
         h(&TraditionalSmtpsFsm::handle_greeting_ehlo));
 
-    if constexpr (!std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
+    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
         this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS,
             h(&TraditionalSmtpsFsm::handle_wait_auth_starttls));
 
@@ -302,8 +301,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
             self->set_current_state(static_cast<int>(SmtpsState::INIT));
             auto server = static_cast<SmtpsServer*>(self->get_server());
             auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
-            auto tcp_sock = self->release_connection()->release_socket();
-            server->handoff_starttls_socket(std::move(tcp_sock), std::move(trace));
+            server->handoff_starttls(self->release_connection(), std::move(trace));
         });
 }
 

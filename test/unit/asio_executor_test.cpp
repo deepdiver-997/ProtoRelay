@@ -2,6 +2,10 @@
 // timer rearm/cancel, socket byte transfer, EOF and cancellation normalization.
 #undef NDEBUG
 #include "framework/connection/tcp_connection.h"
+#include "framework/net/asio_connection.h"
+#include "framework/net/asio_executor.h"
+#include <boost/asio/read.hpp>
+#include <boost/asio/write.hpp>
 #include <atomic>
 #include <cassert>
 #include <future>
@@ -53,7 +57,7 @@ int main() {
     peer.connect(acceptor.local_endpoint());
     auto socket = std::make_unique<tcp::socket>(io);
     acceptor.accept(*socket);
-    pr::TcpConnection connection(std::move(socket));
+    pr::TcpConnection connection(pr::net::make_asio_tcp_connection(std::move(socket)));
     auto connection_executor = connection.executor();
     std::string data(4, '\0');
     std::promise<size_t> received;

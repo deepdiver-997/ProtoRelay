@@ -204,9 +204,24 @@ Lifecycle calls require an external thread; stopped pools can be restarted.
 `IConnection` now exposes project buffers, `std::error_code`, executor and timer
 interfaces. Session scheduling/timeouts, persistence waits, POP3 lock sweeps and heartbeats
 use these interfaces. Server maintenance obtains schedulers through `IExecutorProvider`.
-Networking, listeners, STARTTLS socket handoff, outbound clients, and some business
-timers still require Asio: a complete Asio-free server build is not yet supported.
-`connection_interface_test` and `std_thread_pool_test` need no Boost headers.
+`TcpServerBase`, the TCP/TLS connection facades and Metrics HTTP now obtain listening
+and STARTTLS operations through `IServerTransportProvider`. Contexts, work guards,
+acceptors and SSL contexts live inside the Asio backend; protocol session factories
+keep their existing connection types. SMTP/IMAP close timers also use `ITimer`.
+
+Build the framework contracts without Boost, OpenSSL, spdlog, c-ares or MySQL:
+
+```bash
+cmake -S . -B build/core -DPROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY=ON
+cmake --build build/core
+ctest --test-dir build/core --output-on-failure
+```
+
+This compiles the real server base, logging and standard worker pool and exercises
+server admission, STARTTLS handoff and Metrics HTTP with a deterministic custom backend.
+It requires only a C++17 toolchain, Threads and nlohmann_json. The production network
+backend, outbound clients and database asynchronous waits still use Asio;
+a complete Asio-free mail service is not yet supported.
 
 ## Runtime Prerequisites (Summary)
 

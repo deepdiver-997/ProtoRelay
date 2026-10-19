@@ -122,7 +122,14 @@ DKIM/SPF/DMARC 的每一次改动都走一遍完整验收，不要用「代码�
     再改 timer（异步超时回收 watchdog）。
   - 例：远程存储装饰器把阻塞/耗时 op `post` 到 worker 池避免卡 io；回调再续。
 
-框架业务代码使用 `pr::net::IExecutor::post` 和 `ITimer`，Asio 类型只在适配器中出现。
+新迁移的框架业务代码使用 `pr::net::IExecutor::post` 和 `ITimer`，Asio 类型留在适配器中。
+服务器监听和 STARTTLS 使用 `IServerTransportProvider` / `IServerTransport`；
+协议层不暴露 context、work guard、acceptor、SSL context 或原始 socket 交接。
+`TcpConnection` / `SslConnection` 是持有 `IConnection` 的门面，保持现有会话工厂兼容。
+`server_transport_test` 用无 Boost 的替代后端验证接入策略、TLS 交接与 Metrics HTTP；
+`asio_server_transport_test` 验证真实监听停止等待回调退出、工厂异常隔离及升级后 executor 不变。
+`PROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY=ON` 单独构建这些框架边界中的五项无驱动契约，
+不查找 Asio/Boost 或 OpenSSL；生产出站/DB 等尚未迁移的部分仍可依赖 Asio。
 服务器维护任务通过 `IExecutorProvider::next_executor()` 取得执行器，工作线程池不承担该职责。
 POP3 清扫/心跳的专项回归见 `test/unit/pop3_timer_boundary_test.cpp`（2026-10-19）：
 覆盖 worker/DB 回调后的定时器重排、关闭与到期成功回调竞态、排队初始化及析构取消。

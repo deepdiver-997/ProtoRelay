@@ -7,6 +7,24 @@ on:
     branches: [main]
 
 jobs:
+  backend-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install core dependencies
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev
+      - name: Configure without networking or logging drivers
+        run: |
+          cmake -B build -DPROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY=ON \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_DISABLE_FIND_PACKAGE_Boost=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE
+      - name: Build and verify the backend boundary
+        run: |
+          cmake --build build -j2
+          ctest --test-dir build --output-on-failure
+          if find build -name '*.o.d' -exec grep -lE '/(boost|spdlog|fmt|openssl)/' {} + | grep .; then exit 1; fi
+
   webmail-build:
     runs-on: ubuntu-latest
     steps:

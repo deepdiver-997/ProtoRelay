@@ -1,5 +1,5 @@
 // STARTTLS handoff 回归测试 —— 2026-09-25 生产问题：
-// handoff_starttls_socket 给升级出的 TLS 会话传 ListenerConfig{} 默认值，
+// handoff_starttls 给升级出的 TLS 会话传 ListenerConfig{} 默认值，
 // 587 提交端口 STARTTLS 后 auth_policy 退化成 OFF，EHLO 不再通告 AUTH，
 // 客户端无法认证（465 原生 TLS 会话不受影响）。MAIL FROM 的 require_auth
 // 判定同样失真。修复：按 socket 本地端口从 m_listener_configs 反查真实
@@ -18,6 +18,7 @@
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "framework/tcp_server_base.h"
+#include "framework/net/asio_connection.h"
 
 using namespace mail_system;
 
@@ -122,8 +123,8 @@ int main() {
         lc.auth_policy = InboundAuthPolicy::ON;   // 模拟 587 提交端口
         server.m_listener_configs[port] = lc;
 
-        server.handoff_starttls_socket(
-            std::make_unique<tcp::socket>(std::move(accepted)), "");
+        server.handoff_starttls(
+            pr::net::make_asio_tcp_connection(std::make_unique<tcp::socket>(std::move(accepted))), "");
         expect_true(server.ssl_session_created, "handoff creates ssl session");
         expect_true(server.received_lc.auth_policy == InboundAuthPolicy::ON,
                     "handoff inherits listener auth_policy (587 AUTH regression)");
@@ -144,8 +145,8 @@ int main() {
         acc.accept(accepted);
         acc.close();
 
-        server.handoff_starttls_socket(
-            std::make_unique<tcp::socket>(std::move(accepted)), "");
+        server.handoff_starttls(
+            pr::net::make_asio_tcp_connection(std::make_unique<tcp::socket>(std::move(accepted))), "");
         expect_true(server.ssl_session_created,
                     "unknown-port handoff still creates session");
         expect_true(server.received_lc.auth_policy == InboundAuthPolicy::OFF &&

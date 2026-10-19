@@ -20,7 +20,7 @@ public:
              std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
              std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
              std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
-    ~H2Server() override = default;
+    ~H2Server() override { stop(); }
 
     const std::string& doc_root() const { return doc_root_; }
 

@@ -178,9 +178,23 @@ Worker 后端可选 `STD`（默认，标准库线程池）或 `BOOST`（原有�
 
 `IConnection` 已使用项目自己的 buffer、`std::error_code`、executor 和 timer 接口；
 Session 的投递/超时、持久化等待、POP3 清扫和锁心跳已迁移。服务器维护任务通过
-`IExecutorProvider` 获取执行器。当前网络实现、监听器、STARTTLS socket 交接、
-出站客户端和部分业务定时器仍依赖 Asio，**尚不支持整个服务无 Asio 构建**。
-独立的 `connection_interface_test` 和 `std_thread_pool_test` 不需要 Boost 头文件。
+`IExecutorProvider` 获取执行器。`TcpServerBase`、TCP/TLS 连接门面及 Metrics HTTP
+已通过 `IServerTransportProvider` 获取监听和 STARTTLS 能力；context、work guard、
+acceptor、SSL context 仅留在 Asio 后端。协议服务器的会话工厂保持原有连接类型，
+SMTP/IMAP 的关闭延时也使用 `ITimer`。
+
+框架契约可单独构建，不查找或链接 Boost、OpenSSL、spdlog、c-ares、MySQL：
+
+```bash
+cmake -S . -B build/core -DPROTORELAY_BUILD_BACKEND_CONTRACTS_ONLY=ON
+cmake --build build/core
+ctest --test-dir build/core --output-on-failure
+```
+
+该配置编译真实 ServerBase、日志和标准库 Worker，并使用确定性的自定义后端验证
+连接接入、STARTTLS 配置/追踪交接及 Metrics HTTP；仅需 C++17、Threads、nlohmann_json。
+目前生产网络后端、出站客户端和数据库异步等待仍使用 Asio，
+**尚不支持整个邮件服务无 Asio 构建**。
 
 ## 环境依赖（摘要）
 
