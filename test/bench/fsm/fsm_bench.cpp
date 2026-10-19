@@ -9,7 +9,7 @@
 #include "framework/session_base.tpp"
 #include "framework/server_config.h"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"
@@ -21,7 +21,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <spdlog/common.h>
 
 using namespace mail_system;
 namespace pq = persist_storage;
@@ -88,9 +87,9 @@ int main(int argc, char* argv[]) {
             iterations = static_cast<size_t>(std::stoull(argv[++i]));
     }
 
-    Logger::get_instance().init("fsm_bench.log", 0, 1, spdlog::level::off, false, false);
+    Logger::get_instance().init("fsm_bench.log", 0, 1, pr::LogLevel::off, false, false);
     auto io_pool     = std::make_shared<pr::IOThreadPool>(thread_count);
-    auto worker_pool = std::make_shared<pr::BoostThreadPool>(2);
+    auto worker_pool = std::make_shared<pr::WorkerThreadPool>(2);
     io_pool->start();
     worker_pool->start();
 

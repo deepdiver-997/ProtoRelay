@@ -7,7 +7,7 @@
 #include "mail_system/back/mailServer/session/smtps_session.tpp"
 #include "framework/session_base.tpp"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mock_connection.h"
@@ -47,7 +47,7 @@ protected:
     }
 private:
     std::thread::id controller_;
-    pr::BoostThreadPool actual_;
+    pr::WorkerThreadPool actual_;
     std::mutex mutex_;
     std::condition_variable ready_;
     bool armed_ = true;

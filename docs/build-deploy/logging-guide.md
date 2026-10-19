@@ -5,7 +5,42 @@
 
 ## 概述
 
-项目使用 [spdlog](https://github.com/gabime/spdlog) 作为日志系统，支持模块化日志、多级别控制、文件滚动等功能。
+项目使用自己的 `LogLevel`、`LogRecord` 和 `LogSink` 接口。默认提供 spdlog 适配器，也可使用纯标准库输出或关闭默认输出；使用者可以注入自己的记录方法。
+
+## 后端选择与自定义回调
+
+CMake 参数 `PROTORELAY_LOG_BACKEND` 支持 `SPDLOG`（默认）、`STANDARD` 和 `NONE`。
+后两者不查找、不包含、不链接 spdlog 或 fmt。`STANDARD` 支持控制台、文件、滚动和 flush；
+`NONE` 关闭默认输出，仍可注入自定义处理器。`log_to_console=false` 且 `log_to_file=false`
+会关闭默认输出。`max_file_size=0` 表示不滚动。
+
+```bash
+cmake -S . -B build/standard -DPROTORELAY_LOG_BACKEND=STANDARD -DPROTORELAY_WORKER_BACKEND=STD
+cmake --build build/standard --target smtpsServer
+```
+
+在装配服务前注册回调，后续 `init()` / `bootstrap::assemble()` 会保留该回调：
+
+```cpp
+#include "framework/log/logger.h"
+
+pr::Logger::get_instance().set_handler([](const pr::LogRecord& record) {
+    // 转交给自己的日志函数；record 包含 level/module/message/source/timestamp。
+    my_log(record.message);
+}, [] { my_log_flush(); });
+pr::Logger::get_instance().set_level(pr::LogLevel::info);
+```
+
+也可以实现 `pr::LogSink` 并调用 `set_sink()`。传空回调关闭输出。
+回调可被多个线程并发调用，使用者负责同步自身状态；回调执行期间不持日志注册表锁。
+`LogRecord` 拥有消息和模块字符串，可复制后异步使用；源位置字符串需具有静态生命周期。
+处理器和 flush 抛出的异常被隔离并计入 `errors_total()`。
+全局级别更新保留模块覆盖；模块可在首次产生日志前设置级别。
+`shutdown()` 停止新日志并 flush 当前后端，调用方应先停止并 join 产生日志的线程。
+
+日志格式化独立于输出后端，目前支持顺序 `{}` 参数和 `{{` / `}}` 转义，
+覆盖项目现有调用，不提供完整 fmt 格式语法；无效格式计入 `errors_total()`。
+`LOG_PURE` 保留 `0xhash|参数...` 格式，也不依赖 spdlog/fmt。
 
 ## 编译时配置
 
@@ -52,13 +87,13 @@ Logger::get_instance().init(
     "logs/mail_system.log",           // 日志文件路径
     1024 * 1024 * 5,               // 单个文件最大大小 (5MB)
     3,                               // 保留文件数量
-    spdlog::level::info              // 全局日志级别
+    pr::LogLevel::info              // 全局日志级别
 );
 ```
 
 ### 日志级别
 
-spdlog 支持以下日志级别（从低到高）：
+项目支持以下日志级别（从低到高）：
 
 | 级别 | 说明 | 使用场景 |
 |--------|------|----------|
@@ -70,9 +105,9 @@ spdlog 支持以下日志级别（从低到高）：
 | `critical` | 严重错误 | 系统无法正常运行，需要立即处理 |
 
 **建议**：
-- 生产环境使用 `spdlog::level::info`
-- 调试时使用 `spdlog::level::debug` 或 `spdlog::level::trace`
-- 发布版本使用 `spdlog::level::warn` 或 `spdlog::level::error`
+- 生产环境使用 `pr::LogLevel::info`
+- 调试时使用 `pr::LogLevel::debug` 或 `pr::LogLevel::trace`
+- 发布版本使用 `pr::LogLevel::warn` 或 `pr::LogLevel::err`
 
 ### 运行时动态调整日志级别
 
@@ -80,10 +115,10 @@ spdlog 支持以下日志级别（从低到高）：
 
 ```cpp
 // 设置全局日志级别
-mail_system::set_log_level(spdlog::level::debug);
+mail_system::set_log_level(pr::LogLevel::debug);
 
 // 设置特定模块的日志级别
-mail_system::set_module_log_level(mail_system::LogModule::DATABASE, spdlog::level::trace);
+mail_system::set_module_log_level("DATABASE", pr::LogLevel::trace);
 ```
 
 ## 模块化日志使用
@@ -248,7 +283,7 @@ Logger::get_instance().init(
     "logs/mail_system.log",
     1024 * 1024 * 10,  // 10MB 单文件，方便开发调试
     10,                  // 保留 10 个文件
-    spdlog::level::debug   // debug 级别
+    pr::LogLevel::debug   // debug 级别
 );
 ```
 
@@ -260,7 +295,7 @@ Logger::get_instance().init(
     "logs/mail_system.log",
     1024 * 1024 * 5,   // 5MB 单文件
     3,                    // 保留 3 个文件
-    spdlog::level::info    // info 级别
+    pr::LogLevel::info    // info 级别
 );
 ```
 
@@ -272,10 +307,10 @@ Logger::get_instance().init(
     "logs/mail_system.log",
     1024 * 1024 * 5,
     3,
-    spdlog::level::trace   // 最详细的级别
+    pr::LogLevel::trace   // 最详细的级别
 );
 
 // 如果只关心数据库问题，运行时调整
-mail_system::set_module_log_level(mail_system::LogModule::DATABASE, spdlog::level::trace);
-mail_system::set_module_log_level(mail_system::LogModule::DB_QUERY, spdlog::level::trace);
+mail_system::set_module_log_level("DATABASE", pr::LogLevel::trace);
+mail_system::set_module_log_level(mail_system::LogModule::DB_QUERY, pr::LogLevel::trace);
 ```

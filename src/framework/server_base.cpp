@@ -10,7 +10,6 @@
 // ─────────────────────────────────────────────────────────────────
 #include "framework/server_base.h"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
 #include "framework/log/log_macros.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include <iostream>
@@ -44,11 +43,6 @@ ServerBase::ServerBase(const mail_system::ServerConfig& config,
         throw std::invalid_argument("ServerBase: thread pools must be started before construction");
 
     try {
-        Logger::get_instance().init(
-            config.log_file, 1024 * 1024 * 5, 3,
-            Logger::string_to_level(config.log_level),
-            config.log_to_console, config.log_to_file);
-        LOG_SERVER_INFO("Logger initialized with level: {}", config.log_level);
         LOG_SERVER_INFO("Server initialized with {} listener(s)", config.listeners.size());
         m_state = ServerState::Paused;
     } catch (const std::exception& e) {

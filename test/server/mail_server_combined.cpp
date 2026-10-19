@@ -20,7 +20,7 @@
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/distributed_mysql_pool.h"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/cli/help_text.h"
 #include "mail_system/back/bootstrap.h"
 #include "mail_system/back/common/logger.h"
@@ -206,7 +206,7 @@ int main(int argc, char* argv[]) {
         io_pool->start();
         LOG_SERVER_INFO("Shared IO thread pool started ({} threads)", smtp_config.io_thread_count);
 
-        auto work_pool = std::make_shared<pr::BoostThreadPool>(smtp_config.worker_thread_count);
+        auto work_pool = std::make_shared<pr::WorkerThreadPool>(smtp_config.worker_thread_count);
         work_pool->start();
         LOG_SERVER_INFO("Shared worker thread pool started ({} threads)", smtp_config.worker_thread_count);
 

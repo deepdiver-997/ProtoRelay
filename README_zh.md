@@ -159,12 +159,29 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 
 脚本会自动创建 `build/`，并尽量避免在源码根目录产生构建垃圾文件。
 
+## 可选日志与 Worker 后端
+
+```bash
+cmake -S . -B build/standard \
+  -DPROTORELAY_LOG_BACKEND=STANDARD \
+  -DPROTORELAY_WORKER_BACKEND=STD
+cmake --build build/standard --target smtpsServer unit_tests
+ctest --test-dir build/standard --output-on-failure
+```
+
+日志后端可选 `SPDLOG`（默认）、`STANDARD`、`NONE`；`STANDARD` / `NONE` 无 spdlog/fmt 依赖，
+仍支持注入自定义日志回调，见 [日志接口](docs/build-deploy/logging-guide.md)。
+Worker 后端可选 `STD`（默认，标准库线程池）或 `BOOST`（原有实现）。
+`build.sh` 接受同名环境变量；object-only 后在 `link.sh` 中传相同的 `PROTORELAY_LOG_BACKEND`。
+标准库池的 `stop(true)` 排空任务，`stop(false)` 丢弃排队任务并等待执行中的任务退出；
+丢弃任务的 future 报 `broken_promise`。启动、停止与析构须由池外线程调用，支持停止后重启。
+
 ## 环境依赖（摘要）
 
 - Linux/macOS
 - CMake 3.10+
 - GCC 9+ / Clang 10+
-- Boost、OpenSSL、MySQL client、spdlog、c-ares
+- Boost、OpenSSL、MySQL client、c-ares；spdlog 为默认日志后端的可选依赖
 - 如启用 `hdfs_web` 存储：额外需要 `libcurl`
 
 ## 项目规范文档

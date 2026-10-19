@@ -182,14 +182,14 @@ def generate_test_file(calls: list[dict], out_path: str):
     lines.append('')
     lines.append('    mail_system::Logger::get_instance().init(')
     lines.append('        "logs/test_smtps.log", 1024*1024*5, 3,')
-    lines.append('        spdlog::level::info, false, true);')
+    lines.append('        pr::LogLevel::info, false, true);')
     lines.append('')
 
     for idx in range(len(calls)):
         lines.append(f'    test_{idx:04d}();')
 
     lines.append('')
-    lines.append('    mail_system::log_pure_flush();')
+    lines.append('    pr::log_pure_flush();')
     lines.append('    mail_system::Logger::get_instance().shutdown();')
     lines.append('    fclose(g_baseline);')
     lines.append('    return 0;')
@@ -260,13 +260,18 @@ def validate(proj_dir: str, work_dir: str) -> tuple[bool, str]:
     # 写 CMakeLists.txt 来构建测试
     cmake_content = f'''cmake_minimum_required(VERSION 3.10)
 project(LogValidate LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 include_directories("${{CMAKE_SOURCE_DIR}}/include")
 include_directories("/opt/homebrew/include")
-# Minimal: only link spdlog + fmt
+# The baseline uses the optional spdlog adapter.
 find_package(spdlog REQUIRED)
-add_executable(log_validate log_validate_test.cpp)
-target_link_libraries(log_validate spdlog::spdlog)
+find_package(Threads REQUIRED)
+add_executable(log_validate log_validate_test.cpp
+    src/framework/log/logger.cpp
+    src/framework/log/standard_log_sink.cpp
+    src/framework/log/spdlog_log_sink.cpp)
+target_compile_definitions(log_validate PRIVATE PROTORELAY_HAS_SPDLOG=1)
+target_link_libraries(log_validate spdlog::spdlog Threads::Threads)
 '''
     with open(os.path.join(baseline_dir, 'CMakeLists.txt'), 'w') as f:
         f.write(cmake_content)

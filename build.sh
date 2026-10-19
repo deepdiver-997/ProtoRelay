@@ -10,6 +10,8 @@ ARTIFACT_DIR="${ARTIFACT_DIR:-${SCRIPT_DIR}/artifacts}"
 EXTRA_CMAKE_ARGS_STR="${EXTRA_CMAKE_ARGS:-}"
 GENERATOR="${CMAKE_GENERATOR:-}"
 USE_BOOST_LEGACY_FIND="${USE_BOOST_LEGACY_FIND:-ON}"
+PROTORELAY_LOG_BACKEND="${PROTORELAY_LOG_BACKEND:-SPDLOG}"
+PROTORELAY_WORKER_BACKEND="${PROTORELAY_WORKER_BACKEND:-STD}"
 
 # 交叉编译 sysroot 路径（家目录下，重启不消失）
 CROSS_SYSROOT="${CROSS_SYSROOT:-${HOME}/.protorelay/sysroot/usr}"
@@ -99,6 +101,8 @@ if [ "$#" -lt 1 ]; then
     echo "Env override: BUILD_JOBS=<n>, EXTRA_CMAKE_ARGS='<...>'"
     echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
     echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
+    echo "              PROTORELAY_LOG_BACKEND=<SPDLOG|STANDARD|NONE>"
+    echo "              PROTORELAY_WORKER_BACKEND=<STD|BOOST>"
     echo "              CROSS_SYSROOT=<path>, CROSS_SYSROOT_SERVER=<ssh-host>"
     echo "              SERIAL_JOBS=<n>  # per-target 并行度（默认 4，可被数字参数覆盖）"
     echo "              PURE_LOG_DIR=<path>  # 纯日志变换输出目录"
@@ -198,7 +202,7 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
     print_info "Cross C++ compiler: ${CROSS_CXX}"
 
     # 2. 检查 sysroot 头文件（服务器 spdlog/fmt）
-    if [ ! -d "$CROSS_SYSROOT/spdlog" ] || [ ! -d "$CROSS_SYSROOT/fmt" ]; then
+    if [[ "$PROTORELAY_LOG_BACKEND" == "SPDLOG" ]] && { [ ! -d "$CROSS_SYSROOT/spdlog" ] || [ ! -d "$CROSS_SYSROOT/fmt" ]; }; then
         print_warning "Sysroot headers not found at: $CROSS_SYSROOT"
         echo ""
         echo "  The cross-x64 build needs server-side spdlog/fmt headers to avoid ABI mismatches."
@@ -359,6 +363,8 @@ cmake_args=(
     -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
     -DBUILD_OBJECT_ONLY="$BUILD_OBJECT_ONLY"
     -DBUILD_TESTS="$BUILD_TESTS"
+    -DPROTORELAY_LOG_BACKEND="$PROTORELAY_LOG_BACKEND"
+    -DPROTORELAY_WORKER_BACKEND="$PROTORELAY_WORKER_BACKEND"
 )
 
 if [[ "$USE_BOOST_LEGACY_FIND" == "ON" ]]; then
@@ -384,6 +390,7 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
     _HB_FMT_INC="/opt/homebrew/include/fmt"
     _MASKS=()
     for _d in "$_HB_SPDLOG_CMAKE" "$_HB_SPDLOG_INC" "$_HB_FMT_INC"; do
+        [[ "$PROTORELAY_LOG_BACKEND" == "SPDLOG" ]] || continue
         if [ -d "$_d" ] || [ -f "$_d" ]; then
             _MASKS+=("$_d")
         fi

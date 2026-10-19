@@ -8,7 +8,7 @@
 //        本 demo 意在证明"一连接多流复用"的会话结构，非完整 H2 服务器。
 // ──────────────────────────────────────────────────────────────────
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/db/db_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/i_storage_provider.h"
@@ -60,7 +60,7 @@ int main(int argc, char* argv[]) {
 
         auto io_pool = std::make_shared<pr::IOThreadPool>(config.io_thread_count);
         io_pool->start();
-        auto wk_pool = std::make_shared<pr::BoostThreadPool>(config.worker_thread_count);
+        auto wk_pool = std::make_shared<pr::WorkerThreadPool>(config.worker_thread_count);
         wk_pool->start();
         g_server = std::make_unique<pr::http::h2::H2Server>(config, doc_root, io_pool, wk_pool, make_null_router());
         g_server->start();

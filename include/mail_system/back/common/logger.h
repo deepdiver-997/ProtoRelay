@@ -17,6 +17,8 @@
 
 namespace mail_system {
     using pr::Logger;
+    using pr::LogLevel;
+    using pr::LogRecord;
     using pr::log;
     using pr::set_log_level;
     using pr::set_module_log_level;

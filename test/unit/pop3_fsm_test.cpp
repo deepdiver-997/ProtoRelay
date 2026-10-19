@@ -12,7 +12,7 @@
 #include "framework/session_base.tpp"
 #include "framework/server_config.h"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
@@ -24,7 +24,6 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <spdlog/common.h>
 
 using namespace mail_system;
 
@@ -45,7 +44,7 @@ struct FsmTestFixture {
     static constexpr const char* ATT_DIR  = "/tmp/pop3_fsm_test_att";
 
     std::shared_ptr<pr::IOThreadPool> io_pool;
-    std::shared_ptr<pr::BoostThreadPool> worker_pool;
+    std::shared_ptr<pr::WorkerThreadPool> worker_pool;
     std::shared_ptr<router::StaticShardRouter> router;
     std::shared_ptr<test::MockDbPool> db_pool;
     std::shared_ptr<test::MockDbConnection> db_conn;
@@ -55,9 +54,9 @@ struct FsmTestFixture {
     ServerConfig cfg;
 
     FsmTestFixture() {
-        Logger::get_instance().init("pop3_fsm_test.log", 0, 1, spdlog::level::off, false, false);
+        Logger::get_instance().init("pop3_fsm_test.log", 0, 1, pr::LogLevel::off, false, false);
         io_pool     = std::make_shared<pr::IOThreadPool>(1);
-        worker_pool = std::make_shared<pr::BoostThreadPool>(2);
+        worker_pool = std::make_shared<pr::WorkerThreadPool>(2);
         io_pool->start();
         worker_pool->start();
 

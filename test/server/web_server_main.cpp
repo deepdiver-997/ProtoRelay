@@ -6,7 +6,7 @@
 // 对照 smtps_test 的 main：少配置加载，直接程序化填 ServerConfig。
 // ──────────────────────────────────────────────────────────────────
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/db/db_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/i_storage_provider.h"
@@ -63,7 +63,7 @@ int main(int argc, char* argv[]) {
 
         auto io_pool = std::make_shared<pr::IOThreadPool>(config.io_thread_count);
         io_pool->start();
-        auto wk_pool = std::make_shared<pr::BoostThreadPool>(config.worker_thread_count);
+        auto wk_pool = std::make_shared<pr::WorkerThreadPool>(config.worker_thread_count);
         wk_pool->start();
         g_server = std::make_unique<pr::http::HttpServer>(config, doc_root, io_pool, wk_pool, make_null_router());
         g_server->start();

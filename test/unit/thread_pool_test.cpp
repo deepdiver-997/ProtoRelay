@@ -1,4 +1,4 @@
-// 线程池单元测试：pr::BoostThreadPool（submit/post 真实执行）与
+// 线程池单元测试：pr::WorkerThreadPool（submit/post 真实执行）与
 // pr::IOThreadPool（get_io_context 生产路径）。
 //
 // ⚠️ pr::IOThreadPool::submit()/post() 是死 API：post_impl 是空实现（注释掉了），
@@ -16,11 +16,11 @@
 #include <boost/asio/post.hpp>
 
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 
 namespace {
 
-using pr::BoostThreadPool;
+using pr::WorkerThreadPool;
 using pr::IOThreadPool;
 
 int g_pass = 0, g_fail = 0;
@@ -45,27 +45,27 @@ bool wait_until(F f, int timeout_ms = 3000) {
 int main() {
     std::printf("thread_pool_test\n");
 
-    // ── pr::BoostThreadPool ──────────────────────────────────────────
+    // ── pr::WorkerThreadPool ──────────────────────────────────────────
     {
-        pr::BoostThreadPool pool(2);
-        expect_true(!pool.is_running(), "boost pool not running before start");
+        pr::WorkerThreadPool pool(2);
+        expect_true(!pool.is_running(), "worker pool not running before start");
         pool.start();
-        expect_true(pool.is_running(), "boost pool running after start");
-        expect_true(pool.thread_count() == 2, "boost pool thread count");
+        expect_true(pool.is_running(), "worker pool running after start");
+        expect_true(pool.thread_count() == 2, "worker pool thread count");
 
         // submit：future 拿到返回值
         auto fut = pool.submit([](int a, int b) { return a + b; }, 2, 3);
-        expect_true(fut.get() == 5, "boost submit returns value");
+        expect_true(fut.get() == 5, "worker submit returns value");
 
         // post：异步执行 + 原子计数
         std::atomic<int> counter{0};
         for (int i = 0; i < 100; i++) pool.post([&counter] { counter++; });
         expect_true(wait_until([&] { return counter.load() == 100; }),
-                    "boost post executes all tasks");
+                    "worker post executes all tasks");
 
         // 重复 start 幂等
         pool.start();
-        expect_true(pool.is_running(), "boost double start idempotent");
+        expect_true(pool.is_running(), "worker double start idempotent");
 
         // stop(wait=true)：排空任务后再返回
         std::atomic<bool> drained{false};
@@ -74,13 +74,13 @@ int main() {
             drained = true;
         });
         pool.stop(true);
-        expect_true(drained.load(), "boost stop(true) drains pending tasks");
-        expect_true(!pool.is_running(), "boost pool stopped");
+        expect_true(drained.load(), "worker stop(true) drains pending tasks");
+        expect_true(!pool.is_running(), "worker pool stopped");
     }
 
     // stop 后 submit 抛异常
     {
-        pr::BoostThreadPool pool(1);
+        pr::WorkerThreadPool pool(1);
         pool.start();
         pool.stop();
         bool threw = false;
@@ -90,14 +90,14 @@ int main() {
         } catch (const std::runtime_error&) {
             threw = true;
         }
-        expect_true(threw, "boost submit after stop throws runtime_error");
+        expect_true(threw, "worker submit after stop throws runtime_error");
     }
 
     // 未 start 直接 stop 安全
     {
-        pr::BoostThreadPool pool(2);
+        pr::WorkerThreadPool pool(2);
         pool.stop();
-        expect_true(true, "boost stop before start is safe");
+        expect_true(true, "worker stop before start is safe");
     }
 
     // ── pr::IOThreadPool ────────────────────────────────────────────
@@ -128,14 +128,14 @@ int main() {
     // std::terminate 整进程；io 线程 run() 被 catch 后退出不重进 → 该 context 上
     // 全部连接静默僵死。修复后：任务边界捕获 + 计数，线程/context 继续服务。
     {
-        pr::BoostThreadPool pool(1);
+        pr::WorkerThreadPool pool(1);
         pool.start();
         std::atomic<bool> after{false};
         pool.post([] { throw std::runtime_error("boom-post"); });
         pool.post([&after] { after = true; });
         expect_true(wait_until([&] { return after.load(); }),
-                    "boost pool survives a throwing post task");
-        expect_true(pool.exceptions_total() == 1, "boost post exception counted");
+                    "worker pool survives a throwing post task");
+        expect_true(pool.exceptions_total() == 1, "worker post exception counted");
 
         // submit：packaged_task 把异常存进 future，池不受伤，.get() 按原语义 rethrow
         auto fut = pool.submit([]() -> int { throw std::runtime_error("boom-submit"); });
@@ -146,7 +146,7 @@ int main() {
         std::atomic<bool> still{false};
         pool.post([&still] { still = true; });
         expect_true(wait_until([&] { return still.load(); }),
-                    "boost pool alive after submit rethrow");
+                    "worker pool alive after submit rethrow");
         pool.stop();
     }
     {

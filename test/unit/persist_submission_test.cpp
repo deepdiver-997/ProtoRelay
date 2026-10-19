@@ -3,7 +3,7 @@
 #undef NDEBUG
 #include <cassert>
 #include "mail_system/back/persist_storage/persistent_queue.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mock_db_pool.h"
@@ -91,7 +91,7 @@ struct Fixture {
     asio::io_context io;
     asio::executor_work_guard<asio::io_context::executor_type> guard{io.get_executor()};
     std::thread thread{[this] { io.run(); }};
-    std::shared_ptr<pr::BoostThreadPool> workers = std::make_shared<pr::BoostThreadPool>(1);
+    std::shared_ptr<pr::WorkerThreadPool> workers = std::make_shared<pr::WorkerThreadPool>(1);
     std::shared_ptr<ControlledPool> db;
     std::shared_ptr<router::StaticShardRouter> router;
     std::shared_ptr<PersistentQueue> queue;

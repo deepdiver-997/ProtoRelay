@@ -26,6 +26,9 @@ jobs:
   # ---- 单元测试 (Debug 构建全部单测 + 运行 ctest) ----
   unit-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        worker: [STD, BOOST]
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +41,7 @@ jobs:
                                   nlohmann-json3-dev libcurl4-openssl-dev
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DPROTORELAY_WORKER_BACKEND=${{ matrix.worker }}
 
       - name: Build unit tests
         # unit_tests 是 CMake 里的聚合 target，新增单测自动包含
@@ -46,6 +49,35 @@ jobs:
 
       - name: Run unit tests (ctest)
         run: ctest --test-dir build --output-on-failure
+
+  # No development headers/libraries for spdlog or fmt are installed here.
+  optional-logging:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        logging: [STANDARD, NONE]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies without spdlog/fmt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libc-ares-dev libmysqlclient-dev \
+            libboost-dev nlohmann-json3-dev libcurl4-openssl-dev
+      - name: Configure without spdlog/fmt
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DPROTORELAY_LOG_BACKEND=${{ matrix.logging }} \
+            -DPROTORELAY_WORKER_BACKEND=STD \
+            -DCMAKE_DISABLE_FIND_PACKAGE_spdlog=TRUE \
+            -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE
+      - name: Build servers and backend contract tests
+        run: |
+          cmake --build build --target smtpsServer webmailServer pop3Server \
+            logger_test std_thread_pool_test -j2
+      - name: Verify contracts and linked dependencies
+        run: |
+          ctest --test-dir build -R '^(logger_test|std_thread_pool_test)$' --output-on-failure
+          if ldd build/smtpsServer | grep -E 'lib(spdlog|fmt)'; then exit 1; fi
 
   # ---- 完整构建 (确认所有 target 能编译) ----
   full-build:

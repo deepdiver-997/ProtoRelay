@@ -181,12 +181,32 @@ Version/build metadata is generated during CMake configure and injected into the
 
 The build script auto-creates `build/` and keeps generated CMake artifacts out of source root.
 
+## Optional logging and worker backends
+
+```bash
+cmake -S . -B build/standard \
+  -DPROTORELAY_LOG_BACKEND=STANDARD \
+  -DPROTORELAY_WORKER_BACKEND=STD
+cmake --build build/standard --target smtpsServer unit_tests
+ctest --test-dir build/standard --output-on-failure
+```
+
+Logging backends: `SPDLOG` (default), `STANDARD`, `NONE`. The latter two do not
+require spdlog or fmt. All modes accept a user-provided `LogRecord` callback;
+see [logging interfaces](docs/build-deploy/logging-guide.md).
+Worker backends: `STD` (default) and the original `BOOST` implementation.
+`build.sh` accepts the same names as environment variables; pass the same
+`PROTORELAY_LOG_BACKEND` to `link.sh` when linking transferred object-only builds.
+The standard pool drains on `stop(true)`, discards queued tasks on `stop(false)`
+and always joins active tasks. Discarded futures receive `broken_promise`.
+Lifecycle calls require an external thread; stopped pools can be restarted.
+
 ## Runtime Prerequisites (Summary)
 
 - Linux/macOS
 - CMake 3.10+
 - GCC 9+ / Clang 10+
-- Boost, OpenSSL, MySQL client, spdlog, c-ares
+- Boost, OpenSSL, MySQL client, c-ares; spdlog is optional (used by the default log backend)
 - If `hdfs_web` storage is enabled: also require libcurl
 
 ## Project Conventions

@@ -22,6 +22,23 @@ option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check" ON)
 option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage (requires libcurl)" ON)
 option(ENABLE_S3_STORAGE "Enable S3/MinIO storage (requires libcurl, OpenSSL)" ON)
 option(BUILD_TESTS "Build test and benchmark targets" ON)
+set(PROTORELAY_LOG_BACKEND "SPDLOG" CACHE STRING "Default log backend: SPDLOG, STANDARD, NONE")
+set_property(CACHE PROTORELAY_LOG_BACKEND PROPERTY STRINGS SPDLOG STANDARD NONE)
+set(PROTORELAY_WORKER_BACKEND "STD" CACHE STRING "Worker pool backend: STD, BOOST")
+set_property(CACHE PROTORELAY_WORKER_BACKEND PROPERTY STRINGS STD BOOST)
+if(NOT PROTORELAY_LOG_BACKEND MATCHES "^(SPDLOG|STANDARD|NONE)$")
+    message(FATAL_ERROR "Invalid PROTORELAY_LOG_BACKEND: ${PROTORELAY_LOG_BACKEND}")
+endif()
+if(NOT PROTORELAY_WORKER_BACKEND MATCHES "^(STD|BOOST)$")
+    message(FATAL_ERROR "Invalid PROTORELAY_WORKER_BACKEND: ${PROTORELAY_WORKER_BACKEND}")
+endif()
+if(PROTORELAY_WORKER_BACKEND STREQUAL "BOOST")
+    add_compile_definitions(PROTORELAY_WORKER_BOOST=1)
+    set(WORKER_SRCS src/framework/thread_pool/boost_thread_pool.cpp)
+else()
+    add_compile_definitions(PROTORELAY_WORKER_BOOST=0)
+    set(WORKER_SRCS src/framework/thread_pool/std_thread_pool.cpp)
+endif()
 option(ENABLE_FUZZING "Build libFuzzer harnesses, e.g. mime_fuzz (clang only)" OFF)
 option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
 option(ENABLE_ASAN "Build unit test targets with AddressSanitizer+UBSan (-fsanitize=address,undefined -g -O1)" OFF)
@@ -152,17 +169,19 @@ else()
     message(STATUS "SSL/TLS support DISABLED")
 endif()
 
-# spdlog - cross-compile uses sysroot
-if(SYSROOT_INCLUDE)
-    message(STATUS "Using sysroot spdlog/fmt: ${SYSROOT_INCLUDE}")
-    if(NOT TARGET spdlog::spdlog)
-        add_library(spdlog::spdlog INTERFACE IMPORTED)
-        set_target_properties(spdlog::spdlog PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${SYSROOT_INCLUDE}")
+# spdlog is private to its adapter. STANDARD/NONE never look up spdlog or fmt.
+if(PROTORELAY_LOG_BACKEND STREQUAL "SPDLOG")
+    if(SYSROOT_INCLUDE)
+        message(STATUS "Using sysroot spdlog/fmt: ${SYSROOT_INCLUDE}")
+        if(NOT TARGET spdlog::spdlog)
+            add_library(spdlog::spdlog INTERFACE IMPORTED)
+            set_target_properties(spdlog::spdlog PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "${SYSROOT_INCLUDE}")
+        endif()
+        add_compile_definitions(SPDLOG_FMT_EXTERNAL=OFF)
+    else()
+        find_package(spdlog REQUIRED)
     endif()
-    add_compile_definitions(SPDLOG_FMT_EXTERNAL=OFF)
-else()
-    find_package(spdlog REQUIRED)
 endif()
 
 # nlohmann_json
@@ -174,6 +193,29 @@ if(ENABLE_HDFS_WEB_STORAGE)
 endif()
 
 find_package(Threads REQUIRED)
+
+set(LOGGING_SRCS
+    src/framework/log/logger.cpp
+    src/framework/log/standard_log_sink.cpp)
+set(PROTORELAY_HAS_SPDLOG 0)
+set(PROTORELAY_LOG_NONE 0)
+if(PROTORELAY_LOG_BACKEND STREQUAL "SPDLOG")
+    set(PROTORELAY_HAS_SPDLOG 1)
+    list(APPEND LOGGING_SRCS src/framework/log/spdlog_log_sink.cpp)
+elseif(PROTORELAY_LOG_BACKEND STREQUAL "NONE")
+    set(PROTORELAY_LOG_NONE 1)
+endif()
+add_library(protorelay_logging STATIC ${LOGGING_SRCS})
+target_include_directories(protorelay_logging PUBLIC "${CMAKE_SOURCE_DIR}/include")
+target_link_libraries(protorelay_logging PUBLIC Threads::Threads)
+target_compile_definitions(protorelay_logging PUBLIC PROTORELAY_HAS_SPDLOG=${PROTORELAY_HAS_SPDLOG})
+target_compile_definitions(protorelay_logging PRIVATE PROTORELAY_LOG_NONE=${PROTORELAY_LOG_NONE})
+if(PROTORELAY_LOG_BACKEND STREQUAL "SPDLOG")
+    target_link_libraries(protorelay_logging PRIVATE spdlog::spdlog)
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+    target_link_libraries(protorelay_logging PUBLIC stdc++fs)
+endif()
 
 # ===== MySQL / c-ares =====
 find_package(PkgConfig)
@@ -250,7 +292,7 @@ elseif(NOT BUILD_OBJECT_ONLY)
 endif()
 
 # ===== 链接库列表 =====
-set(LINK_LIBRARIES Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} spdlog::spdlog)
+set(LINK_LIBRARIES Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} protorelay_logging)
 
 if(ENABLE_HDFS_WEB_STORAGE)
     if(TARGET CURL::libcurl)
@@ -283,7 +325,7 @@ set(COMMON_SRCS
     src/mail_system/back/db/sql_queries.cpp
     src/framework/server_base.cpp
     src/mail_system/back/bootstrap.cpp
-    src/framework/thread_pool/boost_thread_pool.cpp
+    ${WORKER_SRCS}
     src/framework/thread_pool/io_thread_pool.cpp
     src/framework/thread_pool/io_context_registry.cpp
     src/mail_system/back/algorithm/snow.cpp
@@ -316,6 +358,12 @@ set(COMMON_SRCS
     src/mail_system/back/mailServer/session/pop3_session_inst.cpp
 )
 
+# Cross-deployment transfers a single *_obj.dir tree. Keep logger objects in
+# that tree rather than requiring a separately transferred static archive.
+if(BUILD_OBJECT_ONLY)
+    list(APPEND COMMON_SRCS ${LOGGING_SRCS})
+endif()
+
 if(ENABLE_HDFS_WEB_STORAGE)
     list(APPEND COMMON_SRCS src/framework/storage/hdfs_web_storage_provider.cpp)
 endif()
@@ -343,12 +391,12 @@ function(setup_mail_target NAME)
     target_include_directories(${NAME} PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
     target_include_directories(${NAME} PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
     target_compile_features(${NAME} PRIVATE cxx_std_17)
+    target_compile_definitions(${NAME} PRIVATE
+        PROTORELAY_HAS_SPDLOG=${PROTORELAY_HAS_SPDLOG}
+        PROTORELAY_LOG_NONE=${PROTORELAY_LOG_NONE})
 
     if(SYSROOT_INCLUDE)
         target_include_directories(${NAME} BEFORE PRIVATE SYSTEM ${SYSROOT_INCLUDE})
-    endif()
-    if(spdlog_FOUND)
-        target_include_directories(${NAME} PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
     endif()
     if(MYSQL_INCLUDE_DIRS)
         target_include_directories(${NAME} PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
@@ -683,11 +731,23 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(thread_pool_test
         src/framework/thread_pool/io_thread_pool.cpp
         src/framework/thread_pool/io_context_registry.cpp
-        src/framework/thread_pool/boost_thread_pool.cpp
+        ${WORKER_SRCS}
         test/unit/thread_pool_test.cpp
     )
     target_include_directories(thread_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(thread_pool_test)
+
+    add_executable(logger_test test/unit/logger_test.cpp)
+    target_link_libraries(logger_test PRIVATE protorelay_logging)
+    add_test(NAME logger_test COMMAND logger_test)
+
+    # This target intentionally has no Boost include/library requirements.
+    add_executable(std_thread_pool_test
+        src/framework/thread_pool/std_thread_pool.cpp test/unit/std_thread_pool_test.cpp)
+    target_link_libraries(std_thread_pool_test PRIVATE protorelay_logging)
+    add_test(NAME std_thread_pool_test COMMAND std_thread_pool_test)
+
+    set_tests_properties(logger_test std_thread_pool_test PROPERTIES TIMEOUT 20)
 
     # MariaDB 非阻塞 async 回归（阶段 2）：连接池 available 在批量 async 查询后回基线
     if(HAVE_MARIADB)
@@ -844,6 +904,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
     # 显式 target 列表缺了新增的 4 个测试，ctest 因二进制缺失而红）
     add_custom_target(unit_tests DEPENDS
+        logger_test
+        std_thread_pool_test
         smtps_fsm_test
         smtps_fsm_concurrency_test
         imaps_fsm_test
@@ -878,10 +940,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         persist_submission_test
         http_session_read_test
     )
+    if(HAVE_MARIADB)
+        add_dependencies(unit_tests mariadb_async_test)
+    endif()
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
     if(ENABLE_ASAN)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
+            logger_test std_thread_pool_test
             pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
@@ -895,6 +961,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
             target_link_options(${_t} PRIVATE -fsanitize=address,undefined)
         endforeach()
+        target_compile_options(protorelay_logging PRIVATE
+            -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
+        target_link_options(protorelay_logging PUBLIC -fsanitize=address,undefined)
     endif()
 
 endif()
@@ -930,10 +999,7 @@ if(ENABLE_FUZZING)
         "${CMAKE_SOURCE_DIR}/include"
         SYSTEM ${nlohmann_json_INCLUDE_DIRS}
         SYSTEM ${Boost_INCLUDE_DIRS})
-    if(spdlog_FOUND AND spdlog_INCLUDE_DIRS)
-        target_include_directories(smtp_fuzz PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
-    endif()
-    target_link_libraries(smtp_fuzz PRIVATE spdlog::spdlog)
+    target_link_libraries(smtp_fuzz PRIVATE protorelay_logging)
     target_compile_options(smtp_fuzz PRIVATE -fsanitize=${FUZZ_SANITIZERS} -fno-sanitize=${FUZZ_NOSAN} -g -O1)
     target_link_options(smtp_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
     foreach(_ft mime_fuzz smtp_fuzz)

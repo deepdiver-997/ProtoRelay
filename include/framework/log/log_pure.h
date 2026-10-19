@@ -1,12 +1,14 @@
 #ifndef PR_FRAMEWORK_LOG_LOG_PURE_H
 #define PR_FRAMEWORK_LOG_LOG_PURE_H
 
-#include <spdlog/fmt/fmt.h>
+#include "framework/log/log_format.h"
 #include <cstdio>
 #include <chrono>
 #include <string>
 #include <filesystem>
 #include <utility>
+#include <iomanip>
+#include <mutex>
 
 namespace pr {
 
@@ -28,42 +30,50 @@ inline uint64_t log_pure_timestamp_ms() {
     ).count();
 }
 
-namespace {
-    std::string _log_pure_path = "logs/pure.log";
+namespace detail {
+struct PureLogState {
+    std::mutex mutex;
+    std::string path = "logs/pure.log";
+    FILE* file = nullptr;
+    ~PureLogState() { if (file) std::fclose(file); }
+};
+inline PureLogState& pure_log_state() { static PureLogState state; return state; }
 }
 
 /** 设置纯日志输出文件路径 (须在首次写日志前调用) */
 inline void log_pure_init(const std::string& path = "logs/pure.log") {
-    _log_pure_path = path;
+    auto& state = detail::pure_log_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.file) std::fclose(state.file);
+    state.file = nullptr;
+    state.path = path;
 }
 
 /** 写纯日志行: "0xhash|arg1|...|argN\n" (行缓冲, 崩溃不丢) */
 template <typename... Args>
 inline void log_pure_write(uint64_t hash, Args&&... args) {
-    static thread_local FILE* s_fp = nullptr;
-    static thread_local std::string s_last_path;
-    if (!s_fp || s_last_path != _log_pure_path) {
-        if (s_fp) std::fclose(s_fp);
-        std::filesystem::path p(_log_pure_path);
+    std::ostringstream line;
+    line.imbue(std::locale::classic());
+    line << "0x" << std::hex << std::setw(16) << std::setfill('0') << hash;
+    ((line << '|' << detail::log_argument(std::forward<Args>(args))), ...);
+    line << '\n';
+    const auto text = line.str();
+    auto& state = detail::pure_log_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.file) {
+        std::filesystem::path p(state.path);
         if (!p.parent_path().empty())
             std::filesystem::create_directories(p.parent_path());
-        s_fp = std::fopen(_log_pure_path.c_str(), "a");
-        s_last_path = _log_pure_path;
-        if (s_fp) std::setvbuf(s_fp, nullptr, _IOLBF, 0);
+        state.file = std::fopen(state.path.c_str(), "a");
+        if (state.file) std::setvbuf(state.file, nullptr, _IOLBF, 0);
     }
-    if (!s_fp) return;
-    fmt::print(s_fp, "0x{:016x}", hash);
-    ((fmt::print(s_fp, "|{}", std::forward<Args>(args))), ...);
-    fmt::print(s_fp, "\n");
+    if (state.file) std::fwrite(text.data(), 1, text.size(), state.file);
 }
 
 inline void log_pure_flush() {
-    static thread_local FILE* s_fp = nullptr;
-    if (!s_fp) {
-        s_fp = std::fopen(_log_pure_path.c_str(), "a");
-        if (s_fp) std::setvbuf(s_fp, nullptr, _IOLBF, 0);
-    }
-    if (s_fp) std::fflush(s_fp);
+    auto& state = detail::pure_log_state();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.file) std::fflush(state.file);
 }
 
 } // namespace pr

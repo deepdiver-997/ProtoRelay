@@ -23,7 +23,7 @@
 extern "C" int LLVMFuzzerInitialize(int*, char***) {
     // LOG_* 宏要求 logger 已初始化；off 级别，零输出开销
     mail_system::Logger::get_instance().init(
-        "smtp_data_fuzz.log", 0, 1, spdlog::level::off, false, false);
+        "smtp_data_fuzz.log", 0, 1, pr::LogLevel::off, false, false);
     return 0;
 }
 

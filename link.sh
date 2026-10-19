@@ -229,7 +229,9 @@ PKG_LIBS=()
 FALLBACK_LIBS=()
 
 # Prefer pkg-config when available.
-add_pkg_libs spdlog || FALLBACK_LIBS+=( -lspdlog )
+if [[ "${PROTORELAY_LOG_BACKEND:-SPDLOG}" == "SPDLOG" ]]; then
+    add_pkg_libs spdlog || FALLBACK_LIBS+=( -lspdlog )
+fi
 add_pkg_libs openssl || FALLBACK_LIBS+=( -lssl -lcrypto )
 add_pkg_libs libcares || add_pkg_libs cares || FALLBACK_LIBS+=( -lcares )
 add_pkg_libs mysqlclient || add_pkg_libs mariadb || add_pkg_libs libmariadb || FALLBACK_LIBS+=( -lmysqlclient )

@@ -8,7 +8,7 @@
 // 装配同 mail_server_combined：bootstrap::assemble 按配置建 DB/存储/路由。
 // ──────────────────────────────────────────────────────────────────
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/bootstrap.h"
 #include "mail_system/back/webmail/webmail_server.h"
 #include "mail_system/back/common/logger.h"
@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
 
         auto io_pool = std::make_shared<pr::IOThreadPool>(config.io_thread_count);
         io_pool->start();
-        auto wk_pool = std::make_shared<pr::BoostThreadPool>(config.worker_thread_count);
+        auto wk_pool = std::make_shared<pr::WorkerThreadPool>(config.worker_thread_count);
         wk_pool->start();
         bootstrap::Options pools;
         pools.io_pool = io_pool;

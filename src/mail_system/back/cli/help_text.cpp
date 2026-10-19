@@ -63,7 +63,8 @@ std::string render_help_text(const std::string& program_name) {
         << "  - SMTP protocol parsing\n"
         << "  - SMTP delivery pipeline\n"
         << "\n"
-        << "More docs: docs/PROJECT_STYLE.md\n";
+        << "Build backends: log=" << PROTORELAY_LOG_BACKEND << " worker=" << PROTORELAY_WORKER_BACKEND << "\n"
+        << "More docs: docs/style/PROJECT_STYLE.md\n";
     return oss.str();
 }
 
@@ -74,6 +75,7 @@ std::string render_version_text() {
         << "Build-Time: " << PROTORELAY_BUILD_UTC << "\n"
         << "Target: " << PROTORELAY_BUILD_TARGET << "\n"
         << "Compiler: " << PROTORELAY_COMPILER << "\n"
+        << "Backends: log=" << PROTORELAY_LOG_BACKEND << " worker=" << PROTORELAY_WORKER_BACKEND << "\n"
         << "Features: smtp smtps " << kFeatureSsl << " " << kFeatureDbDedup << " " << kFeatureObjectOnly << " " << kFeatureHdfsWeb << "\n";
     return oss.str();
 }

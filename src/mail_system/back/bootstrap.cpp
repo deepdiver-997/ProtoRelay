@@ -1,7 +1,7 @@
 #include "mail_system/back/bootstrap.h"
 
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/log/log_macros.h"
 #include "framework/storage/io_error.h"
 #include "mail_system/back/router/hash_shard_router.h"
@@ -36,6 +36,9 @@ static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const S
 Assembled assemble(const ServerConfig& config, const Options& opts) {
     Assembled out;
 
+    pr::Logger::get_instance().init(config.log_file, 5 * 1024 * 1024, 3,
+        pr::Logger::string_to_level(config.log_level), config.log_to_console, config.log_to_file);
+
     // ---- 1. 线程池 ----
     out.io_pool = opts.io_pool;
     if (!out.io_pool) {
@@ -49,7 +52,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     if (!out.worker_pool) {
         if (config.worker_thread_count <= 0)
             throw std::runtime_error("bootstrap: worker_thread_count must be > 0");
-        out.worker_pool = std::make_shared<pr::BoostThreadPool>(
+        out.worker_pool = std::make_shared<pr::WorkerThreadPool>(
             static_cast<size_t>(config.worker_thread_count));
         out.worker_pool->start();
     }

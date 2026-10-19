@@ -13,7 +13,7 @@
 #include <boost/asio.hpp>
 
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/db/db_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/i_storage_provider.h"
@@ -83,13 +83,13 @@ ServerConfig make_cfg() {
 // 纯 DI：pr::ServerBase 三件套缺一不可。本测试不触碰 DB/存储，显式传最小 null-object。
 struct DiResources {
     std::shared_ptr<pr::IOThreadPool> io;
-    std::shared_ptr<pr::BoostThreadPool> worker;
+    std::shared_ptr<pr::WorkerThreadPool> worker;
     std::shared_ptr<mail_system::router::IShardRouter> router;
 };
 static DiResources make_resources() {
     auto io = std::make_shared<pr::IOThreadPool>(1);
     io->start();
-    auto worker = std::make_shared<pr::BoostThreadPool>(1);
+    auto worker = std::make_shared<pr::WorkerThreadPool>(1);
     worker->start();
     auto router = std::make_shared<mail_system::router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{}, 0,

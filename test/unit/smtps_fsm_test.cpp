@@ -7,7 +7,7 @@
 #include "framework/session_base.tpp"
 #include "framework/server_config.h"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
@@ -23,7 +23,6 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <spdlog/common.h>
 
 using namespace mail_system;
 using mail_system::algorithm::LineFolder;
@@ -46,7 +45,7 @@ struct TestServer : SmtpsServer {
 
 struct FsmTestFixture {
     std::shared_ptr<pr::IOThreadPool> io_pool;
-    std::shared_ptr<pr::BoostThreadPool> worker_pool;
+    std::shared_ptr<pr::WorkerThreadPool> worker_pool;
     std::shared_ptr<router::StaticShardRouter> router;
     std::shared_ptr<pq::PersistentQueue> persist_q;
     std::shared_ptr<TestServer> server;
@@ -54,9 +53,9 @@ struct FsmTestFixture {
     ServerConfig cfg;
 
     FsmTestFixture() {
-        Logger::get_instance().init("smtps_fsm_test.log", 0, 1, spdlog::level::debug, false, true);
+        Logger::get_instance().init("smtps_fsm_test.log", 0, 1, pr::LogLevel::debug, false, true);
         io_pool     = std::make_shared<pr::IOThreadPool>(1);
-        worker_pool = std::make_shared<pr::BoostThreadPool>(2);
+        worker_pool = std::make_shared<pr::WorkerThreadPool>(2);
         io_pool->start();
         worker_pool->start();
 

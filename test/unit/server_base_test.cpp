@@ -17,7 +17,7 @@
 #include <thread>
 #include <unistd.h>
 
-#include "framework/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/db/db_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/storage/i_storage_provider.h"
@@ -126,7 +126,7 @@ int main() {
     // 纯 DI：全部用例共享一套最小资源（池已 start + 空 router）
     auto io_pool = std::make_shared<pr::IOThreadPool>(1);
     io_pool->start();
-    auto wk_pool = std::make_shared<pr::BoostThreadPool>(1);
+    auto wk_pool = std::make_shared<pr::WorkerThreadPool>(1);
     wk_pool->start();
     auto null_router = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{}, 0,

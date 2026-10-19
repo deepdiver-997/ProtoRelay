@@ -17,8 +17,8 @@
 #ifdef LOG_LOOK_UP
 #define LOG_AT(mod, LEVEL, fmt, ...) (void)("LUK\001" mod "\001" #LEVEL "\001" fmt)
 #else
-#define _SRC_LOC spdlog::source_loc{__FILE__, __LINE__, SPDLOG_FUNCTION}
-#define LOG_AT(mod, LEVEL, ...) pr::log(mod)->log(_SRC_LOC, spdlog::level::LEVEL, __VA_ARGS__)
+#define _SRC_LOC pr::SourceLocation{__FILE__, __LINE__, __func__}
+#define LOG_AT(mod, LEVEL, ...) pr::log(mod, pr::LogLevel::LEVEL, _SRC_LOC, __VA_ARGS__)
 #endif
 
 // ── 框架模块 ENABLE 开关（DEBUG/TRACE 的 Release 编译期消除）──
