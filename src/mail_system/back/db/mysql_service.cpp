@@ -1,5 +1,6 @@
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/common/logger.h"
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 
@@ -431,7 +432,7 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
 
         for (size_t i = 0; i < num_fields; ++i) {
             buffers[i].resize(fields[i].max_length > 0 ? fields[i].max_length : 256);
-            memset(&result_binds[i], 0, sizeof(MYSQL_BIND));
+            std::memset(&result_binds[i], 0, sizeof(MYSQL_BIND));
             result_binds[i].buffer_type = MYSQL_TYPE_STRING;
             result_binds[i].buffer = buffers[i].data();
             result_binds[i].buffer_length = buffers[i].size();
