@@ -2,6 +2,7 @@
 #define PR_FRAMEWORK_IO_THREAD_POOL_H
 
 #include "thread_pool_base.h"
+#include "framework/net/executor.h"
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
@@ -25,7 +26,7 @@ namespace pr {
  * 这个类使用Boost.Asio的io_context来实现IO线程池功能，
  * 适用于处理IO密集型任务，如网络通信、文件操作等。
  */
-class IOThreadPool : public ThreadPoolBase {
+class IOThreadPool : public ThreadPoolBase, public net::IExecutorProvider {
 public:
     /**
      * @brief 构造函数
@@ -66,6 +67,8 @@ public:
      * @return false 如果线程池已停止
      */
     bool is_running() const override;
+
+    std::shared_ptr<net::IExecutor> next_executor() override;
 
     /**
      * @brief 获取io_context

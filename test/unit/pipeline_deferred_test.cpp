@@ -49,7 +49,7 @@ public:
         } else if (line.find("LOGOUT") != std::string::npos) {
             do_async_write("* BYE\r\nLOGOUT OK\r\n",
                 [](std::shared_ptr<pr::SessionBase<MockConnection>> s,
-                   const boost::system::error_code& ec) {
+                   const std::error_code& ec) {
                     if (!ec) s->close();
                 });
         }
@@ -81,7 +81,7 @@ void expect_true(bool c, const char* what) {
 void worker_complete(const std::shared_ptr<DeferrableSession>& s, const char* resp) {
     s->do_async_write(resp,
         [](std::shared_ptr<pr::SessionBase<MockConnection>> s2,
-           const boost::system::error_code& ec) {
+           const std::error_code& ec) {
             if (!ec) s2->do_async_read();
         });
     s->drain_buffered_commands();

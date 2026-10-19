@@ -8,6 +8,7 @@
 #include "framework/server_config.h"
 #include "framework/db/db_pool.h"
 #include "framework/net/dns_resolver.h"
+#include "framework/net/executor.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "framework/intrusion_detector.h"
 #include "framework/metrics_server.h"
@@ -73,6 +74,9 @@ public:
 
     // io_context (TCP 服务器提供，测试 mock 返回 nullptr)
     virtual std::shared_ptr<boost::asio::io_context> get_io_context() const { return nullptr; }
+
+    // Backend-neutral scheduling for server-owned maintenance tasks.
+    std::shared_ptr<net::IExecutor> get_executor() const;
 
     // ── 共享成员（所有协议共用） ──────────────────────────────
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;

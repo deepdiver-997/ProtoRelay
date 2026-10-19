@@ -1,6 +1,6 @@
 #pragma once
 #include "mail_system/back/entities/mail.h"
-#include <boost/asio/any_io_executor.hpp>
+#include "framework/net/executor.h"
 #include <chrono>
 #include <functional>
 #include <mutex>
@@ -21,10 +21,10 @@ class PersistCompletion {
 public:
     using Complete = std::function<void(PersistResult)>;
     bool complete(PersistResult result, const SharedPersistStatus& status);
-    void observe(boost::asio::any_io_executor executor, Complete callback);
+    void observe(std::shared_ptr<pr::net::IExecutor> executor, Complete callback);
     std::optional<PersistResult> result() const;
 private:
-    struct Observer { boost::asio::any_io_executor executor; Complete callback; };
+    struct Observer { std::shared_ptr<pr::net::IExecutor> executor; Complete callback; };
     mutable std::mutex mutex_;
     std::optional<PersistResult> result_;
     std::vector<Observer> observers_;
@@ -40,7 +40,7 @@ struct PersistSubmissionTicket {
     void request_cancel() const { if (cancel_requested) cancel_requested->store(true, std::memory_order_release); }
     bool is_cancel_requested() const { return cancel_requested && cancel_requested->load(std::memory_order_acquire); }
     bool complete(PersistStatus terminal, std::string error = {}, bool deduplicated = false) const;
-    void async_wait(boost::asio::any_io_executor executor, std::chrono::milliseconds timeout,
+    void async_wait(std::shared_ptr<pr::net::IExecutor> executor, std::chrono::milliseconds timeout,
                     PersistCompletion::Complete callback) const;
 };
 } // namespace mail_system::persist_storage

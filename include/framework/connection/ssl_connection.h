@@ -2,7 +2,10 @@
 #define PR_FRAMEWORK_SSL_CONNECTION_H
 
 #include "i_connection.h"
+#include "framework/net/asio_executor.h"
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/write.hpp>
 #include <openssl/err.h>
 #include <memory>
 
@@ -14,47 +17,66 @@ public:
     SslConnection(
         std::unique_ptr<boost::asio::ip::tcp::socket> socket,
         boost::asio::ssl::context& ssl_context
-    ) : stream_(
-          std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
-              std::move(*socket), ssl_context)) {}
+    ) : stream_(net::asio_call("create TLS stream", [&] {
+            return std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
+                std::move(*socket), ssl_context);
+        })), executor_(std::make_shared<net::AsioExecutor>(stream_->get_executor())) {}
 
     SslConnection(
         boost::asio::ssl::stream<boost::asio::ip::tcp::socket>&& stream
-    ) : stream_(std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(stream))) {}
+    ) : stream_(std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(stream))),
+        executor_(std::make_shared<net::AsioExecutor>(stream_->get_executor())) {}
 
     SslConnection(
         std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> stream
-    ) : stream_(std::move(stream)) {}
+    ) : stream_(std::move(stream)), executor_(std::make_shared<net::AsioExecutor>(stream_->get_executor())) {}
     
     ~SslConnection() override = default;
 
     // 异步读取
     void async_read(
-        boost::asio::mutable_buffer buffer,
+        net::MutableBuffer buffer,
         ReadHandler handler
     ) override {
-        stream_->async_read_some(buffer, handler);
+        net::asio_call("TLS read", [&] {
+            stream_->async_read_some(boost::asio::buffer(buffer.data(), buffer.size()),
+                boost::asio::bind_executor(executor_->native_executor(),
+                    [handler = std::move(handler)](const boost::system::error_code& error, size_t size) {
+                        handler(net::asio_error(error), size);
+                    }));
+        });
     }
 
     // 获取 executor
-    boost::asio::any_io_executor get_executor() override {
-        return stream_->get_executor();
-    }
+    std::shared_ptr<net::IExecutor> executor() override { return executor_; }
 
     // 异步写入
     void async_write(
-        boost::asio::const_buffer buffer,
+        net::ConstBuffer buffer,
         WriteHandler handler
     ) override {
-        boost::asio::async_write(*stream_, buffer, handler);
+        net::asio_call("TLS write", [&] {
+            boost::asio::async_write(*stream_, boost::asio::buffer(buffer.data(), buffer.size()),
+                boost::asio::bind_executor(executor_->native_executor(),
+                    [handler = std::move(handler)](const boost::system::error_code& error, size_t size) {
+                        handler(net::asio_error(error), size);
+                    }));
+        });
     }
 
     // SSL 握手
     void async_handshake(
-        boost::asio::ssl::stream_base::handshake_type type,
+        net::HandshakeRole type,
         HandshakeHandler handler
     ) override {
-        stream_->async_handshake(type, handler);
+        net::asio_call("TLS handshake", [&] {
+            stream_->async_handshake(type == net::HandshakeRole::server
+                ? boost::asio::ssl::stream_base::server : boost::asio::ssl::stream_base::client,
+                boost::asio::bind_executor(executor_->native_executor(),
+                    [handler = std::move(handler)](const boost::system::error_code& error) {
+                        handler(net::asio_error(error));
+                    }));
+        });
     }
 
     // 取消挂起的读/写（watchdog 用：只取消，不关闭连接）
@@ -92,8 +114,8 @@ public:
         return stream_->lowest_layer().remote_endpoint(ec).address().to_string();
     }
 
-    // 释放原始 socket（从 SSL stream 中提取）
-    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() override {
+    // Asio-only transport handoff extension; not part of IConnection.
+    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() {
         return std::make_unique<boost::asio::ip::tcp::socket>(
             std::move(stream_->next_layer())
         );
@@ -128,6 +150,7 @@ public:
 
 private:
     std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> stream_;
+    std::shared_ptr<net::AsioExecutor> executor_;
 };
 
 } // namespace pr

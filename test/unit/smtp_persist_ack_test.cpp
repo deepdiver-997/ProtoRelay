@@ -100,7 +100,15 @@ bool run(Scenario scenario) {
     while (std::chrono::steady_clock::now() < deadline && queue->inflight_count())
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     assert(queue->inflight_count() == 0);
-    // 完成通知经 executor 入队，先排空再读取消费者所见响应。
+    // Queue completion precedes response delivery. With a serialized connection
+    // executor, poll() on a second thread cannot drain a strand already running
+    // on its owner. Wait for the consumer-visible response and accepted metric.
+    if (scenario == Scenario::Success) {
+        const auto response_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < response_deadline &&
+               (wire->written().empty() || server->mails_accepted_total_.load() != 1))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     wire->pump_executor();
     const auto response = wire->written();
     const bool kept_body = std::filesystem::exists(body);

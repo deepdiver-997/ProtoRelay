@@ -1,8 +1,13 @@
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/io_context_registry.h"
+#include "framework/net/asio_executor.h"
 #include "framework/log/log_macros.h"
 
 namespace pr {
+
+std::shared_ptr<net::IExecutor> IOThreadPool::next_executor() {
+    return std::make_shared<net::AsioExecutor>(get_io_context().get_executor());
+}
 
 IOThreadPool::IOThreadPool(size_t thread_count)
     : m_thread_count(thread_count), m_running(false) {

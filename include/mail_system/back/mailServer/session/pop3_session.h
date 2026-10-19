@@ -20,7 +20,7 @@ public:
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalPop3Fsm<ConnectionType>> fsm);
 
-    ~Pop3Session() override = default;
+    ~Pop3Session() override;
 
     // 关闭时推送 protorelay_pop3_sessions_total{result=ok/err}，
     // 再走 pr::SessionBase::close()（其内会推通用 session_duration / record_session_end）。

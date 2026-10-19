@@ -1,3 +1,4 @@
+#include "framework/net/asio_executor.h"
 // 持久化完成边界：订阅竞态、事务提交、取消/超时、关机与背压。
 // 2026-10-18 前科及负验证：docs/bugfixes/2026-10-18-persist-completion-callback.md。
 #undef NDEBUG
@@ -132,7 +133,7 @@ void test_committed_cancel() {
     auto submission = f.queue->submit_owned_mail(std::move(mail)); assert(submission.accepted);
     assert(f.db->connection->wait_commit());
     std::promise<PersistResult> reply; auto result = reply.get_future();
-    submission.ticket.async_wait(f.io.get_executor(), 2s, [&](PersistResult r) { reply.set_value(r); });
+    submission.ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()), 2s, [&](PersistResult r) { reply.set_value(r); });
     assert(result.wait_for(20ms) == std::future_status::timeout);
     submission.ticket.request_cancel(); f.db->connection->complete_commit();
     assert(result.wait_for(2s) == std::future_status::ready);
@@ -140,7 +141,7 @@ void test_committed_cancel() {
     assert(f.db->connection->committed && f.db->connection->deletes == 0 && std::filesystem::exists(body));
     // 完成之后再订阅仍能收到同一终态，且不能二次覆盖。
     std::promise<PersistResult> later; auto late = later.get_future();
-    submission.ticket.async_wait(f.io.get_executor(), 2s, [&](PersistResult r) { later.set_value(r); });
+    submission.ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()), 2s, [&](PersistResult r) { later.set_value(r); });
     assert(late.wait_for(2s) == std::future_status::ready && late.get().status == PersistStatus::SUCCESS);
     assert(!submission.ticket.complete(PersistStatus::FAILED, "duplicate callback"));
 }
@@ -150,7 +151,7 @@ void test_timeout_late_commit() {
     auto submission = f.queue->submit_owned_mail(std::move(mail)); assert(submission.accepted);
     assert(f.db->connection->wait_commit());
     std::promise<PersistResult> reply; auto result = reply.get_future(); std::atomic<int> calls{0};
-    submission.ticket.async_wait(f.io.get_executor(), 30ms, [&](PersistResult r) { ++calls; reply.set_value(r); });
+    submission.ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()), 30ms, [&](PersistResult r) { ++calls; reply.set_value(r); });
     assert(result.wait_for(2s) == std::future_status::ready);
     assert(result.get().timed_out && !submission.ticket.is_cancel_requested());
     submission.ticket.request_cancel();
@@ -165,7 +166,7 @@ void test_failed_rollback(bool commit_failure) {
     auto mail = f.message(); const auto body = mail->body_path;
     auto submission = f.queue->submit_owned_mail(std::move(mail)); assert(submission.accepted);
     std::promise<PersistResult> reply; auto result = reply.get_future();
-    submission.ticket.async_wait(f.io.get_executor(), 2s, [&](PersistResult r) { reply.set_value(r); });
+    submission.ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()), 2s, [&](PersistResult r) { reply.set_value(r); });
     if (commit_failure) { assert(f.db->connection->wait_commit()); f.db->connection->complete_commit(false); }
     assert(f.db->connection->wait_rollback());
     assert(result.wait_for(20ms) == std::future_status::timeout); // 回滚完成前不能释放事务/发布失败
@@ -182,7 +183,7 @@ void test_cancel_shutdown_pressure(bool shutdown) {
     auto rejected = f.queue->submit_owned_mail(f.message(101));
     assert(!rejected.accepted && rejected.rejected_mail && rejected.rejected_mail->id == 101);
     std::promise<PersistResult> reply; auto result = reply.get_future();
-    submission.ticket.async_wait(f.io.get_executor(), 2s, [&](PersistResult r) { reply.set_value(r); });
+    submission.ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()), 2s, [&](PersistResult r) { reply.set_value(r); });
     if (shutdown) f.queue->shutdown(); else submission.ticket.request_cancel();
     release.set_value();
     assert(result.wait_for(2s) == std::future_status::ready && result.get().status == PersistStatus::CANCELLED);
@@ -195,7 +196,7 @@ void test_observer_race() {
         assert(!ticket.complete(PersistStatus::PROCESSING));
         std::promise<PersistResult> reply; auto result = reply.get_future();
         std::thread publisher([&] { assert(ticket.complete(PersistStatus::SUCCESS)); });
-        ticket.async_wait(io.get_executor(), 1s, [&](PersistResult r) { reply.set_value(r); });
+        ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(io.get_executor()), 1s, [&](PersistResult r) { reply.set_value(r); });
         publisher.join(); assert(result.wait_for(1s) == std::future_status::ready && result.get().status == PersistStatus::SUCCESS);
     }
     guard.reset(); runner.join();
@@ -205,8 +206,8 @@ void test_independent_waiters() {
     PersistSubmissionTicket ticket; ticket.mail_id = 88;
     std::promise<PersistResult> first, second;
     auto short_wait = first.get_future(); auto long_wait = second.get_future();
-    ticket.async_wait(io.get_executor(), 10ms, [&](PersistResult r) { first.set_value(r); });
-    ticket.async_wait(io.get_executor(), 1s, [&](PersistResult r) { second.set_value(r); });
+    ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(io.get_executor()), 10ms, [&](PersistResult r) { first.set_value(r); });
+    ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(io.get_executor()), 1s, [&](PersistResult r) { second.set_value(r); });
     assert(short_wait.wait_for(1s) == std::future_status::ready && short_wait.get().timed_out);
     assert(!ticket.is_cancel_requested() && !ticket.completion->result());
     assert(ticket.complete(PersistStatus::SUCCESS));
@@ -220,7 +221,7 @@ void test_atomic_sent_copy(int failure) {
     auto mail = f.message(); mail->save_sent_copy = true; const auto body = mail->body_path;
     auto submission = f.queue->submit_owned_mail(std::move(mail)); assert(submission.accepted);
     std::promise<PersistResult> reply; auto result = reply.get_future();
-    submission.ticket.async_wait(f.io.get_executor(), 2s, [&](PersistResult r) { reply.set_value(r); });
+    submission.ticket.async_wait(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()), 2s, [&](PersistResult r) { reply.set_value(r); });
     if (!failure) {
         assert(f.db->connection->wait_commit() && f.db->connection->sent_inserted);
         assert(result.wait_for(20ms) == std::future_status::timeout);

@@ -28,8 +28,8 @@ template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
     pr::SessionBase<ConnectionType>::do_handshake(
         self,
-        boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("Handshake failed: {}", ec.message()); return; }
             s->rearm(s->config_read_timeout());   // 挂接看门狗：闲置/对端断电 over read_timeout 回收
             auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(s->get_fsm());
@@ -42,8 +42,8 @@ template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::start_after_starttls(std::shared_ptr<SmtpsSession> self) {
     pr::SessionBase<ConnectionType>::do_handshake(
         self,
-        boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("STARTTLS handshake failed: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
             s->set_next_event(static_cast<int>(SmtpsEvent::TIMEOUT));
@@ -347,7 +347,7 @@ persist_storage::SubmitOwnedMailResult SmtpsSession<ConnectionType>::submit_mail
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::async_wait_pending_mail(
     std::chrono::milliseconds timeout, persist_storage::PersistCompletion::Complete callback) {
-    pending_submission_.async_wait(this->get_connection().get_executor(), timeout, std::move(callback));
+    pending_submission_.async_wait(this->get_connection().executor(), timeout, std::move(callback));
 }
 
 template <typename ConnectionType>

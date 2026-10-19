@@ -1,4 +1,5 @@
 #include "mail_system/back/submission/mail_submission_service.h"
+#include "framework/net/asio_executor.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
@@ -147,7 +148,7 @@ struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation
         }
         auto self = shared_from_this();
         admitted.ticket.async_wait(
-            service->executors_(),
+            std::make_shared<pr::net::AsioExecutor>(service->executors_()),
             std::chrono::milliseconds(service->config_.inbound_persist_wait_timeout_ms),
             [self](persist_storage::PersistResult r) {
                 if (r.timed_out) {

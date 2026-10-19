@@ -320,17 +320,24 @@ int main() {
         auto s = make_session();
         int hs_calls = 0;
         bool hs_ok = false;
+        auto payload = std::make_shared<int>(42);
+        std::weak_ptr<int> weak_payload = payload;
         pr::SessionBase<MockConnection>::do_handshake(
-            s, boost::asio::ssl::stream_base::client,
-            [&](std::shared_ptr<pr::SessionBase<MockConnection>>,
-                const boost::system::error_code& ec) { hs_calls++; hs_ok = !ec; });
+            s, pr::net::HandshakeRole::client,
+            [&, payload](std::shared_ptr<pr::SessionBase<MockConnection>>,
+                const std::error_code& ec) { hs_calls++; hs_ok = !ec && *payload == 42; });
+        payload.reset();
+        expect_true(!weak_payload.expired(), "copyable handshake callback retains its shared capture");
+        expect_true(hs_calls == 0, "handshake initiation is posted to connection executor");
+        s->get_connection().pump_executor();
         expect_true(hs_calls == 1 && hs_ok, "handshake completes without error on mock");
+        expect_true(weak_payload.expired(), "handshake callback releases its capture after completion");
     }
 
     // ── handle_error → close ─────────────────────────────────
     {
         auto s = make_session();
-        s->handle_error(boost::asio::error::eof);
+        s->handle_error(pr::net::make_error_code(pr::net::IoErrc::end_of_stream));
         expect_true(s->is_closed(), "handle_error closes session");
         finish_session(s);   // 收尾：close 发起须在 session 释放前执行
     }

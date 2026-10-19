@@ -18,6 +18,14 @@
 
 namespace pr {
 
+std::shared_ptr<net::IExecutor> ServerBase::get_executor() const {
+    auto provider = std::dynamic_pointer_cast<net::IExecutorProvider>(m_ioThreadPool);
+    if (!provider) throw std::invalid_argument("ServerBase: IO runtime must provide executors");
+    auto executor = provider->next_executor();
+    if (!executor) throw std::runtime_error("ServerBase: IO runtime returned an empty executor");
+    return executor;
+}
+
 ServerBase::ServerBase(const mail_system::ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
       std::shared_ptr<ThreadPoolBase> workerThreadPool,

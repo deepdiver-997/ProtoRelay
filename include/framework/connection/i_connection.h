@@ -1,9 +1,10 @@
 #ifndef PR_FRAMEWORK_I_CONNECTION_H
 #define PR_FRAMEWORK_I_CONNECTION_H
 
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
+#include "framework/net/io_types.h"
+#include "framework/net/executor.h"
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -13,33 +14,37 @@ namespace pr {
 template <typename ConnectionType>
 class SessionBase;
 
-// 连接抽象接口，隐藏底层 socket 细节
+// Backend-independent connection contract. Initiate IO, close, and cancel on
+// executor(); completions run on that same serialized executor. Buffers and
+// the connection must remain alive through completion. Reads return available
+// bytes; successful writes send the entire buffer. EOF is net::IoErrc::end_of_stream,
+// cancellation is std::errc::operation_canceled.
 class IConnection {
 public:
-    using ReadHandler = std::function<void(const boost::system::error_code&, std::size_t)>;
-    using WriteHandler = std::function<void(const boost::system::error_code&, std::size_t)>;
-    using HandshakeHandler = std::function<void(const boost::system::error_code&)>;
+    using ReadHandler = std::function<void(const std::error_code&, std::size_t)>;
+    using WriteHandler = std::function<void(const std::error_code&, std::size_t)>;
+    using HandshakeHandler = std::function<void(const std::error_code&)>;
 
     virtual ~IConnection() = default;
 
     // 异步读取
     virtual void async_read(
-        boost::asio::mutable_buffer buffer,
+        net::MutableBuffer buffer,
         ReadHandler handler
     ) = 0;
 
     // 获取 executor，用于创建定时器等
-    virtual boost::asio::any_io_executor get_executor() = 0;
+    virtual std::shared_ptr<net::IExecutor> executor() = 0;
 
     // 异步写入
     virtual void async_write(
-        boost::asio::const_buffer buffer,
+        net::ConstBuffer buffer,
         WriteHandler handler
     ) = 0;
 
     // 异步延时写入（用 steady_timer 实现非阻塞延时）
     virtual void async_write_with_delay(
-        boost::asio::const_buffer buffer,
+        net::ConstBuffer buffer,
         std::chrono::milliseconds delay,
         WriteHandler handler)
     {
@@ -47,9 +52,9 @@ public:
             async_write(buffer, std::move(handler));
             return;
         }
-        auto timer = std::make_shared<boost::asio::steady_timer>(get_executor());
+        auto timer = executor()->make_timer();
         timer->expires_after(delay);
-        timer->async_wait([this, buffer, handler = std::move(handler), timer](const boost::system::error_code& ec) mutable {
+        timer->async_wait([this, buffer, handler = std::move(handler), timer](const std::error_code& ec) mutable {
             if (ec) {
                 handler(ec, 0);
                 return;
@@ -60,7 +65,7 @@ public:
 
     // SSL 握手（TCP 连接直接调用成功回调）
     virtual void async_handshake(
-        boost::asio::ssl::stream_base::handshake_type type,
+        net::HandshakeRole type,
         HandshakeHandler handler
     ) = 0;
 
@@ -83,9 +88,6 @@ public:
 
     // 握手失败诊断信息（SSL 连接返回 OpenSSL 错误栈/状态；TCP 连接返回空）
     virtual std::string get_handshake_diagnostic() const { return {}; }
-
-    // 获取原始 socket 指针（谨慎使用，仅用于类型转换）
-    virtual std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() = 0;
 
     // 原生 fd（Linux 零拷贝 sendfile/splice 需要）。默认 -1 表示不可用；
     // TcpConnection 覆写返回真实 fd。注意：该 fd 绕过 SSL 层，绝不可用于 TLS。

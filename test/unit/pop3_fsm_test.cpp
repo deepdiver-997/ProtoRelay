@@ -188,8 +188,11 @@ struct FsmTestFixture {
     template <typename H>
     static bool wait_closed(H& h, int timeout_ms = 3000) {
         for (int waited = 0; waited < timeout_ms; waited += 5) {
-            if (h.session->is_closed()) return true;
             h.conn->pump_executor();   // 关闭经 exec_ctx_ 串行化,排空后再判
+            if (h.session->is_closed()) {
+                h.conn->pump_executor(); // Also finish heartbeat cancellation.
+                return true;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         return h.session->is_closed();

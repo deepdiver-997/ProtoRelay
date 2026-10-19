@@ -122,6 +122,11 @@ DKIM/SPF/DMARC 的每一次改动都走一遍完整验收，不要用「代码�
     再改 timer（异步超时回收 watchdog）。
   - 例：远程存储装饰器把阻塞/耗时 op `post` 到 worker 池避免卡 io；回调再续。
 
+框架业务代码使用 `pr::net::IExecutor::post` 和 `ITimer`，Asio 类型只在适配器中出现。
+服务器维护任务通过 `IExecutorProvider::next_executor()` 取得执行器，工作线程池不承担该职责。
+POP3 清扫/心跳的专项回归见 `test/unit/pop3_timer_boundary_test.cpp`（2026-10-19）：
+覆盖 worker/DB 回调后的定时器重排、关闭与到期成功回调竞态、排队初始化及析构取消。
+
 ### 11.2 两条都成立的正规异步续跑路径（别误判违规）
 
 1. **回调 `post` 回 io 线程**再碰 io 对象（即 11.1 的规则）。
@@ -205,3 +210,22 @@ CAPABILITY 等首响应全部发不出来,4 个 FSM 测试全挂在第一个断�
 **判断口诀**：凡是"post 进去了但回调永远不执行、且无任何报错",第一反应查跑该
 context 的线程是否还活着——run() 没装 guard = 线程早已退出。guard 放线程栈上
 （make_work_guard 后立刻 run）,stop 顺序 = reset guard → stop → join → restart。
+
+## 12. Error Codes and Exceptions
+
+- `std::error_code` 是错误值，不是异常；异步读写、计时等可预期失败通过完成回调返回。
+- 框架自有语义使用自己的枚举与 `std::error_category`（如 `net::IoErrc::end_of_stream`），
+  可用标准条件表达的语义优先使用 `std::errc`（如取消、超时）。调用方按完整错误码/条件比较，
+  不依赖裸整数：错误身份由 category 与 value 一起决定。
+- Asio 适配器在 `net::asio_error()` 统一 EOF/取消，其余驱动错误保留原 category、value 和诊断。
+  不把所有驱动值重新装进 `std::system_category()`，以免相同数值被解释成另一种错误。
+- 同步驱动系统异常在 `net::asio_call()` 边界转为 `std::system_error`，原始驱动异常通过
+  `std::nested_exception` 保留；参数/编程错误及用户异常保留原类型，不能一律伪装成 IO 错误。
+  完成回调在后续调度中执行，不能把用户回调抛出的异常错算成驱动发起失败。
+- 不为替换标准库载体而新建一套继承树。若未来需要统一重试策略、错误上下文等能力，
+  可以增加基于标准错误码的框架分类，协议状态（如 `SessionError`）仍保持自身语义。
+- 握手和执行器的回调容器目前是 `std::function`，要求 callable 可拷贝。持有 `shared_ptr`
+  的 lambda 可以直接存放；即使 session 由 `shared_ptr` 管理，捕获 `unique_ptr` 的 lambda
+  仍然不可拷贝。确需移动型回调时应统一调整回调容器，避免局部偷偷增加共享所有权。
+
+错误域及同步异常转换回归：`test/unit/asio_error_test.cpp`。

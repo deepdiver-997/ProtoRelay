@@ -4,8 +4,7 @@
 #include "framework/tcp_server_base.h"
 #include "mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h"
 #include "mail_system/back/mailServer/session/pop3_session.h"
-#include <boost/asio/steady_timer.hpp>
-#include <functional>
+#include "framework/net/executor.h"
 
 namespace mail_system {
 
@@ -33,8 +32,8 @@ protected:
 private:
     // 锁清扫（v2）：周期回收心跳过期的 pop3_session_lock，防硬崩溃死锁
     void start_lock_sweeper();
-    std::shared_ptr<boost::asio::steady_timer> m_sweep_timer;
-    std::function<void(const boost::system::error_code&)> m_sweep_tick;
+    struct LockSweeper;
+    std::shared_ptr<LockSweeper> m_lock_sweeper;
 
     std::shared_ptr<TraditionalPop3Fsm<pr::TcpConnection>> m_tcp_fsm;
     std::shared_ptr<TraditionalPop3Fsm<pr::SslConnection>> m_ssl_fsm;

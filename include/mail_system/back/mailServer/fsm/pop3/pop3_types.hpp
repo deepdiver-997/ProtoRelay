@@ -1,7 +1,7 @@
 #ifndef POP3_TYPES_HPP
 #define POP3_TYPES_HPP
 
-#include <boost/asio/steady_timer.hpp>
+#include "framework/net/executor.h"
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -79,8 +79,8 @@ struct Pop3Context {
     // 拿到锁后启动递归续约定时器，close() 时取消 → 破环。
     // heartbeat_handler 存递归回调本体（weak_tick 重新锁定用），
     // 两者都由 session 拥有，session 析构 → 定时器/回调一并释放，无泄漏。
-    std::shared_ptr<boost::asio::steady_timer> heartbeat_timer;
-    std::shared_ptr<std::function<void(const boost::system::error_code&)>> heartbeat_handler;
+    std::shared_ptr<pr::net::ITimer> heartbeat_timer;
+    std::shared_ptr<std::function<void(const std::error_code&)>> heartbeat_handler;
 
     // 命令 args（parse 后由 session 写入，handler 读）
     std::string last_command_args;

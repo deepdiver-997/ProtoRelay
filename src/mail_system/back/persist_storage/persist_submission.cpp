@@ -1,10 +1,7 @@
 #include "mail_system/back/persist_storage/persist_submission.h"
-#include <boost/asio/post.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/strand.hpp>
+#include <stdexcept>
 
 namespace mail_system::persist_storage {
-namespace asio = boost::asio;
 bool PersistCompletion::complete(PersistResult result, const SharedPersistStatus& status) {
     if (result.status != PersistStatus::SUCCESS && result.status != PersistStatus::FAILED &&
         result.status != PersistStatus::CANCELLED) return false;
@@ -17,18 +14,19 @@ bool PersistCompletion::complete(PersistResult result, const SharedPersistStatus
         observers.swap(observers_);
     }
     for (auto& observer : observers) {
-        asio::post(observer.executor, [callback = std::move(observer.callback), result] { callback(result); });
+        observer.executor->post([callback = std::move(observer.callback), result] { callback(result); });
     }
     return true;
 }
-void PersistCompletion::observe(asio::any_io_executor executor, Complete callback) {
+void PersistCompletion::observe(std::shared_ptr<pr::net::IExecutor> executor, Complete callback) {
+    if (!executor) throw std::invalid_argument("PersistCompletion: executor is required");
     std::optional<PersistResult> ready;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ready = result_;
         if (!ready) { observers_.push_back({executor, std::move(callback)}); return; }
     }
-    asio::post(executor, [callback = std::move(callback), result = *ready] { callback(result); });
+    executor->post([callback = std::move(callback), result = *ready] { callback(result); });
 }
 std::optional<PersistResult> PersistCompletion::result() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -40,20 +38,20 @@ bool PersistSubmissionTicket::complete(PersistStatus terminal, std::string error
 namespace {
 class Wait : public std::enable_shared_from_this<Wait> {
 public:
-    Wait(PersistSubmissionTicket ticket, asio::any_io_executor executor,
+    Wait(PersistSubmissionTicket ticket, std::shared_ptr<pr::net::IExecutor> executor,
          std::chrono::milliseconds timeout, PersistCompletion::Complete cb)
-        : ticket_(std::move(ticket)), executor_(asio::make_strand(executor)), timer_(executor_),
+        : ticket_(std::move(ticket)), executor_(std::move(executor)), timer_(executor_->make_timer()),
           timeout_(timeout), callback_(std::move(cb)) {}
     void start() {
         auto self = shared_from_this();
-        asio::post(executor_, [self] { self->run(); });
+        executor_->post([self] { self->run(); });
     }
 private:
     void run() {
         if (!ticket_.valid()) { finish({0, PersistStatus::CANCELLED, "invalid submission ticket"}); return; }
-        timer_.expires_after(timeout_);
+        timer_->expires_after(timeout_);
         auto self = shared_from_this();
-        timer_.async_wait([self](auto ec) {
+        timer_->async_wait([self](auto ec) {
             if (ec || self->done_) return;
             // 已完成但通知还在排队时，优先使用真实终态。
             if (auto result = self->ticket_.completion->result()) self->finish(*result);
@@ -68,20 +66,21 @@ private:
     }
     void finish(PersistResult result) {
         if (done_) return;
-        done_ = true; timer_.cancel();
+        done_ = true; timer_->cancel();
         auto callback = std::move(callback_);
         callback(std::move(result));
     }
     PersistSubmissionTicket ticket_;
-    asio::any_io_executor executor_;
-    asio::steady_timer timer_;
+    std::shared_ptr<pr::net::IExecutor> executor_;
+    std::shared_ptr<pr::net::ITimer> timer_;
     std::chrono::milliseconds timeout_;
     PersistCompletion::Complete callback_;
     bool done_ = false;
 };
 } // namespace
-void PersistSubmissionTicket::async_wait(asio::any_io_executor executor, std::chrono::milliseconds timeout,
+void PersistSubmissionTicket::async_wait(std::shared_ptr<pr::net::IExecutor> executor, std::chrono::milliseconds timeout,
                                         PersistCompletion::Complete cb) const {
-    std::make_shared<Wait>(*this, executor, timeout, std::move(cb))->start();
+    if (!executor) throw std::invalid_argument("PersistSubmissionTicket: executor is required");
+    std::make_shared<Wait>(*this, std::move(executor), timeout, std::move(cb))->start();
 }
 } // namespace mail_system::persist_storage

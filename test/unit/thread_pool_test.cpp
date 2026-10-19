@@ -108,6 +108,14 @@ int main() {
         expect_true(pool.is_running(), "io pool running after start");
         expect_true(pool.thread_count() == 2, "io pool thread count");
 
+        // Server maintenance can obtain a scheduler through the neutral
+        // provider contract without downcasting to IOThreadPool/io_context.
+        pr::net::IExecutorProvider& provider = pool;
+        auto executor = provider.next_executor();
+        std::atomic<bool> scheduled{false};
+        executor->post([&] { scheduled = true; });
+        expect_true(wait_until([&] { return scheduled.load(); }), "io runtime provides a working abstract executor");
+
         // 生产路径：get_io_context + asio::post → 工作线程执行
         std::atomic<bool> ran{false};
         auto& ctx = pool.get_io_context();

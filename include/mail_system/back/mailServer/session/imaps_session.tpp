@@ -64,8 +64,8 @@ template <typename ConnectionType>
 void ImapsSession<ConnectionType>::start(std::shared_ptr<ImapsSession> self) {
     pr::SessionBase<ConnectionType>::do_handshake(
         self,
-        boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) {
                 LOG_SESSION_ERROR("IMAP handshake failed: {}", ec.message());
                 return;
@@ -81,8 +81,8 @@ template <typename ConnectionType>
 void ImapsSession<ConnectionType>::start_after_starttls(std::shared_ptr<ImapsSession> self) {
     pr::SessionBase<ConnectionType>::do_handshake(
         self,
-        boost::asio::ssl::stream_base::server,
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+        pr::net::HandshakeRole::server,
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) {
                 LOG_SESSION_ERROR("IMAP STARTTLS handshake failed: {}", ec.message());
                 return;

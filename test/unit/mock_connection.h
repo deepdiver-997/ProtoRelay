@@ -1,10 +1,12 @@
 #ifndef MOCK_CONNECTION_H
 #define MOCK_CONNECTION_H
 #include "framework/connection/i_connection.h"
+#include "framework/net/asio_executor.h"
 #include "framework/session_base.h"   // finish_session 需要 pr::SessionBase 完整类型
 #include "mock_io_context.h"
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -28,7 +30,9 @@ namespace mail_system {
 // ================================================================
 class MockConnection : public pr::IConnection {
 public:
-    MockConnection() = default;
+    explicit MockConnection(std::shared_ptr<pr::net::IExecutor> executor = {}) {
+        if (executor) executor_ = std::move(executor);
+    }
     ~MockConnection() { stop_executor(); }
 
     // ---- MockIoContext 生命周期 ----
@@ -111,7 +115,7 @@ public:
         }
         if (!pr.h) return;
         ctx_.post([this, pr = std::move(pr)]() mutable {
-            boost::system::error_code ec;
+            std::error_code ec;
             size_t n = 0;
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -121,7 +125,7 @@ public:
                     std::memcpy(pr.buf.data(), read_buf_.data() + read_pos_, n);
                     read_pos_ += n;
                 } else {
-                    ec = boost::asio::error::eof;
+                    ec = pr::net::make_error_code(pr::net::IoErrc::end_of_stream);
                 }
             }
             pr.h(ec, n);
@@ -145,11 +149,11 @@ public:
             h = std::move(pending_write_handler_);
             pending_write_handler_ = nullptr;
         }
-        if (h) h(boost::system::error_code(), 0);
+        if (h) h(std::error_code(), 0);
     }
 
     // --- pr::IConnection impl ---
-    void async_read(boost::asio::mutable_buffer buf, ReadHandler h) override {
+    void async_read(pr::net::MutableBuffer buf, ReadHandler h) override {
         bool defer = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -161,7 +165,7 @@ public:
         if (defer) return;
 
         ctx_.post([this, buf, h = std::move(h)]() mutable {
-            boost::system::error_code ec;
+            std::error_code ec;
             size_t n = 0;
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -172,20 +176,15 @@ public:
                     std::memcpy(buf.data(), read_buf_.data() + read_pos_, n);
                     read_pos_ += n;
                 } else {
-                    ec = boost::asio::error::eof;
+                    ec = pr::net::make_error_code(pr::net::IoErrc::end_of_stream);
                 }
             }
             h(ec, n);
         });
     }
 
-    boost::asio::any_io_executor get_executor() override {
-        // watchdog（pr::SessionBase::rearm/disarm_timeout）与发起序列化（09-06）的
-        // socket 发起都 post 到这里。返回真实 io_context executor（自定义内联
-        // executor 不满足 any_io_executor 的属性要求）——post 进队但测试不
-        // run()，需要观察发起效果的用例调用 pump_executor() 手动排空。
-        return boost::asio::any_io_executor{exec_ctx_->get_executor()};
-    }
+    std::shared_ptr<pr::net::IExecutor> executor() override { return executor_; }
+
 
     // 排空发起队列：pr::SessionBase 09-06 起 socket 发起经 post 串行化，单测
     // 无常驻 IO 线程，用例在 do_async_read/write 之后调用本方法驱动发起。
@@ -207,7 +206,7 @@ public:
         exec_ctx_->poll();
     }
 
-    void async_write(boost::asio::const_buffer buf, WriteHandler h) override {
+    void async_write(pr::net::ConstBuffer buf, WriteHandler h) override {
         size_t n = buf.size();
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -219,11 +218,11 @@ public:
             }
         }
         ctx_.post([h = std::move(h), n]() mutable {
-            h(boost::system::error_code(), n);
+            h(std::error_code(), n);
         });
     }
 
-    void async_write_with_delay(boost::asio::const_buffer buf,
+    void async_write_with_delay(pr::net::ConstBuffer buf,
                                 std::chrono::milliseconds delay,
                                 WriteHandler h) override {
         // Mock 无真实定时器：忽略 delay，按普通异步写投递
@@ -231,9 +230,9 @@ public:
         async_write(buf, std::move(h));
     }
 
-    void async_handshake(boost::asio::ssl::stream_base::handshake_type, HandshakeHandler h) override {
+    void async_handshake(pr::net::HandshakeRole, HandshakeHandler h) override {
         ctx_.post([h = std::move(h)]() mutable {
-            h(boost::system::error_code());
+            h(std::error_code());
         });
     }
 
@@ -258,12 +257,12 @@ public:
     }
     uint16_t get_local_port() const override { return 0; }
     std::string get_remote_ip() const override { return "127.0.0.1"; }
-    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() override { return nullptr; }
+    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() { return nullptr; }
 
 private:
     // deferred read：保存缓冲视图 + handler（缓冲指向 session 的 read_buffer_）
     struct PendingRead {
-        boost::asio::mutable_buffer buf;
+        pr::net::MutableBuffer buf;
         ReadHandler h;
     };
 
@@ -281,6 +280,7 @@ private:
     // 持有 session 最后引用)时,ctx 由分离线程的 shared_ptr 续命,避免悬垂
     std::shared_ptr<boost::asio::io_context> exec_ctx_ =
         std::make_shared<boost::asio::io_context>();
+    std::shared_ptr<pr::net::IExecutor> executor_ = std::make_shared<pr::net::AsioExecutor>(exec_ctx_->get_executor());
     std::thread exec_thread_;   // 跑 exec_ctx_(guard 在线程栈上,见 start_executor)
     std::string read_buf_;
     size_t read_pos_ = 0;

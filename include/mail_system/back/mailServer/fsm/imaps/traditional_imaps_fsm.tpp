@@ -26,7 +26,7 @@ void TraditionalImapsFsm<ConnectionType>::send_untagged(
     const std::string& data)
 {
     session->do_async_write("* " + data + "\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) {
             if (!ec) s->do_async_read();
         }
     );
@@ -40,7 +40,7 @@ void TraditionalImapsFsm<ConnectionType>::send_tagged(
     const std::string& message)
 {
     session->do_async_write(tag + " " + status + " " + message + "\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) {
             if (!ec) s->do_async_read();
         }
     );
@@ -280,7 +280,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_init_connect(
     // 发送 IMAP 欢迎语
     session->do_async_write("* OK IMAP4rev1 Server Ready\r\n",
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> self,
-           const boost::system::error_code& ec) mutable {
+           const std::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending IMAP greeting: {}", ec.message());
                 return;
@@ -510,7 +510,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
 
     session->do_async_write(response,
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-           const boost::system::error_code& ec) mutable {
+           const std::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending LOGOUT reply: {}", ec.message());
                 return;
@@ -519,7 +519,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
             if (io_ctx) {
                 auto timer = std::make_shared<boost::asio::steady_timer>(*io_ctx);
                 timer->expires_after(std::chrono::milliseconds(100));
-                timer->async_wait([s = std::move(s), timer](const boost::system::error_code& ec) mutable {
+                timer->async_wait([s = std::move(s), timer](const std::error_code& ec) mutable {
                     if (!ec) s->close();
                 });
             } else {
@@ -1355,7 +1355,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_finalize(
     response += ctx->tag + " OK FETCH completed\r\n";
 
     session->do_async_write(response,
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) {
             if (ec) return;
             // 异步链期间流水线被 pause：先排空缓冲，再视情况续读
             s->drain_buffered_commands();
@@ -1700,7 +1700,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
     // Handoff logic: send OK, extract TCP socket, call server handoff
     session->do_async_write(tag + " OK Begin TLS negotiation now\r\n",
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> self,
-           const boost::system::error_code& ec) mutable {
+           const std::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending STARTTLS response: {}", ec.message());
                 return;
@@ -2491,7 +2491,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
     // RFC 2177: send continuation
     session->do_async_write("+ idling\r\n",
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-           const boost::system::error_code& ec) mutable {
+           const std::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending IDLE continuation: {}", ec.message());
                 return;
@@ -2540,7 +2540,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_timeout(
 {
     session->do_async_write("* BYE TIMEOUT\r\n",
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-           const boost::system::error_code& ec) mutable {
+           const std::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending TIMEOUT BYE: {}", ec.message());
                 return;

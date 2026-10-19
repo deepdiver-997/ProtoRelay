@@ -2,6 +2,7 @@
 #define PR_FRAMEWORK_TCP_CONNECTION_H
 
 #include "i_connection.h"
+#include "framework/net/asio_executor.h"
 #include <boost/asio.hpp>
 #include <memory>
 
@@ -11,37 +12,49 @@ namespace pr {
 class TcpConnection : public IConnection {
 public:
     explicit TcpConnection(std::unique_ptr<boost::asio::ip::tcp::socket> socket)
-        : socket_(std::move(socket)) {}
+        : socket_(std::move(socket)), executor_(std::make_shared<net::AsioExecutor>(socket_->get_executor())) {}
 
     ~TcpConnection() override = default;
 
     // 异步读取
     void async_read(
-        boost::asio::mutable_buffer buffer,
+        net::MutableBuffer buffer,
         ReadHandler handler
     ) override {
-        socket_->async_read_some(buffer, handler);
+        net::asio_call("TCP read", [&] {
+            socket_->async_read_some(boost::asio::buffer(buffer.data(), buffer.size()),
+                boost::asio::bind_executor(executor_->native_executor(),
+                    [handler = std::move(handler)](const boost::system::error_code& error, size_t size) {
+                        handler(net::asio_error(error), size);
+                    }));
+        });
     }
 
     // 获取 executor
-    boost::asio::any_io_executor get_executor() override {
-        return socket_->get_executor();
-    }
+    std::shared_ptr<net::IExecutor> executor() override { return executor_; }
 
     // 异步写入
     void async_write(
-        boost::asio::const_buffer buffer,
+        net::ConstBuffer buffer,
         WriteHandler handler
     ) override {
-        boost::asio::async_write(*socket_, buffer, handler);
+        net::asio_call("TCP write", [&] {
+            boost::asio::async_write(*socket_, boost::asio::buffer(buffer.data(), buffer.size()),
+                boost::asio::bind_executor(executor_->native_executor(),
+                    [handler = std::move(handler)](const boost::system::error_code& error, size_t size) {
+                        handler(net::asio_error(error), size);
+                    }));
+        });
     }
 
-    // TCP 连接无需握手，直接调用成功回调
+    // TCP needs no TLS handshake; still dispatch completion asynchronously.
     void async_handshake(
-        boost::asio::ssl::stream_base::handshake_type,
+        net::HandshakeRole,
         HandshakeHandler handler
     ) override {
-        handler(boost::system::error_code());
+        net::asio_call("TCP handshake", [&] {
+            executor_->post([handler = std::move(handler)] { handler({}); });
+        });
     }
 
     // 关闭连接
@@ -79,13 +92,14 @@ public:
         socket_->cancel(ec);
     }
 
-    // 释放原始 socket
-    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() override {
+    // Asio-only STARTTLS extension; deliberately absent from IConnection.
+    std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() {
         return std::move(socket_);
     }
 
 private:
     std::unique_ptr<boost::asio::ip::tcp::socket> socket_;
+    std::shared_ptr<net::AsioExecutor> executor_;
 };
 
 } // namespace pr

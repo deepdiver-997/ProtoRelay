@@ -363,8 +363,8 @@ void H2Session<ConnectionType>::flush_out() {
     auto data = std::make_shared<std::string>(std::move(out_pending_));
     out_pending_.clear();
     auto self = self_ptr();
-    this->connection_->async_write(boost::asio::buffer(*data),
-        [self, data](const boost::system::error_code& ec, std::size_t) mutable {
+    this->connection_->async_write(pr::net::buffer(*data),
+        [self, data](const std::error_code& ec, std::size_t) mutable {
             self->out_flushing_ = false;
             if (ec) { self->handle_error(ec); return; }
             self->flush_out();

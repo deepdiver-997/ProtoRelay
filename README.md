@@ -201,6 +201,13 @@ The standard pool drains on `stop(true)`, discards queued tasks on `stop(false)`
 and always joins active tasks. Discarded futures receive `broken_promise`.
 Lifecycle calls require an external thread; stopped pools can be restarted.
 
+`IConnection` now exposes project buffers, `std::error_code`, executor and timer
+interfaces. Session scheduling/timeouts, persistence waits, POP3 lock sweeps and heartbeats
+use these interfaces. Server maintenance obtains schedulers through `IExecutorProvider`.
+Networking, listeners, STARTTLS socket handoff, outbound clients, and some business
+timers still require Asio: a complete Asio-free server build is not yet supported.
+`connection_interface_test` and `std_thread_pool_test` need no Boost headers.
+
 ## Runtime Prerequisites (Summary)
 
 - Linux/macOS

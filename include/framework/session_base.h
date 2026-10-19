@@ -3,9 +3,6 @@
 
 #include "framework/log/log_macros.h"
 #include "framework/connection/i_connection.h"
-#include "framework/server_base.h"
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -40,18 +37,6 @@ enum class SessionError {
     Timeout,
     Internal,
 };
-
-// ================================================================
-// make_copyable — 将 move-only 回调包装为 copyable（供 do_handshake 使用）
-//   成员模板，必须在头文件中 inline 定义
-// ================================================================
-template <typename F>
-auto make_copyable(F&& f) {
-    auto s = std::make_shared<std::decay_t<F>>(std::forward<F>(f));
-    return [s](auto&&... args) {
-        return (*s)(std::forward<decltype(args)>(args)...);
-    };
-}
 
 // ================================================================
 // SessionBase — 协议无关的网络会话基类
@@ -94,23 +79,21 @@ public:
     // ── 3. 异步 I/O ────────────────────────────────────────────
     using WriteCallback = std::function<void(
         std::shared_ptr<SessionBase<ConnectionType>>,
-        const boost::system::error_code&)>;
+        const std::error_code&)>;
+    using HandshakeCallback = WriteCallback;
 
     void do_async_read();
     void do_async_write(const std::string& data, WriteCallback callback = nullptr);
 
-    // 成员模板 — 必须在头文件中定义
-    template <typename HandshakeHandler>
+    // Same copyable callback contract as the executor and connection APIs.
     static void do_handshake(
         std::shared_ptr<SessionBase<ConnectionType>> self,
-        boost::asio::ssl::stream_base::handshake_type type,
-        HandshakeHandler&& handler)
+        pr::net::HandshakeRole type,
+        HandshakeCallback handler)
     {
         if (self->closed_ || !self->connection_) return;
-        auto* conn = self->connection_.get();
-        conn->async_handshake(type,
-            make_copyable([self, handler = std::forward<HandshakeHandler>(handler)](
-                const boost::system::error_code& error) mutable {
+        auto complete = [self, handler = std::move(handler)](
+                const std::error_code& error) mutable {
                 if (self->closed_) return;
                 if (error) {
                     // 增强诊断：输出错误码、对端 IP、本地端口、SSL 状态/OpenSSL 错误栈
@@ -126,10 +109,15 @@ public:
                     LOG_SESSION_INFO("Handshake successful.");
                 }
                 handler(self, error);
-            }));
+            };
+        auto executor = self->connection_->executor();
+        executor->post([self, type, complete = std::move(complete)]() mutable {
+            if (self->closed_ || !self->connection_) return;
+            self->connection_->async_handshake(type, std::move(complete));
+        });
     }
 
-    virtual void handle_error(const boost::system::error_code& error);
+    virtual void handle_error(const std::error_code& error);
 
     // ── 4. 命令缓冲与流水线 ────────────────────────────────────
     std::string pop_buffered_line();
@@ -196,11 +184,7 @@ public:
     void disarm_timeout();
     bool close_requested() const { return close_requested_.load(std::memory_order_acquire); }
     // 取配置 read_timeout（秒），缺省 60s。协议用它做各 stage 的默认 watchdog 时长。
-    std::chrono::milliseconds config_read_timeout() const {
-        auto cfg = m_server ? std::atomic_load(&m_server->m_config) : nullptr;
-        return std::chrono::milliseconds(cfg && cfg->read_timeout
-                                          ? cfg->read_timeout * 1000u : 60000u);
-    }
+    std::chrono::milliseconds config_read_timeout() const;
 
     // ── 7. 数据成员（public 临时变量，供 FSM 使用） ──────────────
     size_t last_bytes_transferred_ = 0;
@@ -241,7 +225,7 @@ protected:
     // watchdog 单定时器（绑连接 executor）。rearm/disarm 会 post 到 io 线程执行，
     // 因此从任意线程（含 worker 线程续跑 drain）调用都安全。close() 必须 cancel()
     // 释放 async_wait 捕获的 self（断 self 循环）。
-    std::shared_ptr<boost::asio::steady_timer> timeout_timer_;
+    std::shared_ptr<pr::net::ITimer> timeout_timer_;
     void rearm_impl(std::chrono::milliseconds timeout);   // 真正改 timer（io 线程）
     void on_watchdog_fire();   // timer 到期（未取代）→ 置标志 + cancel 挂起读
 

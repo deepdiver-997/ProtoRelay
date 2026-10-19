@@ -747,7 +747,19 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_link_libraries(std_thread_pool_test PRIVATE protorelay_logging)
     add_test(NAME std_thread_pool_test COMMAND std_thread_pool_test)
 
-    set_tests_properties(logger_test std_thread_pool_test PROPERTIES TIMEOUT 20)
+    add_executable(connection_interface_test test/unit/connection_interface_test.cpp)
+    target_include_directories(connection_interface_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    add_test(NAME connection_interface_test COMMAND connection_interface_test)
+
+    add_executable(asio_executor_test test/unit/asio_executor_test.cpp)
+    target_include_directories(asio_executor_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
+    target_link_libraries(asio_executor_test PRIVATE Threads::Threads)
+    add_test(NAME asio_executor_test COMMAND asio_executor_test)
+    add_executable(asio_error_test test/unit/asio_error_test.cpp)
+    target_include_directories(asio_error_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
+    target_link_libraries(asio_error_test PRIVATE Threads::Threads)
+    add_test(NAME asio_error_test COMMAND asio_error_test)
+    set_tests_properties(logger_test std_thread_pool_test connection_interface_test asio_executor_test PROPERTIES TIMEOUT 20)
 
     # MariaDB 非阻塞 async 回归（阶段 2）：连接池 available 在批量 async 查询后回基线
     if(HAVE_MARIADB)
@@ -841,6 +853,13 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(pop3_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(pop3_fsm_test)
 
+    add_executable(pop3_timer_boundary_test ${COMMON_SRCS}
+        src/mail_system/back/mailServer/pop3/pop3_server.cpp test/unit/pop3_timer_boundary_test.cpp)
+    target_include_directories(pop3_timer_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(pop3_timer_boundary_test)
+    add_test(NAME pop3_timer_boundary_test COMMAND pop3_timer_boundary_test)
+    set_tests_properties(pop3_timer_boundary_test asio_error_test PROPERTIES TIMEOUT 20)
+
     add_executable(smtp_client test/bench/smtp/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
     add_executable(imap_client test/bench/imap/imap_client.cpp)
@@ -906,6 +925,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_custom_target(unit_tests DEPENDS
         logger_test
         std_thread_pool_test
+        connection_interface_test
+        asio_executor_test
+        asio_error_test
+        pop3_timer_boundary_test
         smtps_fsm_test
         smtps_fsm_concurrency_test
         imaps_fsm_test
@@ -947,7 +970,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
     if(ENABLE_ASAN)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
-            logger_test std_thread_pool_test
+            logger_test std_thread_pool_test connection_interface_test asio_executor_test asio_error_test pop3_timer_boundary_test
             pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test

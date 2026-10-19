@@ -2,6 +2,7 @@
 #define PR_FRAMEWORK_HTTP_HTTP_SESSION_TPP
 // 依赖见实例化文件 include 顺序；本文件在实例化前需 http_parser.h 可见。
 #include "framework/http/http_parser.h"
+#include "framework/server_base.h"
 #include "framework/http/http_types.hpp"
 #include "framework/http/message_processor.h"   // process_static_request（H1/H2 共用路由）
 #include <algorithm>
@@ -341,7 +342,7 @@ void HttpSession<ConnectionType>::send_simple(int status, std::string body, bool
     auto self = self_ptr();
     this->do_async_write(resp,
         [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                      const boost::system::error_code& ec) mutable {
+                      const std::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->finish_response(!close);
         });
@@ -364,7 +365,7 @@ void HttpSession<ConnectionType>::stream_file_body(
     int64_t next = remaining - got;
     this->do_async_write(*data,
         [self, ifs, next, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                                 const boost::system::error_code& ec) mutable {
+                                 const std::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->rearm(kBodyTimeout);       // 每写完一块续命（慢客户端存活，真停则回收）
             self->stream_file_body(ifs, next, close);
@@ -393,7 +394,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
         this->rearm(kBodyTimeout);
         this->do_async_write(resp,
             [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                          const boost::system::error_code& ec) mutable {
+                          const std::error_code& ec) mutable {
                 if (ec) { self->handle_error(ec); return; }
                 self->finish_response(!close);
             });
@@ -417,7 +418,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
     if (head_only || length == 0) {
         this->do_async_write(head,
             [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                          const boost::system::error_code& ec) mutable {
+                          const std::error_code& ec) mutable {
                 if (ec) { self->handle_error(ec); return; }
                 self->finish_response(!close);
             });
@@ -427,7 +428,7 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
     if (!ifs || !ifs->is_open()) { send_simple(404, "Not Found", close); return; }
     this->do_async_write(head,
         [self, ifs, length, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                                   const boost::system::error_code& ec) mutable {
+                                   const std::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->stream_file_body(ifs, length, close);
         });
@@ -446,17 +447,17 @@ void HttpSession<ConnectionType>::serve_file_sendfile(const std::string& full_pa
     if (head_only || length == 0) {
         this->do_async_write(head,
             [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                          const boost::system::error_code& ec) mutable {
+                          const std::error_code& ec) mutable {
                 if (ec) { self->handle_error(ec); return; }
                 self->finish_response(!close);
             });
         return;
     }
-    auto exec = this->get_connection().get_executor();   // 复制 io 执行器，用于 post 回 io
+    auto exec = this->get_connection().executor();   // 复制 io 执行器，用于 post 回 io
     this->do_async_write(head,
         [self, full_path, length, close, sock_fd, pool, exec](
             std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-            const boost::system::error_code& ec) mutable {
+            const std::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             int in_fd = ::open(full_path.c_str(), O_RDONLY);
             if (in_fd < 0) { self->send_simple(404, "Not Found", close); return; }
@@ -466,7 +467,7 @@ void HttpSession<ConnectionType>::serve_file_sendfile(const std::string& full_pa
             self->rearm(kBodyTimeout);
             pool->post([self, in_fd, sock_fd, length, keep_alive, exec] {
                 http_sendfile_worker(in_fd, sock_fd, length);
-                boost::asio::post(exec, [self, keep_alive] {
+                exec->post([self, keep_alive] {
                     self->finish_response(keep_alive);
                 });
             });
@@ -518,7 +519,7 @@ void HttpSession<ConnectionType>::send_response(HttpResponse r, bool close) {
     head += "\r\n";
     auto self = self_ptr();
     if (request_.method == "HEAD") {
-        this->do_async_write(head, [self, close](auto, const boost::system::error_code& ec) {
+        this->do_async_write(head, [self, close](auto, const std::error_code& ec) {
             if (ec) { self->handle_error(ec); return; }
             self->finish_response(!close);
         });
@@ -526,7 +527,7 @@ void HttpSession<ConnectionType>::send_response(HttpResponse r, bool close) {
     }
     if (r.body_source) {
         auto source = r.body_source;
-        this->do_async_write(head, [self, source, close](auto, const boost::system::error_code& ec) {
+        this->do_async_write(head, [self, source, close](auto, const std::error_code& ec) {
             if (ec) { self->handle_error(ec); return; }
             self->stream_download(source, 0, close);
         });
@@ -535,7 +536,7 @@ void HttpSession<ConnectionType>::send_response(HttpResponse r, bool close) {
     std::string resp = head + r.body;
     this->do_async_write(resp,
         [self, close](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                      const boost::system::error_code& ec) mutable {
+                      const std::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
             self->finish_response(!close);
         });
@@ -554,7 +555,7 @@ void HttpSession<ConnectionType>::stream_download(std::shared_ptr<pr::IDownloadS
             self->close(); return;
         }
         chunk.resize(count);
-        self->do_async_write(chunk, [self, source, offset, count, close](auto, const boost::system::error_code& ec) {
+        self->do_async_write(chunk, [self, source, offset, count, close](auto, const std::error_code& ec) {
             if (ec) { self->handle_error(ec); return; }
             self->stream_download(source, offset + count, close);
         });

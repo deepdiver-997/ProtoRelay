@@ -176,6 +176,12 @@ Worker 后端可选 `STD`（默认，标准库线程池）或 `BOOST`（原有�
 标准库池的 `stop(true)` 排空任务，`stop(false)` 丢弃排队任务并等待执行中的任务退出；
 丢弃任务的 future 报 `broken_promise`。启动、停止与析构须由池外线程调用，支持停止后重启。
 
+`IConnection` 已使用项目自己的 buffer、`std::error_code`、executor 和 timer 接口；
+Session 的投递/超时、持久化等待、POP3 清扫和锁心跳已迁移。服务器维护任务通过
+`IExecutorProvider` 获取执行器。当前网络实现、监听器、STARTTLS socket 交接、
+出站客户端和部分业务定时器仍依赖 Asio，**尚不支持整个服务无 Asio 构建**。
+独立的 `connection_interface_test` 和 `std_thread_pool_test` 不需要 Boost 头文件。
+
 ## 环境依赖（摘要）
 
 - Linux/macOS

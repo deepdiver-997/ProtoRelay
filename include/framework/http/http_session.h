@@ -10,6 +10,7 @@
 //     多读进下一个 keep-alive 请求 —— 这是与 SMTP dot-stuffing 的本质分叉）
 // ──────────────────────────────────────────────────────────────────
 #include "framework/session_base.h"
+#include "framework/thread_pool/thread_pool_base.h"
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "mail_system/back/common/logger.h"

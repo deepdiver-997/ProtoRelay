@@ -73,10 +73,10 @@ jobs:
       - name: Build servers and backend contract tests
         run: |
           cmake --build build --target smtpsServer webmailServer pop3Server \
-            logger_test std_thread_pool_test -j2
+            logger_test std_thread_pool_test connection_interface_test asio_executor_test -j2
       - name: Verify contracts and linked dependencies
         run: |
-          ctest --test-dir build -R '^(logger_test|std_thread_pool_test)$' --output-on-failure
+          ctest --test-dir build -R '^(logger_test|std_thread_pool_test|connection_interface_test|asio_executor_test)$' --output-on-failure
           if ldd build/smtpsServer | grep -E 'lib(spdlog|fmt)'; then exit 1; fi
 
   # ---- 完整构建 (确认所有 target 能编译) ----

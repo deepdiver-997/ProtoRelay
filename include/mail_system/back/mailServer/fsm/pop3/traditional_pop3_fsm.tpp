@@ -2,6 +2,7 @@
 #define TRADITIONAL_POP3_FSM_TPP
 
 #include "mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h"
+#include "framework/server_base.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/password_rehash.h"
@@ -11,7 +12,6 @@
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/db/db_pool.h"
-#include "framework/thread_pool/io_thread_pool.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -281,68 +281,66 @@ void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
     std::chrono::milliseconds interval)
 {
     if (!session || !router || !worker) return;
-    auto* ctx = ctx_of(session);
-    if (!ctx || !ctx->is_authenticated || ctx->session_id.empty()) return;
-    if (ctx->heartbeat_timer) return;   // 幂等：已有心跳
-
-    auto* srv = session->get_server();
-    auto io_pool = srv ? std::dynamic_pointer_cast<pr::IOThreadPool>(srv->m_ioThreadPool) : nullptr;
-    if (!io_pool) return;
-    boost::asio::io_context& io_ctx = io_pool->get_io_context();
-
-    auto timer = std::make_shared<boost::asio::steady_timer>(io_ctx);
-    ctx->heartbeat_timer = timer;
-
-    uint64_t user_id = ctx->user_id;
-    std::string sid = ctx->session_id;
-    int shard = ctx->shard_index;
-
-    // 递归续约任务。session/timer/tick 全部只持 weak 引用，避免
-    // session ↔ timer ↔ handler 形成强引用环：session 持 timer/tick（强），
-    // handler 只持 weak_self/weak_timer/weak_tick（弱）→ 无环，session 析构
-    // 即释放定时器与回调。tick 本体由 session 持有（heartbeat_handler），
-    // 每次 re-arm 通过 weak_tick 重新锁定。
-    auto weak_self = std::weak_ptr<pr::SessionBase<ConnectionType>>(session);
-    auto weak_timer = std::weak_ptr<boost::asio::steady_timer>(timer);
-    auto tick = std::make_shared<std::function<void(const boost::system::error_code&)>>();
-    ctx->heartbeat_handler = tick;
-    auto weak_tick = std::weak_ptr<std::function<void(const boost::system::error_code&)>>(tick);
-
-    *tick = [weak_self, weak_timer, weak_tick, router, worker,
-             user_id, sid, shard, interval](const boost::system::error_code& ec) {
-        if (ec) return;   // 取消（operation_aborted）或 io 错误 → 停止续约
-        // 续约放 worker 线程（DB I/O），不阻塞 io 线程
-        worker->post([weak_self, weak_timer, weak_tick, router,
-                      user_id, sid, shard, interval]() {
+    auto executor = session->get_connection().executor();
+    executor->post([session, router, worker, interval] {
+        if (session->is_closed()) return;
+        auto* ctx = ctx_of(session);
+        if (!ctx || !ctx->is_authenticated || ctx->session_id.empty() || ctx->heartbeat_timer) return;
+        auto timer = session->get_connection().executor()->make_timer();
+        ctx->heartbeat_timer = timer;
+        const auto user_id = ctx->user_id;
+        const auto sid = ctx->session_id;
+        const auto shard = ctx->shard_index;
+        auto weak_self = std::weak_ptr<pr::SessionBase<ConnectionType>>(session);
+        auto weak_timer = std::weak_ptr<pr::net::ITimer>(timer);
+        auto tick = std::make_shared<pr::net::ITimer::Handler>();
+        ctx->heartbeat_handler = tick;
+        auto weak_tick = std::weak_ptr<pr::net::ITimer::Handler>(tick);
+        *tick = [weak_self, weak_timer, weak_tick, router, worker,
+                 user_id, sid, shard, interval](const std::error_code& error) {
             auto self = weak_self.lock();
             if (!self || self->is_closed()) return;
-            // 续约走 async CPS 链（默认同步触发，回调在 worker 上内联执行；
-            // 真异步接入后回调在 DB 线程，conn 由链内 shared 保活）
-            TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat_async(
-                router, user_id, sid, shard,
-                [weak_self, weak_timer, weak_tick, user_id, interval](bool ok) mutable {
+            if (error) {
+                if (error != std::errc::operation_canceled)
+                    LOG_SESSION_ERROR("POP3 heartbeat timer failed for user={}: {}", user_id, error.message());
+                return;
+            }
+            try {
+                worker->post([weak_self, weak_timer, weak_tick, router, user_id, sid, shard, interval] {
                     auto self = weak_self.lock();
                     if (!self || self->is_closed()) return;
-                    if (!ok) {
-                        // 锁已被回收/转交：本会话失去排他性，异常关闭。
-                        // 无需 release_lock（WHERE 含 session_id，别人拿的锁删不掉）。
-                        LOG_SESSION_WARN("POP3 heartbeat lost lock for user={}, closing session", user_id);
-                        self->close();
-                        return;
-                    }
-                    // 续约成功 → 重新排下一次
-                    auto t = weak_timer.lock();
-                    auto next = weak_tick.lock();
-                    if (!t || !next) return;
-                    t->expires_after(interval);
-                    t->async_wait(*next);
+                    TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat_async(
+                        router, user_id, sid, shard,
+                        [weak_self, weak_timer, weak_tick, user_id, interval](bool ok) {
+                            auto self = weak_self.lock();
+                            if (!self || self->is_closed()) return;
+                            if (!ok) {
+                                LOG_SESSION_WARN("POP3 heartbeat lost lock for user={}, closing session", user_id);
+                                self->close();
+                                return;
+                            }
+                            auto timer = weak_timer.lock();
+                            auto next = weak_tick.lock();
+                            if (!timer || !next) return;
+                            // DB completion may run on a worker/driver thread.
+                            // Every timer mutation goes back to its owner.
+                            timer->executor()->post([weak_self, timer, next, interval] {
+                                auto self = weak_self.lock();
+                                if (!self || self->is_closed()) return;
+                                timer->expires_after(interval);
+                                timer->async_wait(*next);
+                            });
+                        });
                 });
-        });
-    };
-
-    timer->expires_after(interval);
-    timer->async_wait(*tick);
-    LOG_SESSION_INFO("POP3 heartbeat started for user={} ({}ms)", user_id, interval.count());
+            } catch (const std::exception& failure) {
+                LOG_SESSION_ERROR("Cannot schedule POP3 heartbeat for user={}: {}", user_id, failure.what());
+                self->close();
+            }
+        };
+        timer->expires_after(interval);
+        timer->async_wait(*tick);
+        LOG_SESSION_INFO("POP3 heartbeat started for user={} ({}ms)", user_id, interval.count());
+    });
 }
 
 template <typename ConnectionType>

@@ -1,6 +1,9 @@
 #ifndef PR_FRAMEWORK_SESSION_BASE_TPP
 #define PR_FRAMEWORK_SESSION_BASE_TPP
 
+#include "framework/session_base.h"
+#include "framework/server_base.h"
+
 namespace pr {
 
 // ================================================================
@@ -66,15 +69,15 @@ void SessionBase<ConnectionType>::close() {
         auto payload = std::make_shared<std::string>(
             std::move(pending_write_buf_));
         pending_write_buf_.clear();
-        auto flush_ex = connection_->get_executor();
-        boost::asio::post(std::move(flush_ex),
+        auto flush_ex = connection_->executor();
+        flush_ex->post(
             [self, payload] {
                 if (self->connection_ && self->connection_->is_open()) {
                     self->connection_->async_write(
-                        boost::asio::buffer(*payload),
+                        pr::net::buffer(*payload),
                         // handler 必须持 self：ssl 多阶段 op 在 socket 关闭后
                         // 仍会走错误阶段，会话必须活到本 op 全链走完
-                        [self, payload](const boost::system::error_code&,
+                        [self, payload](const std::error_code&,
                                         std::size_t) {});
                 }
             });
@@ -83,8 +86,8 @@ void SessionBase<ConnectionType>::close() {
     try {
         if (connection_ && connection_->is_open()) {
             if (self) {
-                auto close_ex = connection_->get_executor();
-                boost::asio::post(std::move(close_ex), [self] {
+                auto close_ex = connection_->executor();
+                close_ex->post([self] {
                     if (self->connection_) self->connection_->close();
                     LOG_SESSION_INFO("Session closed for {}", self->get_client_ip());
                 });
@@ -107,8 +110,8 @@ void SessionBase<ConnectionType>::close_after_flush() {
     if (closed_.load(std::memory_order_acquire)) return;   // 已关:快速返回
     if (!connection_) { close(); return; }                 // 析构期安全网路径
     auto self = this->shared_from_this();
-    auto ex = connection_->get_executor();
-    boost::asio::post(std::move(ex), [self]() mutable { self->close(); });
+    auto ex = connection_->executor();
+    ex->post([self]() mutable { self->close(); });
 }
 
 template <typename ConnectionType>
@@ -157,7 +160,7 @@ bool SessionBase<ConnectionType>::is_closed() const {
 // 3. 异步 I/O
 // ================================================================
 template <typename ConnectionType>
-void SessionBase<ConnectionType>::handle_error(const boost::system::error_code& error) {
+void SessionBase<ConnectionType>::handle_error(const std::error_code& error) {
     LOG_SESSION_ERROR("SessionBase Error: {}", error.message());
     close();
 }
@@ -175,14 +178,14 @@ void SessionBase<ConnectionType>::do_async_read() {
     // post 到连接自己的 executor 与关闭动作同队列串行，post 内复查 closed_
     // 拦住"check 时还活着、排队期间被 close"的发起。
     auto self = this->shared_from_this();
-    auto ex = connection_->get_executor();
-    boost::asio::post(std::move(ex), [self] {
+    auto ex = connection_->executor();
+    ex->post([self] {
         if (self->closed_ || !self->connection_) return;
         if (self->has_buffered_input()) return;
         self->connection_->async_read(
-            boost::asio::buffer(self->read_buffer_),
+            pr::net::buffer(self->read_buffer_),
             [self](
-                const boost::system::error_code& error, std::size_t bytes) mutable {
+                const std::error_code& error, std::size_t bytes) mutable {
                 if (self->closed_) return;
 
                 // watchdog 回收点：timer 到期已置 close_requested_ 并 cancel 本读 → 这里
@@ -249,7 +252,7 @@ void SessionBase<ConnectionType>::do_async_write(
     if (has_buffered_input()) {
         pending_write_buf_ += data;
         if (callback) {
-            callback(this->shared_from_this(), boost::system::error_code());
+            callback(this->shared_from_this(), std::error_code());
         }
         return;
     }
@@ -259,15 +262,15 @@ void SessionBase<ConnectionType>::do_async_write(
     auto self = this->shared_from_this();
     auto payload = std::make_shared<std::string>(
         std::move(pending_write_buf_) + data);
-    auto ex = connection_->get_executor();
-    boost::asio::post(std::move(ex),
+    auto ex = connection_->executor();
+    ex->post(
         [self, payload, cb = std::move(callback)]() mutable {
             if (self->closed_ || !self->connection_) return;
             self->connection_->async_write_with_delay(
-                boost::asio::buffer(*payload),
+                pr::net::buffer(*payload),
                 self->compute_reply_delay(),
                 [self, payload, cb = std::move(cb)](
-                    const boost::system::error_code& ec, std::size_t) mutable {
+                    const std::error_code& ec, std::size_t) mutable {
                     if (self->closed_) return;
                     if (ec) { self->handle_error(ec); return; }
                     if (cb) cb(self, ec);
@@ -279,14 +282,21 @@ void SessionBase<ConnectionType>::do_async_write(
 // ================================================================
 // 3b. Watchdog 阶段/闲置超时
 // ================================================================
+template <typename ConnectionType>
+std::chrono::milliseconds SessionBase<ConnectionType>::config_read_timeout() const {
+    auto config = m_server ? std::atomic_load(&m_server->m_config) : nullptr;
+    return std::chrono::milliseconds(config && config->read_timeout
+                                    ? config->read_timeout * 1000u : 60000u);
+}
+
 // rearm 线程安全：把改 timer 的动作 post 到 io 线程执行。SMTP/IMAP 的
 // handle_read 会从 worker 线程续跑路径（drain_buffered_commands，DB/commit 回调）
 // 被调用，直接碰 timer 会和 io 线程 dispatch 竞态 → 一律经 post 收敛到 io。
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::rearm(std::chrono::milliseconds timeout) {
     if (closed_ || !connection_) return;
-    auto exec = connection_->get_executor();
-    boost::asio::post(exec, [self = this->shared_from_this(), timeout] {
+    auto exec = connection_->executor();
+    exec->post([self = this->shared_from_this(), timeout] {
         if (self->closed_ || !self->connection_) return;
         self->rearm_impl(timeout);
     });
@@ -295,12 +305,12 @@ void SessionBase<ConnectionType>::rearm(std::chrono::milliseconds timeout) {
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::rearm_impl(std::chrono::milliseconds timeout) {
     if (!timeout_timer_)
-        timeout_timer_ = std::make_shared<boost::asio::steady_timer>(connection_->get_executor());
+        timeout_timer_ = connection_->executor()->make_timer();
     // expires_after 重排：旧的 async_wait 因到期时间改变而自发 operation_aborted，
     // 只剩最后一次 rearm 真正会触发 → 天然实现"单定时器、后设取代先设"。
     timeout_timer_->expires_after(timeout);
     timeout_timer_->async_wait(
-        [self = this->shared_from_this()](const boost::system::error_code& ec) {
+        [self = this->shared_from_this()](const std::error_code& ec) {
             if (ec) return;                 // operation_aborted：被 rearm / close 取代
             if (self->closed_) return;
             self->on_watchdog_fire();
@@ -318,8 +328,8 @@ template <typename ConnectionType>
 void SessionBase<ConnectionType>::disarm_timeout() {
     if (!timeout_timer_) return;
     auto timer = timeout_timer_;                       // 拷贝共享所有权（不依赖 session）
-    auto ex = timer->get_executor();
-    boost::asio::post(std::move(ex), [timer]() { timer->cancel(); });
+    auto ex = timer->executor();
+    ex->post([timer]() { timer->cancel(); });
 }
 
 // io 线程触发（steady_timer handler 绑连接 executor）。

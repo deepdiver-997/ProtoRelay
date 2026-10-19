@@ -2,6 +2,7 @@
 #define POP3_SESSION_TPP
 
 #include "mail_system/back/mailServer/session/pop3_session.h"
+#include "framework/server_base.h"
 
 namespace mail_system {
 
@@ -15,6 +16,11 @@ Pop3Session<ConnectionType>::Pop3Session(
     , next_event_(Pop3Event::CONNECT)
     , context_()
 {
+}
+
+template <typename ConnectionType>
+Pop3Session<ConnectionType>::~Pop3Session() {
+    close();
 }
 
 template <typename ConnectionType>
@@ -39,14 +45,26 @@ void Pop3Session<ConnectionType>::close() {
     // result=ok 表示干净 QUIT（handle_quit 已 set_trace_clean_close），
     // 否则视为异常结束（客户端断连 / 超时 / 错误）。
     if (!this->is_closed()) {
-        // 取消锁心跳定时器：会话结束立即停续约（否则 pending handler 会
-        // 继续在 worker 上 renew，且与 session 形成引用环延迟析构）。
-        if (auto* ctx = static_cast<Pop3Context*>(this->get_context())) {
-            if (ctx->heartbeat_timer) {
-                ctx->heartbeat_timer->cancel();
-                ctx->heartbeat_timer.reset();
+        // A worker may close the session. Only its executor mutates the
+        // heartbeat timer/context; closed_ makes pending renewals stop first.
+        auto self = this->weak_from_this().lock();
+        if (self && this->connection_) {
+            auto executor = this->connection_->executor();
+            executor->post([self] {
+                auto* ctx = static_cast<Pop3Context*>(self->get_context());
+                auto timer = std::move(ctx->heartbeat_timer);
+                ctx->heartbeat_handler.reset();
+                if (timer) timer->cancel();
+            });
+        } else {
+            // Destruction: no owner can lock the session any more. Move out
+            // the timer while context_ still exists, then cancel without this.
+            auto timer = std::move(context_.heartbeat_timer);
+            context_.heartbeat_handler.reset();
+            if (timer) {
+                auto executor = timer->executor();
+                executor->post([timer] { timer->cancel(); });
             }
-            ctx->heartbeat_handler.reset();
         }
         const std::string label = this->m_trace_clean_close ? "ok" : "err";
         if (auto* srv = this->get_server()) {

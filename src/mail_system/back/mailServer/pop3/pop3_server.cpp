@@ -1,9 +1,9 @@
 #include "mail_system/back/mailServer/pop3_server.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/connection/tcp_connection.h"
-#include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/common/logger.h"
 #include <chrono>
+#include <atomic>
 #include <memory>
 
 namespace mail_system {
@@ -12,6 +12,53 @@ namespace {
 // 锁清扫周期：每 5min 回收心跳过期(>5min)的锁。与续约周期(60s)留足余量。
 constexpr int kLockSweepIntervalSeconds = 300;
 } // namespace
+
+// Owns maintenance resources, never the server. Even an already-ready success
+// callback may outlive stop()/~Pop3Server(), so no handler captures a raw this.
+struct Pop3Server::LockSweeper : std::enable_shared_from_this<LockSweeper> {
+    std::shared_ptr<pr::net::IExecutor> executor;
+    std::shared_ptr<pr::net::ITimer> timer;
+    std::shared_ptr<pr::ThreadPoolBase> worker;
+    std::shared_ptr<router::IShardRouter> router;
+    std::atomic<bool> stopped{false};
+
+    void start() {
+        executor->post([self = shared_from_this()] { self->arm(); });
+    }
+    void stop() {
+        stopped.store(true, std::memory_order_release);
+        auto current = timer;
+        executor->post([current] { current->cancel(); });
+    }
+    void arm() {
+        if (stopped.load(std::memory_order_acquire)) return;
+        try {
+            timer->expires_after(std::chrono::seconds(kLockSweepIntervalSeconds));
+            std::weak_ptr<LockSweeper> weak = shared_from_this();
+            timer->async_wait([weak](const std::error_code& error) {
+                auto self = weak.lock();
+                if (!self || self->stopped.load(std::memory_order_acquire)) return;
+                if (error) {
+                    self->stopped.store(true, std::memory_order_release);
+                    LOG_SERVER_ERROR("POP3 lock sweeper timer failed: {}", error.message());
+                    return;
+                }
+                self->arm();
+                try {
+                    self->worker->post([router = self->router] {
+                        if (!TraditionalPop3Fsm<pr::TcpConnection>::sweep_expired_locks(router))
+                            LOG_SERVER_WARN("POP3 expired-lock sweep failed");
+                    });
+                } catch (const std::exception& failure) {
+                    LOG_SERVER_ERROR("Cannot schedule POP3 expired-lock sweep: {}", failure.what());
+                }
+            });
+        } catch (const std::exception& failure) {
+            stopped.store(true, std::memory_order_release);
+            LOG_SERVER_ERROR("Cannot arm POP3 lock sweeper: {}", failure.what());
+        }
+    }
+};
 
 Pop3Server::Pop3Server(const ServerConfig& config,
      std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
@@ -37,40 +84,21 @@ void Pop3Server::start() {
 }
 
 void Pop3Server::stop(pr::ServerState state) {
-    // 先取消 sweeper 定时器再停 io/worker 池（pr::TcpServerBase::stop 会停池）
-    if (m_sweep_timer) {
-        m_sweep_timer->cancel();
-        m_sweep_timer.reset();
-    }
-    m_sweep_tick = {};
+    // Mark stopped immediately; cancel on the owning executor. A queued expiry
+    // cannot access a destroyed server or start another maintenance task.
+    if (auto sweeper = std::move(m_lock_sweeper)) sweeper->stop();
     pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>>::stop(state);
 }
 
 void Pop3Server::start_lock_sweeper() {
-    if (m_sweep_timer) return;
-    auto io_pool = std::dynamic_pointer_cast<pr::IOThreadPool>(m_ioThreadPool);
-    if (!io_pool) return;
-    boost::asio::io_context& io_ctx = io_pool->get_io_context();
-    m_sweep_timer = std::make_shared<boost::asio::steady_timer>(io_ctx);
-
-    // 递归重排：m_sweep_tick 是成员（生命周期=server），handler 引用成员而非
-    // 局部变量，避免悬垂。this 裸指针安全：定时器是成员，server 析构即释放。
-    m_sweep_tick = [this](const boost::system::error_code& ec) {
-        if (ec) return;
-        if (!m_sweep_timer) return;
-        // 先重排下一次，再清扫（清扫放 worker，不阻塞 io 线程）
-        m_sweep_timer->expires_after(std::chrono::seconds(kLockSweepIntervalSeconds));
-        m_sweep_timer->async_wait(m_sweep_tick);
-        auto router = m_shardRouter;
-        if (router && m_workerThreadPool) {
-            m_workerThreadPool->post([router]() {
-                TraditionalPop3Fsm<pr::TcpConnection>::sweep_expired_locks(router);
-            });
-        }
-    };
-
-    m_sweep_timer->expires_after(std::chrono::seconds(kLockSweepIntervalSeconds));
-    m_sweep_timer->async_wait(m_sweep_tick);
+    if (m_lock_sweeper) return;
+    auto sweeper = std::make_shared<LockSweeper>();
+    sweeper->executor = get_executor();
+    sweeper->timer = sweeper->executor->make_timer();
+    sweeper->worker = m_workerThreadPool;
+    sweeper->router = m_shardRouter;
+    sweeper->start();
+    m_lock_sweeper = std::move(sweeper);
     LOG_SERVER_INFO("POP3 lock sweeper started (every {}s)", kLockSweepIntervalSeconds);
 }
 
