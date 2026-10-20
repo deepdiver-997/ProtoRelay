@@ -102,6 +102,9 @@ register-service/config.json
 .vscode/
 *.code-workspace
 .vscode/settings.json.local
+.zcode/
+.codex/
+.claude/
 
 # CLion
 .idea/
