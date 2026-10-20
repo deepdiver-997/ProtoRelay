@@ -262,7 +262,7 @@ TEST(user_exists_db_async_exists) {
 
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<dbuser@test.local>\r\n");   // 缓存未命中 → DB 异步
     fx.run_on_io(h);
 
@@ -288,7 +288,7 @@ TEST(user_exists_db_async_not_found) {
 
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<ghost@test.local>\r\n");   // 缓存未命中 → DB 异步
     fx.run_on_io(h);
 
@@ -320,7 +320,7 @@ TEST(rcpt_alias_db_async_expansion) {
 
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<group@test.local>\r\n"
         "DATA\r\n");
     fx.run_on_io(h);
@@ -518,7 +518,7 @@ TEST(verify_all_from_file_async) {
 
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n"
         "DATA\r\n"
         "From: sender@dmarcdom.com\r\n"
@@ -596,7 +596,7 @@ TEST(verify_all_from_file_dkim_async) {
 
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n"
         "DATA\r\n" + msg);
     fx.run_on_io(h);

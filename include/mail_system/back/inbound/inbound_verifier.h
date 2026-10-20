@@ -123,6 +123,9 @@ public:
 
     // 域名提取
     static std::string extract_domain(const std::string& addr);
+    // 首个 From: 头的值（折叠续行已拼接）；缺失返回空串。供 FSM 层
+    // 本域发件人边界（AccountPolicy::from_header_*）复用同一份头定位逻辑。
+    static std::string extract_from_header_value(const std::string& headers);
     static std::string extract_from_header_domain(const std::string& headers);
 
 private:

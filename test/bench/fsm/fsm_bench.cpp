@@ -28,10 +28,10 @@ namespace pq = persist_storage;
 // 预构建流水线命令
 static std::string build_pipeline_msg(int idx) {
     return std::string("EHLO test\r\n")
-        + "MAIL FROM:<user" + std::to_string(idx % 10) + "@test.local>\r\n"
+        + "MAIL FROM:<user" + std::to_string(idx % 10) + "@client.example>\r\n"
         + "RCPT TO:<dest"  + std::to_string(idx % 10) + "@test.local>\r\n"
         + "DATA\r\n"
-        + "From: user" + std::to_string(idx % 10) + "@test.local\r\n"
+        + "From: user" + std::to_string(idx % 10) + "@client.example\r\n"
         + "To: dest"  + std::to_string(idx % 10) + "@test.local\r\n"
         + "Subject: bench\r\n\r\nshort body\r\n.\r\n"
         + "QUIT\r\n";

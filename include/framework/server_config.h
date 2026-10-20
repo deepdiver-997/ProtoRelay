@@ -211,6 +211,16 @@ struct ServerConfig : public pr::ServerConfig {
     // （内部投递不受影响；未认证 25 端口 MTA 入站本来就禁中继）
     bool external_delivery_enabled;
 
+    // 本域发件人边界防伪造：未认证且不在 trusted_relay_networks 的会话（公网 25
+    // 直连）出现本域信封发件人（MAIL FROM）或本域 From: 头 → 550 确定性拒绝，
+    // 不依赖 DNS。合法本域邮件只走认证提交 / webmail / 信任中继三种入口。
+    // 键缺省 = true。
+    bool reject_unauthenticated_local_sender;
+
+    // 认证提交的 From: 头地址必须等于认证账号地址（大小写不敏感精确匹配），
+    // 否则 550 丢弃。键缺省 = true。
+    bool enforce_authenticated_from_match;
+
     // 信任中继网段：命中来源 IP 的未认证 25 端口会话可中继任意收件人（跳过
     // relay-denied 与本地用户校验）。条目为精确 IP 或 IPv4 CIDR（"120.24.169.213"、"10.0.0.0/8"）。
     // 用于边缘中继拓扑：上游 MTA（阿里云）投递到中继（RackNerd）的信任跳。
@@ -274,6 +284,8 @@ struct ServerConfig : public pr::ServerConfig {
         , outbound_dkim_enabled(false)
         , outbound_dkim_selector("default")
         , external_delivery_enabled(true)
+        , reject_unauthenticated_local_sender(true)
+        , enforce_authenticated_from_match(true)
         , metrics_enabled(false)
         , metrics_port(9090)
         , metrics_bind_address("127.0.0.1")
@@ -379,6 +391,10 @@ struct ServerConfig : public pr::ServerConfig {
             j.value("outbound_dkim_private_key_file", outbound_dkim_private_key_file));
         outbound_max_attempts  = j.value("outbound_max_attempts", outbound_max_attempts);
         external_delivery_enabled = j.value("external_delivery_enabled", external_delivery_enabled);
+        reject_unauthenticated_local_sender =
+            j.value("reject_unauthenticated_local_sender", reject_unauthenticated_local_sender);
+        enforce_authenticated_from_match =
+            j.value("enforce_authenticated_from_match", enforce_authenticated_from_match);
         if (j.contains("trusted_relay_networks") && j["trusted_relay_networks"].is_array()) {
             trusted_relay_networks.clear();
             for (auto& n : j["trusted_relay_networks"])

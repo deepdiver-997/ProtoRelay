@@ -608,6 +608,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(test_inbound_verifier
         test/unit/test_inbound_verifier.cpp
         src/mail_system/back/inbound/inbound_verifier.cpp
+        src/mail_system/back/algorithm/smtp_utils.cpp   # AccountPolicy 边界判定用的 to_lower/trim
     )
     setup_mail_target(test_inbound_verifier)
     target_include_directories(test_inbound_verifier PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
@@ -700,6 +701,15 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(safe_parse_test test/unit/safe_parse_test.cpp)
     setup_mail_target(safe_parse_test)
+
+    # 本域发件人边界纯函数（AccountPolicy）单测：判定是头文件内联实现；
+    # 另链 smtp_utils.cpp 提供 to_lower/trim（判定内部使用的归一化工具）
+    add_executable(account_policy_boundary_test
+        test/unit/account_policy_boundary_test.cpp
+        src/mail_system/back/algorithm/smtp_utils.cpp
+    )
+    target_include_directories(account_policy_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(account_policy_boundary_test)
 
     add_executable(webmail_test
         ${COMMON_SRCS}
@@ -941,6 +951,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME bcrypt_test COMMAND bcrypt_test)
     add_test(NAME password_rehash_test COMMAND password_rehash_test)
     add_test(NAME safe_parse_test COMMAND safe_parse_test)
+    add_test(NAME account_policy_boundary_test COMMAND account_policy_boundary_test)
     add_test(NAME webmail_test COMMAND webmail_test)
     add_test(NAME persist_submission_test COMMAND persist_submission_test)
     set_tests_properties(persist_submission_test PROPERTIES TIMEOUT 20)
@@ -991,6 +1002,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         bcrypt_test
         password_rehash_test
         safe_parse_test
+        account_policy_boundary_test
         webmail_test
         smtp_submitter_test
         smtp_client_test

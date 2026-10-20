@@ -130,6 +130,21 @@ At `MAIL FROM`, unauthenticated MTA traffic can be checked for SPF. A `fail` res
 At `DATA_END`, `InboundVerifier` can compute DKIM signature validity and DMARC alignment/policy,
 reusing any earlier SPF result. DNS operations use the asynchronous c-ares interface.
 
+**Local-sender boundary (anti-spoofing, DNS-free)**: a session that is neither authenticated nor
+inside `trusted_relay_networks` (public port-25 traffic) can never legitimately send as the local
+domain — legitimate local mail only enters via authenticated submission (465/587), the webmail
+MailSubmissionService (in-process, no SMTP), or trusted-relay hops. With
+`reject_unauthenticated_local_sender` (default on) the server deterministically rejects a local-domain
+envelope sender at `MAIL FROM` (`550 5.7.1 Sender address rejected: local domain requires authentication`)
+and a local-domain `From:` header at `DATA_END` (`550 5.7.1 From header rejected: local domain requires
+authentication`, message discarded, never enqueued). An empty envelope `<>` (bounce path) is exempt.
+Additionally `enforce_authenticated_from_match` (default on) requires authenticated submission to
+present a `From:` header attributable to the authenticated account — equal to the account address, or
+a local-domain alias resolving to the account — otherwise the message is rejected and discarded.
+This closes attack model (B) — envelope from the attacker's own domain passing SPF while only the
+`From:` header forges the local domain — without relying on DNS or DMARC. Trusted relay exemption is
+what lets the edge MTA keep accepting the main site's outbound mail.
+
 **Current integration gap (2026-10-18)**: DATA_END stores verification results in session context,
 but does not yet turn DKIM/DMARC hard failures into SMTP rejection or prepend an
 `Authentication-Results` header to the stored MIME. The header builder exists but is not called
@@ -428,6 +443,19 @@ Inbound sender verification knobs:
 
 - `inbound_spf_mode` (`off`|`soft`|`hard`, default `off`)
   - SPF check mode. `hard` rejects at `MAIL FROM` on SPF fail.
+- `reject_unauthenticated_local_sender` (bool, default `true`)
+  - Local-sender boundary (rules 1 and 2 above): rejects a local-domain envelope sender at `MAIL FROM`
+    and a local-domain `From:` header at `DATA_END` for sessions that are neither authenticated nor in
+    `trusted_relay_networks`. Key absent = enabled. Set `false` to restore the legacy behavior.
+- `enforce_authenticated_from_match` (bool, default `true`)
+  - Authenticated submission must present a `From:` header attributable to the authenticated account:
+    either equal to the account address, or a local-domain alias whose resolved alias targets contain
+    the account (resolution reuses the RCPT-stage alias cache, TTL 300s; case-insensitive). Otherwise
+    the message is rejected and discarded at `DATA_END` (`550 5.7.1 From header does not match
+    authenticated user`). Empty alias resolution (not an alias, DB/cache unavailable, query failure)
+    counts as no match — fail-closed. A missing or unparseable `From:` header is not rejected.
+    The envelope is unaffected: `MAIL FROM` stays forced to the account address and quota is counted
+    on the envelope. Key absent = enabled.
 - `inbound_dkim_mode` (`off`|`soft`|`hard`, default `off`)
   - DKIM signature verification mode.
 - `inbound_dmarc_mode` (`off`|`soft`|`hard`, default `off`)

@@ -2,6 +2,7 @@
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/lru_cache.h"
+#include "mail_system/back/common/account_policy.h"
 #include "framework/server_config.h"
 
 #include <openssl/evp.h>
@@ -372,22 +373,17 @@ std::string InboundVerifier::extract_domain(const std::string& addr) {
     return to_lower(domain);
 }
 
+std::string InboundVerifier::extract_from_header_value(const std::string& headers) {
+    auto vals = get_header_values(headers, "from");
+    return vals.empty() ? std::string() : vals[0];
+}
+
 std::string InboundVerifier::extract_from_header_domain(const std::string& headers) {
     auto vals = get_header_values(headers, "from");
     if (vals.empty()) return {};
-    // Extract domain from the From value: "user@domain" or "Name <user@domain>"
-    const auto& from = vals[0];
-    auto begin = from.find('<');
-    auto end = from.find('>');
-    std::string addr;
-    if (begin != std::string::npos && end != std::string::npos) {
-        addr = from.substr(begin + 1, end - begin - 1);
-    } else {
-        addr = from;
-    }
-    auto at = addr.find('@');
-    if (at == std::string::npos) return {};
-    return to_lower(addr.substr(at + 1));
+    // From 头值 → 域名的解析收在 AccountPolicy（本域发件人边界同用一份实现，
+    // 避免两处解析漂移导致边界判定与 Authentication-Results 域名不一致）
+    return AccountPolicy::from_header_domain(vals[0]);
 }
 
 std::vector<InboundVerifier::SpfMechanism>

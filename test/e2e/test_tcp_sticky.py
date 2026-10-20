@@ -141,7 +141,7 @@ def test_coalescing_batches(host="127.0.0.1", port=2525):
         # 第一批：EHLO + MAIL FROM + RCPT TO 粘包
         batch1 = (
             "EHLO batch.test\r\n"
-            "MAIL FROM:<batch@test.local>\r\n"
+            "MAIL FROM:<batch@client.example>\r\n"
             "RCPT TO:<rcpt@test.local>\r\n"
         )
         sock.sendall(batch1.encode())
@@ -201,7 +201,7 @@ def test_truncation_across_segments(host="127.0.0.1", port=2525):
         # 场景 B: MAIL FROM 被截断（在 <> 中间）
         sock.sendall(b"MAIL FR")
         time.sleep(0.05)
-        sock.sendall(b"OM:<trunc@test.local>\r\n")
+        sock.sendall(b"OM:<trunc@client.example>\r\n")
         resp = smtp_read_response(sock)
         assert assert_code(resp, 250), f"Split MAIL: {resp}"
 
@@ -252,7 +252,7 @@ def test_truncation_at_crlf(host="127.0.0.1", port=2525):
         smtp_read_response(sock)  # greeting
 
         # MAIL FROM 在 \r\n 处被截断（第一部分不带 \r\n）
-        sock.sendall(b"EHLO crlf.test\r\nMAIL FROM:<crlf@test.local>")
+        sock.sendall(b"EHLO crlf.test\r\nMAIL FROM:<crlf@client.example>")
         time.sleep(0.1)  # 稍等，让服务器处理已接收数据
         sock.sendall(b"\r\nRCPT TO:<crlf-rcpt@test.local>\r\n")
 
@@ -297,7 +297,7 @@ def test_slow_client_char_by_char(host="127.0.0.1", port=2525):
         assert assert_code(resp, 250), f"Slow EHLO: {resp}"
 
         # 逐字符发送 MAIL FROM
-        for ch in "MAIL FROM:<slow@test.local>\r\n":
+        for ch in "MAIL FROM:<slow@client.example>\r\n":
             sock.sendall(ch.encode())
             time.sleep(0.02)
         resp = smtp_read_response(sock, timeout=10)
@@ -340,7 +340,7 @@ def test_slow_mta_long_pause(host="127.0.0.1", port=2525):
 
         # 停顿 500ms（模拟 MTA 处理收件人列表）
         time.sleep(0.5)
-        sock.sendall(b"MAIL FROM:<mta-slow@test.local>\r\n")
+        sock.sendall(b"MAIL FROM:<mta-slow@client.example>\r\n")
         resp = smtp_read_response(sock)
         assert assert_code(resp, 250), f"MTA MAIL: {resp}"
 
@@ -357,7 +357,7 @@ def test_slow_mta_long_pause(host="127.0.0.1", port=2525):
         assert assert_code(resp, 354), f"MTA DATA: {resp}"
 
         # 发送 body 时有停顿（模拟生成邮件内容）
-        sock.sendall(b"From: mta-slow@test.local\r\n")
+        sock.sendall(b"From: mta-slow@client.example\r\n")
         time.sleep(0.3)
         sock.sendall(b"To: mta-slow-rcpt@test.local\r\n")
         time.sleep(0.1)
@@ -408,7 +408,7 @@ def test_stress_coalescing_truncation(host="127.0.0.1", port=2525):
             smtp_read_response(sock)
 
             # 粘包前两个命令，截断第三个
-            sock.sendall(f"EHLO stress{i}.test\r\nMAIL FROM:<stress{i}@test.local>".encode())
+            sock.sendall(f"EHLO stress{i}.test\r\nMAIL FROM:<stress{i}@client.example>".encode())
             time.sleep(0.01)
             sock.sendall(f"\r\nRCPT TO:<stress{i}-rcpt@test.local>\r\n".encode())
 

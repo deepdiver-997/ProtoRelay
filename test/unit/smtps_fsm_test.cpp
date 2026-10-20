@@ -262,7 +262,7 @@ TEST(starttls_rejected_when_disabled) {
 TEST(mail_from_ok) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n");
+        "MAIL FROM:<sender@client.example>\r\n");
     fx.start(h);
     auto w = h.conn->written();
     assert(HAS(w, "250 Ok"));
@@ -272,7 +272,7 @@ TEST(mail_from_ok) {
 TEST(rcpt_to_ok) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n");
     fx.start(h);
     auto w = h.conn->written();
@@ -283,7 +283,7 @@ TEST(rcpt_to_ok) {
 TEST(data_354) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n"
         "DATA\r\n");
     fx.start(h);
@@ -310,7 +310,7 @@ static bool wait_for_recipient_count(Handle& h, size_t n, int timeout_ms = 2000)
 TEST(rcpt_alias_expands_targets) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<team@test.local>\r\n");
     fx.start(h);
     assert(wait_for_response(h, "250 Ok"));
@@ -327,7 +327,7 @@ TEST(rcpt_alias_dedup_against_explicit_recipient) {
     // 重复记录会撞 mail_mailbox 唯一键回滚整个事务
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<team@test.local>\r\n"
         "RCPT TO:<user1@test.local>\r\n"
         "RCPT TO:<team@test.local>\r\n");
@@ -342,7 +342,7 @@ TEST(rcpt_alias_unknown_still_550) {
     // 非用户非别名（负收件缓存 + 别名缓存 miss + 无 DB pool → 空目标）→ 550
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<nobody@test.local>\r\n");
     fx.start(h);
     assert(wait_for_response(h, "550 5.1.1 User unknown"));
@@ -355,7 +355,7 @@ TEST(rcpt_real_user_not_rerouted) {
     // 真实用户优先：正收件缓存命中直接收本人，别名缓存不参与
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n");
     fx.start(h);
     assert(wait_for_response(h, "250 Ok"));
@@ -411,10 +411,10 @@ TEST(auth_rcpt_nonalias_local_accepted_as_is) {
 TEST(full_delivery_pipeline) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n"
         "DATA\r\n"
-        "From: sender@test.local\r\n"
+        "From: sender@client.example\r\n"
         "To: rcpt@test.local\r\n"
         "Subject: FSM test\r\n"
         "\r\n"
@@ -449,10 +449,10 @@ TEST(long_header_line_folded_on_ingest) {
     std::string long_subject(5000, 'x');
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n"
         "DATA\r\n"
-        "From: sender@test.local\r\n"
+        "From: sender@client.example\r\n"
         "To: rcpt@test.local\r\n"
         "Subject: " + long_subject + "\r\n"
         "\r\n"
@@ -528,7 +528,7 @@ TEST(long_header_line_folded_on_ingest) {
 TEST(multiple_rcpt) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt1@test.local>\r\n"
         "RCPT TO:<rcpt2@test.local>\r\n"
         "RCPT TO:<rcpt3@test.local>\r\n"
@@ -587,7 +587,7 @@ TEST(mail_from_bad_syntax) {
 TEST(rcpt_to_bad_syntax) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:bad\r\n");
     fx.start(h);
     auto w = h.conn->written();
@@ -674,7 +674,7 @@ TEST(rcpt_local_known_accepted) {
     // 未认证 MTA 路径：本地已注册用户 → 250 Ok
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n");
     fx.start(h);
     auto w = h.conn->written();
@@ -704,7 +704,7 @@ TEST(rcpt_auth_client_any_recipient) {
 TEST(auth_required_rejected) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<sender@test.local>\r\n",
+        "MAIL FROM:<sender@client.example>\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
     auto w = h.conn->written();
@@ -873,10 +873,10 @@ TEST(rset_envelope_reset) {
     // RSET 后可以重新开始 MAIL FROM
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s1@test.local>\r\n"
+        "MAIL FROM:<s1@client.example>\r\n"
         "RCPT TO:<r1@test.local>\r\n"
         "RSET\r\n"
-        "MAIL FROM:<s2@test.local>\r\n"
+        "MAIL FROM:<s2@client.example>\r\n"
         "RCPT TO:<r2@test.local>\r\n"
         "QUIT\r\n");
     fx.start(h);
@@ -891,14 +891,14 @@ TEST(multiple_transactions) {
     // 一条连接中发送两封邮件
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s1@test.local>\r\n"
+        "MAIL FROM:<s1@client.example>\r\n"
         "RCPT TO:<r1@test.local>\r\n"
         "DATA\r\n"
         "Subject: first\r\n"
         "\r\n"
         "body1\r\n"
         ".\r\n"
-        "MAIL FROM:<s2@test.local>\r\n"
+        "MAIL FROM:<s2@client.example>\r\n"
         "RCPT TO:<r2@test.local>\r\n"
         "DATA\r\n"
         "Subject: second\r\n"
@@ -930,7 +930,7 @@ TEST(multiple_transactions) {
 TEST(empty_body) {
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<r@test.local>\r\n"
         "DATA\r\n"
         "\r\n"
@@ -946,7 +946,7 @@ TEST(dot_stuffing) {
     // 行首的 "." 会被去填充 (.. → .)
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "RCPT TO:<r@test.local>\r\n"
         "DATA\r\n"
         "Subject: dot test\r\n"
@@ -965,7 +965,7 @@ TEST(data_without_rcpt) {
     // 没有 RCPT TO 就发 DATA → 503 Bad sequence
     auto h = fx.make_session(
         "EHLO test\r\n"
-        "MAIL FROM:<s@test.local>\r\n"
+        "MAIL FROM:<s@client.example>\r\n"
         "DATA\r\n");
     fx.start(h);
     auto w = h.conn->written();
@@ -1016,6 +1016,267 @@ TEST(ehlo_resets_auth_in_progress) {
     // EHLO 应重置 AUTH 状态并返回 250 问候
     assert(HAS(w, "250"));
     std::cout << "  [PASS] ehlo_resets_auth_in_progress" << std::endl;
+}
+
+// ========== 本域发件人边界（防伪造，2026-10-20）==========
+// 攻击模型：公网 25 直连（未认证且不在 trusted_relay_networks）的会话
+//  (A) 信封 MAIL FROM 伪造本域 —— 规则 1 在 MAIL FROM 550；
+//  (B) 信封用自己域、只伪造 From: 头为本域 —— 规则 2 在 DATA_END 550 且不入队。
+// 合法本域邮件（认证提交 / trusted relay）必须不受影响（规则/开关回归见下）。
+
+TEST(local_sender_mail_from_rejected) {
+    // 规则 1：未认证非受信会话，本域信封发件人 → 550，状态回 WAIT_AUTH 可继续
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<user@test.local>\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
+        "MAIL FROM:<>\r\n");   // 空信封（退信路径）豁免
+    fx.start(h);
+    assert(wait_for_response(h, "550 5.7.1 Sender address rejected: local domain requires authentication"));
+    // 状态回 WAIT_AUTH：外部域 MAIL FROM 正常 250，会话未被关闭
+    assert(wait_for_response(h, "250 Ok"));
+    assert(wait_for_response(h, "250 Ok"));   // <> 退信豁免
+    std::cout << "  [PASS] local_sender_mail_from_rejected (550 + 状态恢复 + 空信封豁免)" << std::endl;
+}
+
+TEST(local_sender_trusted_relay_exempt) {
+    // trusted_relay_networks 命中客户端 IP（mock=127.0.0.1）→ 本域信封发件人放行
+    // （边缘 MTA 收主站出站邮件的豁免路径）
+    auto base = std::atomic_load(&fx.server->m_config);
+    ServerConfig c = *base;
+    c.trusted_relay_networks = {"127.0.0.0/8"};
+    std::atomic_store(&fx.server->m_config, std::make_shared<ServerConfig>(c));
+
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<user@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n");
+    fx.start(h);
+    assert(wait_for_response(h, "250 Ok"));
+
+    std::atomic_store(&fx.server->m_config, base);   // 还原，后续用例共用 fixture
+    std::cout << "  [PASS] local_sender_trusted_relay_exempt" << std::endl;
+}
+
+TEST(local_from_header_rejected_at_data_end) {
+    // 规则 2：信封他域绕过 SPF，仅伪造 From: 头为本域 → DATA_END 550 且不入队
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: anyone@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: spoof\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n");
+    fx.start(h);
+    assert(wait_for_response(h, "550 5.7.1 From header rejected: local domain requires authentication"));
+    // 未入队（mails_accepted 不增）
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before);
+    std::cout << "  [PASS] local_from_header_rejected_at_data_end (550 + 未入队)" << std::endl;
+}
+
+TEST(auth_from_mismatch_rejected_at_data_end) {
+    // 规则 3：认证提交的 From: 头与认证账号不一致 → 550 丢弃
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: colleague@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: spoof\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_response(h, "550 5.7.1 From header does not match authenticated user"));
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before);
+    std::cout << "  [PASS] auth_from_mismatch_rejected_at_data_end (550 + 未入队)" << std::endl;
+}
+
+TEST(auth_from_match_accepted_at_data_end) {
+    // 规则 3 不误伤：From: 头等于认证账号 → 正常入队
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: User0 <user0@test.local>\r\n"   // 显示名 + 大小写：归一后精确匹配
+        "To: rcpt@test.local\r\n"
+        "Subject: legit\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_response(h, "250 OK"));
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before + 1);
+    std::cout << "  [PASS] auth_from_match_accepted_at_data_end (250 + 入队)" << std::endl;
+}
+
+TEST(policy_toggle_restores_old_behavior) {
+    // 两个开关置 false → 恢复旧行为：未认证非受信的本域信封/From 头均照旧入队
+    auto base = std::atomic_load(&fx.server->m_config);
+    ServerConfig c = *base;
+    c.reject_unauthenticated_local_sender = false;
+    c.enforce_authenticated_from_match = false;
+    std::atomic_store(&fx.server->m_config, std::make_shared<ServerConfig>(c));
+
+    // 规则 1 关：本域信封发件人放行
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<user@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n");
+    fx.start(h);
+    assert(wait_for_response(h, "250 Ok"));
+
+    // 规则 2 关：本域 From: 头照旧入队
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h2 = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@client.example>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: anyone@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: legacy\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n");
+    fx.start(h2);
+    assert(wait_for_response(h2, "250 OK"));
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before + 1);
+
+    std::atomic_store(&fx.server->m_config, base);   // 还原，后续用例共用 fixture
+    std::cout << "  [PASS] policy_toggle_restores_old_behavior" << std::endl;
+}
+
+TEST(auth_from_alias_accepted_at_data_end) {
+    // 规则 3 别名分支：From 头地址是登录账号的别名（solo@test.local → user0）
+    // → 视为本人发信，正常入队。信封 MAIL FROM 仍强制登录账号（不变）。
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: Solo <solo@test.local>\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: via alias\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_response(h, "250 OK"));
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before + 1);
+    std::cout << "  [PASS] auth_from_alias_accepted_at_data_end (别名命中 → 入队)" << std::endl;
+}
+
+TEST(auth_from_alias_case_normalized_accepted_at_data_end) {
+    // 规则 3 别名分支大小写规范化：别名目标大小写与登录账号不同也命中
+    fx.fsm->m_aliasCache->put("casealias@test.local", {"User0@Test.LOCAL"});
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: casealias@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: case\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_response(h, "250 OK"));
+    std::cout << "  [PASS] auth_from_alias_case_normalized_accepted_at_data_end" << std::endl;
+}
+
+TEST(auth_from_alias_miss_rejected_at_data_end) {
+    // 规则 3 别名分支：From 地址是别名但不指向登录账号（team → user1,user2）→ 550
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: team@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: spoof via alias\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_response(h, "550 5.7.1 From header does not match authenticated user"));
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before);
+    std::cout << "  [PASS] auth_from_alias_miss_rejected_at_data_end (别名未命中 → 550 未入队)" << std::endl;
+}
+
+TEST(auth_from_alias_db_unavailable_fails_closed_at_data_end) {
+    // 规则 3 别名分支 fail-closed：别名缓存 miss + 无 DB pool（fixture 无 DB）→
+    // 空目标视为不匹配 → 550（DB/缓存不可用不能变成绕过 From 校验的通道）
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    std::string token = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: ghostalias@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: db down\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(wait_for_response(h, "550 5.7.1 From header does not match authenticated user"));
+    assert(fx.server->mails_accepted_total_.load() == mails_accepted_before);
+    std::cout << "  [PASS] auth_from_alias_db_unavailable_fails_closed_at_data_end (空目标 → 550)" << std::endl;
 }
 
 int main() {
@@ -1090,6 +1351,18 @@ int main() {
 
         // ── EHLO 重置 AUTH ──
         test_ehlo_resets_auth_in_progress(fx);
+
+        // ── 本域发件人边界（防伪造） ──
+        test_local_sender_mail_from_rejected(fx);
+        test_local_sender_trusted_relay_exempt(fx);
+        test_local_from_header_rejected_at_data_end(fx);
+        test_auth_from_mismatch_rejected_at_data_end(fx);
+        test_auth_from_match_accepted_at_data_end(fx);
+        test_auth_from_alias_accepted_at_data_end(fx);
+        test_auth_from_alias_case_normalized_accepted_at_data_end(fx);
+        test_auth_from_alias_miss_rejected_at_data_end(fx);
+        test_auth_from_alias_db_unavailable_fails_closed_at_data_end(fx);
+        test_policy_toggle_restores_old_behavior(fx);
 
         std::cout << "\nAll tests passed.\n";
     } catch (const std::exception& e) {

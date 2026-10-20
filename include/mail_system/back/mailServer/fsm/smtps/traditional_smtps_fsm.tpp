@@ -510,6 +510,32 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     auto addr_end   = session->get_last_command_args().find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
     if (addr_start != std::string::npos && addr_end != std::string::npos) {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+
+        // 本域发件人边界（规则 1）：未认证且不在 trusted_relay_networks 的会话
+        // （公网 25 直连）信封发件人落在本域只能是伪造——合法本域邮件只走认证
+        // 提交 / webmail / 信任中继三种入口。空信封 <>（退信）豁免；必须在进入
+        // SPF/配额 proceed 之前确定性拒绝，不依赖 DNS。状态处理与下方 SPF 硬拒
+        // 一致：回 WAIT_AUTH 继续读。
+        {
+            auto cfg = std::atomic_load(&session->get_server()->m_config);
+            const std::string envelope_sender = session->get_last_command_args().substr(
+                addr_start + 1, addr_end - addr_start - 1);
+            if (cfg->reject_unauthenticated_local_sender && !ctx->is_authenticated &&
+                !ip_in_trusted_networks(session->get_client_ip(), cfg->trusted_relay_networks) &&
+                AccountPolicy::envelope_sender_is_local(envelope_sender, cfg->system_domain)) {
+                LOG_SMTP_INFO("MAIL FROM local domain sender rejected: {} (from {})",
+                              envelope_sender, session->get_client_ip());
+                session->do_async_write(
+                    "550 5.7.1 Sender address rejected: local domain requires authentication\r\n",
+                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
+                        if (ec) return;
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                        s->do_async_read();
+                    });
+                return;
+            }
+        }
+
         ctx->sender_address = AccountPolicy::submission_sender(
             ctx->is_authenticated ? ctx->client_username : "",
             session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1));
@@ -964,16 +990,19 @@ void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
                    smtp_session->get_mail()->mime_root);
 }
 
-// MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
+// MIME 预解析之后的收尾：本域发件人边界（规则 2/3）→ 入站校验（可选异步）→ 入队 + 250/451。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
-    auto* ctx = static_cast<SmtpsContext*>(session->get_context());
-    auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
-    if (!smtp_session) { session->close(); return; }
-
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    // 收尾主体（边界检查通过后续跑）：入站校验（可选异步）→ 入队 + 250/451。
+    // 以值捕获 session：规则 3 的别名分支会在 DB/缓存回调线程重入本 lambda
+    // （与下方 verify 回调同一形状，style 11.2），故内部自行重取 ctx/cfg。
+    auto finish_after_sender_boundary = [session]() {
+        auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+        auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+        if (!smtp_session) { session->close(); return; }
+        auto cfg = std::atomic_load(&session->get_server()->m_config);
 
     try {
 
@@ -1081,6 +1110,83 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
             [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
         return;
     }
+    };
+
+    // ---- 本域发件人边界（DATA_END，2026-10-20）----
+    // 未认证且不在 trusted_relay_networks 的会话（公网 25 直连），From: 头域名等于
+    // 本域即头级伪造（攻击模型 B：信封用自己域绕过 SPF、只改 From 头）。规则 3 对
+    // 认证提交要求 From 头归属登录账号：精确相等，或 From 地址是登录账号的别名
+    // （其别名目标集合包含登录账号；解析复用 alias_targets_async 的 AliasCache，
+    // TTL 300s）。信封语义不变：MAIL FROM 仍强制登录账号、配额按信封计，别名
+    // 只体现在 From 头。检查必须放在 needs_verify（DNS 工作）与 finalize_mail
+    // （入队/持久化）之前：550 后直接丢弃，绝不入队。From 头缺失或解析不出
+    // 地址 → 不因本规则拒收（超出规则范围，规则 3 同理）。
+    auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+    auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+    if (!smtp_session) { session->close(); return; }
+    auto cfg = std::atomic_load(&session->get_server()->m_config);
+
+    auto reject_and_close = [session, smtp_session](const char* reply) {
+        smtp_session->discard_current_mail();
+        session->do_async_write(reply,
+            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable {
+                s->close();
+            });
+    };
+
+    const std::string from_value =
+        inbound::InboundVerifier::extract_from_header_value(ctx->header_buffer);
+
+    // 规则 2：未认证非受信会话，From 头域名等于本域
+    if (cfg->reject_unauthenticated_local_sender && !ctx->is_authenticated &&
+        !ip_in_trusted_networks(session->get_client_ip(), cfg->trusted_relay_networks) &&
+        AccountPolicy::from_header_is_local(from_value, cfg->system_domain)) {
+        LOG_SMTP_INFO("DATA_END From header local domain rejected: {} (from {})",
+                      from_value, session->get_client_ip());
+        reject_and_close("550 5.7.1 From header rejected: local domain requires authentication\r\n");
+        return;
+    }
+
+    // 规则 3：认证提交，From 头归属校验（精确匹配 → 别名感知）
+    if (cfg->enforce_authenticated_from_match && ctx->is_authenticated) {
+        const auto from_addr = AccountPolicy::from_header_address(from_value);
+        const std::string auth_user = algorithm::trim(ctx->client_username);
+        if (!from_addr.empty() && !AccountPolicy::from_header_matches_account(from_value, auth_user)) {
+            if (!AccountPolicy::from_header_is_local(from_value, cfg->system_domain)) {
+                // 非本域 From 无别名语义可言，维持精确匹配拒绝
+                LOG_SMTP_INFO("DATA_END From header mismatch: from={} auth={} (from {})",
+                              from_value, auth_user, session->get_client_ip());
+                reject_and_close("550 5.7.1 From header does not match authenticated user\r\n");
+                return;
+            }
+            // 本域 From：别名感知。alias_targets_async 包装器先 set_paused(true)；
+            // 缓存（TTL 300s）命中在当前线程同步回调，DB 路径回调在 DB 线程 ——
+            // pause 期间 io 流水线不消费本 session，回调独占操作，无需 post 回
+            // io_context（与上方 verify 的 worker 续跑同一约定）。
+            // 空目标（非别名 / DB 不可用 / 查询失败）= 不匹配，fail-closed 拒绝。
+            // 本函数为 static（DATA_END 回调链无 this），经 session 取回 FSM 实例
+            //（session 持有 fsm shared_ptr，回调存活期内 FSM 必存活）。
+            auto* fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(smtp_session->get_fsm());
+            fsm->alias_targets_async(session, from_addr,
+                [session, from_addr, auth_user, reject_and_close,
+                 pass = std::move(finish_after_sender_boundary)](std::vector<std::string> targets) {
+                    session->set_paused(false);
+                    if (AccountPolicy::account_in_alias_targets(targets, auth_user)) {
+                        LOG_SMTP_INFO("DATA_END From header alias accepted: from={} as alias of {} (from {})",
+                                      from_addr, auth_user, session->get_client_ip());
+                        pass();
+                        return;
+                    }
+                    LOG_SMTP_INFO("DATA_END From header mismatch: from={} auth={} (from {})",
+                                  from_addr, auth_user, session->get_client_ip());
+                    reject_and_close("550 5.7.1 From header does not match authenticated user\r\n");
+                });
+            return;
+        }
+    }
+
+    // 精确匹配 / 规则关闭 / From 缺失或无法解析 → 直接续跑收尾
+    finish_after_sender_boundary();
 }
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(

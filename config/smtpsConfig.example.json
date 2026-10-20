@@ -54,6 +54,8 @@
   "inbound_auth_policy": "off",
   "smtp_daily_send_limit": 100,
   "external_delivery_enabled": false,
+  "reject_unauthenticated_local_sender": true,
+  "enforce_authenticated_from_match": true,
   "inbound_spf_mode": "hard",
   "inbound_dkim_mode": "soft",
   "inbound_dmarc_mode": "soft",
