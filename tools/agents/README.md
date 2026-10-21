@@ -181,10 +181,17 @@ tools/agents/spawn.sh stop smtp-dedup
 全不通则直接报错、**绝不裸跑**（防网络抖动时直连导致账号风控）。端口表用 `CODEX_PROXY_PORTS`
 改；人手动跑 codex 也可以直接调这个包装，或加 alias 全局生效。
 
-## 本机参数
+## 本机参数（两层 agents.env）
 
-`cp tools/agents/agents.conf.example tools/agents/agents.conf` 后按需改：`AGENTS_DIR`、`BASE_BRANCH`、
-`BUILD_LOCK_WAIT`、`USE_CCACHE`、`PORT_BLOCK_START/SIZE`、`TMP_ROOT_PREFIX`、`DB_NAME_PREFIX`。
+KEY=VALUE 格式，bash 直接 source；项目内覆盖机器级，都缺失则走内置默认值（脚本启动会提示怎么补）：
+
+- **机器级** `~/.agent-parallel/tools/agents.env`：`BUILD_LOCK_WAIT`、`USE_CCACHE`、
+  `PORT_BLOCK_START/SIZE`（多项目共网时全局一致，避免从同一起点抢端口段）
+- **项目级** `tools/agents/agents.env`（`cp agents.env.example agents.env`）：`BASE_BRANCH`、
+  `DISK_RESERVE_GB`、`TMP_ROOT_PREFIX`、`DB_NAME_PREFIX`
+
+工作区根目录不在参数里：固定 `~/.agent-workspaces/workspaces/<项目名>/`（一台机器一处，无旋钮）。
+模板见 `agents.env.example`；`agents.env` 已 gitignore。
 
 ## 排错
 
@@ -194,20 +201,23 @@ tools/agents/spawn.sh stop smtp-dedup
 | `Refusing ... from an agent worktree`（退出 77） | 你在 worktree 里跑了 cross-x64/object-only/sync-sysroot，去 hub 跑 |
 | 退出 76 | `.git/agents/STOP` 存在，操作者按了刹车 |
 | 退出 78 / `磁盘预算检查未通过` | 设备预算没设或余量不足：`budget.sh show` 看占用，合并/删掉收尾的 worktree，或人工 `budget.sh set` 调高 |
+| 启动时提示 `未检测到全局骨架母本` / `项目内没有 agents.env` | 按提示装 ~/.agent-parallel 母本、`cp agents.env.example agents.env`；不装也能跑（走默认值），但建议统一 |
 | worktree 里改了 `config/pop3Config.json` 却 `git status` 看不到 | 它被标了 skip-worktree；`git update-index --no-skip-worktree <file>` 后再提交 |
-
-## 落地到新项目（骨架复用检查单）
-
-1. 拷 `tools/agents/` 整目录 + 根 `AGENTS.md`；`budget.sh`/`lib.sh`/`spawn.sh`/`harnesses.conf` 原样可用。
-2. **改项目策略层**：`apply_agent_env.py` 的端口映射与要改写的配置清单、`db_init.sh` 的建库语义、
-   `agents.conf.example` 的资源命名（sbs 的对应物是任务编号与创作权，本项目是端口段/库名）。
-3. 把本仓库 `AGENTS.md` 第 6 节（资源上限）原样插进新项目的 AGENTS.md：并行模式的存在、
-   有人监管可直接在 hub、无人监管必须并行模式 + 人工设定经验证的磁盘预算、编译并行度用默认、不无限制吃资源。
-4. 人工执行一次 `budget.sh set <GB>`（全设备只需要一次，账本是共享的）。
-5. 跑一遍 `new-worktree.sh demo → build.sh Release → remove-worktree.sh demo` 验证管道。
 | 新 worktree 没有 `tools/agents/`、`AGENTS.md` | 这些文件还没合进基准分支；脚本一律用 hub 的副本操作 worktree，不依赖 worktree 里有它们 |
 | `db_init.sh` 建库失败 | 用户没有 CREATE 权限：由管理员 `CREATE DATABASE mail_agent_N; GRANT ALL ON mail_agent_N.* TO 'mail_test'@'%';` 后重跑 |
 | 端口段分配跳过了默认段 | 段内有端口被别的进程占着（探测用 127.0.0.1 bind），属正常后移 |
+
+## 落地到新项目（骨架复用检查单）
+
+1. 从母本拉骨架：`rsync -a ~/.agent-parallel/tools/ <新项目>/tools/agents/`，根 `AGENTS.md` 参考本仓库。
+2. **改项目策略层**：`apply_agent_env.py` 的端口映射与要改写的配置清单、`db_init.sh` 的建库语义、
+   `agents.env`（cp 自 example）的资源命名、基准分支、`DISK_RESERVE_GB`（sbs 的对应物是任务编号
+   与创作权，本项目是端口段/库名；机器级参数放全局母本那份 agents.env）。
+3. 把本仓库 `AGENTS.md` 第 6 节（资源上限）原样插进新项目的 AGENTS.md：并行模式的存在、
+   有人监管可直接在 hub、无人监管必须并行模式 + 人工设定经验证的磁盘预算、编译并行度用默认、不无限制吃资源
+   （现成段落：`~/.agent-parallel/docs/agents-md-资源上限.md`）。
+4. 人工执行一次 `budget.sh set <GB>`（全设备只需要一次，账本是共享的）。
+5. 跑一遍 `new-worktree.sh demo → build.sh Release → remove-worktree.sh demo` 验证管道。
 
 ## 与 sbs-local 夜跑的差异
 

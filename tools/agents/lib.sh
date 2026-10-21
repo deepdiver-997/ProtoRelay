@@ -42,12 +42,29 @@ agents_init() {
     ALLOC_DIR="${STATE_DIR}/alloc"
     mkdir -p "${ALLOC_DIR}"
 
-    # 本机参数：agents.conf（gitignored，模板见 agents.conf.example）> 默认值
-    local conf="${HUB}/tools/agents/agents.conf"
-    if [ -f "${conf}" ]; then
+    # ---- 两层 agents.env 配置（KEY=VALUE，bash 直接 source）----
+    #   机器级  ~/.agent-parallel/tools/agents.env   一台机器一份（锁等待 / ccache / 端口段起点）
+    #   项目级  <本项目>/tools/agents/agents.env     覆盖机器级（基准分支 / 资源命名 / 预算预估）
+    # 都缺失不阻塞（走内置默认值），但按梯子提示怎么补；真正的硬闸是设备磁盘预算。
+    # 工作区根目录刻意不在参数里：固定 ~/.agent-workspaces/workspaces/<项目名>/。
+    AGENT_PARALLEL_HOME="${AGENT_PARALLEL_HOME:-$HOME/.agent-parallel}"
+    local global_env="${AGENT_PARALLEL_HOME}/tools/agents.env"
+    local local_env="${AGENTS_LIB_DIR}/agents.env"
+    if [ ! -d "${AGENT_PARALLEL_HOME}" ]; then
+        warn "未检测到全局骨架母本 ${AGENT_PARALLEL_HOME}：建议先安装一份，配置统一放一处不容易出错"
+        echo "  参考 ~/.agent-parallel 的 README（或本项目 tools/agents/README.md「落地到新项目」）"
+    elif [ -f "${global_env}" ]; then
         # shellcheck disable=SC1090
-        . "${conf}"
+        . "${global_env}"
     fi
+    if [ -f "${local_env}" ]; then
+        # shellcheck disable=SC1090
+        . "${local_env}"
+    else
+        warn "项目内没有 tools/agents/agents.env：本机/本项目参数将走默认值"
+        echo "  自行写入：cp ${AGENTS_LIB_DIR}/agents.env.example ${local_env}  # 然后按项目去掉注释填写"
+    fi
+
     # 工作区根：固定绝对路径，全机器只有这一处，不提供更改选项（与磁盘账本同家）。
     # 项目命名空间自动取 hub 父目录名（本项目 = mail-system）。
     AGENTS_DIR="${HOME}/.agent-workspaces/workspaces/$(basename "$(dirname "${HUB}")")"
