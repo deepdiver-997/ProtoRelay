@@ -1171,6 +1171,202 @@ TEST(mailbox_repository_injection) {
     std::cout << "  [PASS] mailbox repository injection and protocol name decoding" << std::endl;
 }
 
+// Write repositories can be replaced independently of mailbox reads. Their
+// delayed completion must return to the session executor before touching caches
+// or producing protocol responses.
+class MutationMailboxReads final : public repository::IMailboxRepository {
+public:
+    uint64_t target = 77;
+    void get_mailboxes_async(Lease, uint64_t, ListCallback cb) override { cb(true, {}); }
+    void find_mailbox_id_async(Lease, uint64_t, const std::string&, std::function<void(uint64_t)> cb) override { cb(target); }
+    void get_mailbox_mails_async(Lease, uint64_t, uint64_t, MessagesCallback cb) override {
+        MailboxMailInfo first; first.mail_id = 501; first.status = 1;
+        MailboxMailInfo second; second.mail_id = 502; second.is_deleted = true;
+        cb(true, {first, second});
+    }
+    void get_mailbox_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(2); }
+    void get_mailbox_unseen_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(1); }
+    void get_mailbox_uidnext_async(Lease, uint64_t, uint64_t, std::function<void(uint64_t)> cb) override { cb(503); }
+};
+class DelayedMutationRepository final : public repository::IImapMutationRepository {
+public:
+    repository::ImapStoreRequest store_request;
+    repository::ImapCopyMoveRequest copy_request;
+    repository::ImapMailboxScope expunge_scope;
+    Complete store_complete, expunge_complete;
+    CopyComplete copy_complete;
+    int stores = 0, copies = 0, expunges = 0;
+    void store_async(Lease lease, repository::ImapStoreRequest request, Complete complete) override {
+        ++stores; store_request = std::move(request);
+        store_complete = [lease = std::move(lease), complete = std::move(complete)](repository::ImapMutationResult result) {
+            assert(lease && lease->is_valid()); complete(result);
+        };
+    }
+    void expunge_async(Lease lease, repository::ImapMailboxScope scope, Complete complete) override {
+        ++expunges; expunge_scope = scope;
+        expunge_complete = [lease = std::move(lease), complete = std::move(complete)](repository::ImapMutationResult result) {
+            assert(lease && lease->is_valid()); complete(result);
+        };
+    }
+    void copy_move_async(Lease lease, repository::ImapCopyMoveRequest request, CopyComplete complete) override {
+        ++copies; copy_request = std::move(request);
+        copy_complete = [lease = std::move(lease), complete = std::move(complete)](repository::ImapCopyMoveResult result) {
+            assert(lease && lease->is_valid()); complete(result);
+        };
+    }
+    void finish_store(repository::ImapMutationResult result) { auto cb = std::move(store_complete); assert(cb); cb(result); }
+    void finish_expunge(repository::ImapMutationResult result) { auto cb = std::move(expunge_complete); assert(cb); cb(result); }
+    void finish_copy(repository::ImapCopyMoveResult result) { auto cb = std::move(copy_complete); assert(cb); cb(result); }
+};
+struct MutationProtocolFixture {
+    using Fsm = TraditionalImapsFsm<MockConnection>;
+    std::shared_ptr<test::MockDbPool> pool = std::make_shared<test::MockDbPool>();
+    std::shared_ptr<DelayedMutationRepository> mutations = std::make_shared<DelayedMutationRepository>();
+    std::shared_ptr<MutationMailboxReads> reads = std::make_shared<MutationMailboxReads>();
+    std::shared_ptr<Fsm> fsm;
+    std::shared_ptr<TestServer> server;
+    std::shared_ptr<Fsm::MailboxListCache> lists = std::make_shared<Fsm::MailboxListCache>(8, std::chrono::seconds(60));
+    std::shared_ptr<Fsm::MailboxStatsCache> stats = std::make_shared<Fsm::MailboxStatsCache>(8, std::chrono::seconds(60));
+    explicit MutationProtocolFixture(FsmTestFixture& fx) {
+        auto shards = std::make_shared<router::StaticShardRouter>(
+            std::vector<std::pair<std::string, int>>{}, 0,
+            std::vector<std::shared_ptr<DBPool>>{pool},
+            std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+        server = std::make_shared<TestServer>(fx.cfg, fx.io_pool, fx.worker_pool, shards);
+        fsm = std::make_shared<Fsm>(fx.io_pool, fx.worker_pool, shards);
+        fsm->set_mailbox_repository(reads);
+        fsm->set_mutation_repository(mutations);
+        fsm->set_mailbox_list_cache(lists);
+        fsm->set_mailbox_stats_cache(stats);
+        for (uint64_t mailbox : {7, 77, 88}) {
+            lists->put(mbox_cache_key(41, mailbox), {});
+            stats->put(mbox_cache_key(41, mailbox), {});
+        }
+    }
+    FsmTestFixture::Handle make_session() {
+        auto connection = std::make_unique<MockConnection>();
+        auto* raw = connection.get();
+        raw->set_deferred_read(true);
+        auto session = std::make_shared<ImapsSession<MockConnection>>(server.get(), std::move(connection), fsm);
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        ctx->is_authenticated = true; ctx->mailbox_selected = true;
+        ctx->user_id = 41; ctx->shard_index = 0; ctx->selected_mailbox_id = 7;
+        ctx->selected_mailbox_name = "INBOX"; ctx->username = "owner@test.local";
+        session->set_current_state(static_cast<int>(ImapState::SELECTED));
+        return {raw, session};
+    }
+    bool has_list(uint64_t mailbox) {
+        MailboxListEntry entry; bool stale = false;
+        return lists->get(mbox_cache_key(41, mailbox), entry, stale);
+    }
+    bool has_stats(uint64_t mailbox) {
+        MailboxCacheEntry entry; bool stale = false;
+        return stats->get(mbox_cache_key(41, mailbox), entry, stale);
+    }
+};
+TEST(mutation_repository_store_and_expunge_injection) {
+    {
+        MutationProtocolFixture fixture(fx);
+        auto h = fixture.make_session();
+        bool rejected = false;
+        try { fixture.fsm->set_mutation_repository({}); } catch (const std::invalid_argument&) { rejected = true; }
+        assert(rejected && fixture.fsm->get_mutation_repository() == fixture.mutations);
+        h.session->handle_read("W1 STORE 1 +FLAGS (\\Seen \\Flagged \\Deleted)\r\n");
+        h.session->process_read();
+        auto& request = fixture.mutations->store_request;
+        assert(fixture.mutations->stores == 1 && request.scope.user_id == 41 && request.scope.mailbox_id == 7);
+        assert((request.mail_ids == std::vector<uint64_t>{501}));
+        assert(request.seen.value() && request.flagged.value() && request.deleted.value());
+        assert(request.recipient_fallback == "owner@test.local");
+        assert(!fixture.pool->mock_conn()->has_pending_query() && !fixture.pool->mock_conn()->has_pending_execute());
+        fixture.mutations->finish_store({false});
+        assert(fixture.has_list(7) && fixture.has_stats(7) && h.conn->written().empty());
+        h.conn->pump_executor();
+        assert(!fixture.has_list(7) && !fixture.has_stats(7) && fixture.has_list(88));
+        assert(HAS(h.conn->written(), "* 1 FETCH (FLAGS (") && HAS(h.conn->written(), "W1 OK STORE completed"));
+    }
+    {
+        MutationProtocolFixture fixture(fx);
+        auto h = fixture.make_session();
+        h.session->handle_read("W2 EXPUNGE\r\n");
+        h.session->process_read();
+        assert(fixture.mutations->expunges == 1 && fixture.mutations->expunge_scope.user_id == 41
+               && fixture.mutations->expunge_scope.mailbox_id == 7);
+        fixture.mutations->finish_expunge({false});
+        assert(fixture.has_list(7) && h.conn->written().empty());
+        h.conn->pump_executor();
+        assert(!fixture.has_list(7) && fixture.has_list(88));
+        assert(HAS(h.conn->written(), "* 2 EXPUNGE\r\n") && HAS(h.conn->written(), "W2 OK EXPUNGE completed"));
+    }
+    std::cout << "  [PASS] injected STORE/EXPUNGE resume on the session executor and invalidate caches" << std::endl;
+}
+TEST(mutation_repository_copy_move_failures) {
+    struct Case { bool move; repository::ImapCopyMoveResult result; bool ok; };
+    const Case cases[] = {
+        {false, {false, 0, false}, false}, {true, {false, 0, false}, false},
+        {true, {true, 2, false}, false}, {true, {true, 0, true}, true},
+        {false, {true, 0, false}, true}
+    };
+    for (const auto& test : cases) {
+        MutationProtocolFixture fixture(fx);
+        auto h = fixture.make_session();
+        const std::string command = test.move ? "MOVE" : "COPY";
+        h.session->handle_read("W3 " + command + " 1 Archive\r\n");
+        h.session->process_read();
+        const auto& request = fixture.mutations->copy_request;
+        assert(fixture.mutations->copies == 1 && request.move == test.move && request.target_mailbox_id == 77);
+        assert(request.source.user_id == 41 && request.source.mailbox_id == 7);
+        assert((request.mail_ids == std::vector<uint64_t>{501}));
+        fixture.mutations->finish_copy(test.result);
+        assert(fixture.has_list(7) && fixture.has_list(77) && h.conn->written().empty());
+        h.conn->pump_executor();
+        assert(!fixture.has_list(77) && fixture.has_list(88));
+        assert(fixture.has_list(7) == !test.move);
+        if (test.ok) assert(HAS(h.conn->written(), "W3 OK " + command + " completed (0 messages)"));
+        else assert(HAS(h.conn->written(), "W3 NO " + command + " failed: database error"));
+    }
+    std::cout << "  [PASS] COPY/MOVE database failures return NO, successful zero copies remain valid" << std::endl;
+}
+TEST(mutation_repository_same_mailbox_move_is_rejected) {
+    for (bool move : {true, false}) {
+        MutationProtocolFixture fixture(fx);
+        fixture.reads->target = 7;
+        fixture.fsm->set_mutation_repository(repository::make_sql_imap_mutation_repository());
+        auto h = fixture.make_session();
+        const std::string command = move ? "MOVE" : "COPY";
+        h.session->handle_read("W5 " + command + " 1 INBOX\r\n");
+        h.session->process_read();
+        auto db = fixture.pool->mock_conn();
+        if (move) {
+            assert(db->last_query_sql().empty() && !db->has_pending_execute() && !db->has_pending_query());
+        } else {
+            assert(db->last_query_sql().find("INSERT IGNORE") == 0 && db->has_pending_execute());
+            db->fire_execute(true);
+            db->fire_query(std::make_shared<test::MockDbResult>(
+                std::vector<std::map<std::string, std::string>>{{{"affected", "0"}}}));
+            assert(!db->has_pending_execute());
+        }
+        h.conn->pump_executor();
+        if (move) assert(HAS(h.conn->written(), "W5 NO MOVE failed: database error"));
+        else assert(HAS(h.conn->written(), "W5 OK COPY completed (0 messages)"));
+    }
+    std::cout << "  [PASS] same-mailbox MOVE cannot delete its only link; COPY remains harmless" << std::endl;
+}
+TEST(mutation_repository_close_resumes_context_on_executor) {
+    MutationProtocolFixture fixture(fx);
+    auto h = fixture.make_session();
+    h.session->handle_read("W4 CLOSE\r\n");
+    h.session->process_read();
+    assert(fixture.mutations->expunges == 1);
+    fixture.mutations->finish_expunge({true});
+    auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+    assert(ctx->mailbox_selected && fixture.has_list(7));
+    h.conn->pump_executor();
+    assert(!ctx->mailbox_selected && !fixture.has_list(7));
+    assert(HAS(h.conn->written(), "W4 OK CLOSE completed"));
+    std::cout << "  [PASS] CLOSE uses the injected expunge repository and serial context completion" << std::endl;
+}
+
 TEST(uidnext_advance_read) {
     // 剧情：SELECT/STATUS 报告 UIDNEXT。新实现 = 原子推进高水位(advance,写)
     // + 读(advance 后的 mailbox_uidnext 行)。mock 同步模式下 advance 的
@@ -1946,6 +2142,10 @@ int main() {
 
         // ── UIDNEXT 高水位 ──
         test_mailbox_repository_injection(fx);
+        test_mutation_repository_store_and_expunge_injection(fx);
+        test_mutation_repository_copy_move_failures(fx);
+        test_mutation_repository_same_mailbox_move_is_rejected(fx);
+        test_mutation_repository_close_resumes_context_on_executor(fx);
         test_uidnext_advance_read(fx);
         test_uidnext_no_db_default(fx);
 

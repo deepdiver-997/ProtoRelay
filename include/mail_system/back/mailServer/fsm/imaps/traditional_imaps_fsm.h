@@ -6,6 +6,7 @@
 #include "framework/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/repository/mailbox_repository.h"
+#include "mail_system/back/repository/imap_mutation_repository.h"
 #include <stdexcept>
 #include "mail_system/back/db/db_service.h"
 #include "mail_system/back/db/sql_queries.h"
@@ -23,18 +24,22 @@
 #include <chrono>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <regex>
 #include <string>
 #include <sstream>
 #include <unordered_map>
 #include <iomanip>
+#include <utility>
+#include <vector>
 
 namespace mail_system {
 
@@ -70,6 +75,7 @@ protected:
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<IAccountAuthenticator> authenticator_;
     std::shared_ptr<repository::IMailboxRepository> m_mailboxRepository = repository::make_sql_mailbox_repository();
+    std::shared_ptr<repository::IImapMutationRepository> m_mutationRepository = repository::make_sql_imap_mutation_repository();
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
     std::shared_ptr<MailboxListCache> m_mailboxListCache;
     // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
@@ -107,6 +113,12 @@ public:
         m_mailboxRepository = std::move(value);
     }
     std::shared_ptr<repository::IMailboxRepository> get_mailbox_repository() const { return m_mailboxRepository; }
+
+    void set_mutation_repository(std::shared_ptr<repository::IImapMutationRepository> value) {
+        if (!value) throw std::invalid_argument("IMAP mutation repository is required");
+        m_mutationRepository = std::move(value);
+    }
+    std::shared_ptr<repository::IImapMutationRepository> get_mutation_repository() const { return m_mutationRepository; }
 
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
@@ -271,39 +283,6 @@ public:
     void get_mailbox_uidnext_async(std::shared_ptr<ScopedConnection> conn,
                                           uint64_t mailbox_id, uint64_t user_id,
                                           std::function<void(uint64_t)> cb);
-
-    // 批量 flag 更新（STORE）：单条 IN 列表 SQL 拍平 N 循环。
-    static void batch_mark_seen_async(std::shared_ptr<ScopedConnection> conn,
-                                      const std::vector<uint64_t>& mail_ids,
-                                      const std::string& recipient, int status,
-                                      std::function<void(bool)> cb);
-    static void batch_mark_deleted_async(std::shared_ptr<ScopedConnection> conn,
-                                         const std::vector<uint64_t>& mail_ids,
-                                         uint64_t user_id, uint64_t mailbox_id, int deleted,
-                                         std::function<void(bool)> cb);
-    static void batch_mark_flagged_async(std::shared_ptr<ScopedConnection> conn,
-                                         const std::vector<uint64_t>& mail_ids,
-                                         uint64_t user_id, uint64_t mailbox_id, int flagged,
-                                         std::function<void(bool)> cb);
-
-    // EXPUNGE：物理删除已标记 \Deleted 的行。
-    static void expunge_mailbox_async(std::shared_ptr<ScopedConnection> conn,
-                                      uint64_t mailbox_id, uint64_t user_id,
-                                      std::function<void(bool)> cb);
-
-    // COPY/MOVE 批量插入：INSERT IGNORE ... VALUES (...),(...)（mail_mailbox 有
-    // UNIQUE KEY uk_mail_box_user 自动去重 + id AUTO_INCREMENT）。cb 报告实际插入数
-    //（通过 SELECT ROW_COUNT()，dup 被 IGNORE 的不计入）。
-    static void batch_insert_mailbox_async(std::shared_ptr<ScopedConnection> conn,
-                                           const std::vector<uint64_t>& mail_ids,
-                                           uint64_t target_id, uint64_t user_id,
-                                           std::function<void(size_t)> cb);
-
-    // MOVE 源邮箱删除：单条 UPDATE ... IN（仅标记 is_deleted，expunge 时物理删）。
-    static void batch_mark_move_deleted_async(std::shared_ptr<ScopedConnection> conn,
-                                              const std::vector<uint64_t>& mail_ids,
-                                              uint64_t user_id, uint64_t source_mailbox_id,
-                                              std::function<void(bool)> cb);
 
     // 通用 IMAP 响应写回
     void send_untagged(std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& data);
