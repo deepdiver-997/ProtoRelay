@@ -563,7 +563,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                     [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        s->do_async_read();
+                        // Quota may have completed after the original input loop
+                        // paused. Resume buffered RCPT/DATA before requesting IO.
+                        s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
                 return;
             }
@@ -574,7 +577,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                     [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        s->do_async_read();
+                        // Quota may have completed after the original input loop
+                        // paused. Resume buffered RCPT/DATA before requesting IO.
+                        s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
                 return;
             }

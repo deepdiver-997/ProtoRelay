@@ -1279,6 +1279,49 @@ TEST(account_policy_completions_resume_on_connection_executor) {
     std::cout << "  [PASS] account_policy_completions_resume_on_connection_executor" << std::endl;
 }
 
+TEST(delayed_auth_and_quota_resume_buffered_pipeline) {
+    struct DeferredAuthenticator final : IAccountAuthenticator {
+        Complete pending;
+        void login_async(const std::string&, const std::string&, Complete complete, bool) override {
+            pending = std::move(complete);
+        }
+    };
+    auto authenticator = std::make_shared<DeferredAuthenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    const auto token = outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session(
+        "EHLO test\r\nAUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "NOOP\r\n", InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(authenticator->pending && h.session->is_paused() && h.session->has_buffered_input());
+    assert(!HAS(h.conn->written(), "235 Authentication successful"));
+
+    AccountAuthResult result;
+    result.ok = true;
+    auto complete = std::move(authenticator->pending);
+    complete(std::move(result));
+    // Draining executes the deferred auth result, then the separately posted
+    // disabled-quota completion. No new input or worker timing can drive RCPT.
+    h.conn->pump_executor();
+    const auto reply = h.conn->written();
+    assert(HAS(reply, "235 Authentication successful"));
+    assert(HAS(reply, "250 Ok"));
+    assert(HAS(reply, "250 OK")); // NOOP is reached after MAIL FROM and RCPT.
+    auto* context = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(context->sender_address == "user0@test.local");
+    assert(context->recipient_addresses == std::vector<std::string>{"rcpt@test.local"});
+    assert(!h.session->is_paused() && !h.session->has_buffered_input());
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] delayed_auth_and_quota_resume_buffered_pipeline" << std::endl;
+}
+
 TEST(idle_peer_waits_for_delayed_auth_then_explicit_eof_closes) {
     struct DeferredAuthenticator final : IAccountAuthenticator {
         Complete pending;
@@ -1483,6 +1526,7 @@ int main() {
         test_auth_from_match_accepted_at_data_end(fx);
         test_auth_from_alias_accepted_at_data_end(fx);
         test_account_policy_completions_resume_on_connection_executor(fx);
+        test_delayed_auth_and_quota_resume_buffered_pipeline(fx);
         test_idle_peer_waits_for_delayed_auth_then_explicit_eof_closes(fx);
         test_auth_from_alias_case_normalized_accepted_at_data_end(fx);
         test_auth_from_alias_miss_rejected_at_data_end(fx);
