@@ -1,8 +1,7 @@
--- 创建数据库
-CREATE DATABASE IF NOT EXISTS mail;
-
--- 使用数据库
-USE mail;
+-- 本脚本不选择数据库：目标库由 db_config.json 的 "database" 决定。
+-- 服务启动执行 initialize_script 时会先对该库做 CREATE DATABASE IF NOT EXISTS + USE，
+-- 脚本里若再写 USE / CREATE DATABASE 会被忽略并告警（见 MySQLPool::execute_sql_script）。
+-- 手工执行请显式带库名：mysql -u <user> -p <database> < config/sql/create_tables.sql
 
 -- 创建用户表
 CREATE TABLE IF NOT EXISTS users (

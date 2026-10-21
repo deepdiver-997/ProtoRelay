@@ -1,8 +1,5 @@
--- 创建数据库
-CREATE DATABASE IF NOT EXISTS mail2;
-
--- 使用数据库
-USE mail2;
+-- 本脚本不选择数据库：目标库由 db_config.json 的 "database" 决定（见 create_tables.sql 头部说明）。
+-- 手工执行请显式带库名：mysql -u <user> -p <database> < config/sql/create_tables_mail2.sql
 
 -- 创建用户表
 CREATE TABLE IF NOT EXISTS users (

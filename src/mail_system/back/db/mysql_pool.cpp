@@ -1,9 +1,35 @@
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/common/logger.h"
 #include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <sstream>
 
 namespace mail_system {
+
+namespace {
+
+// 跳过开头的注释行（-- / #）后，判断一条语句是不是在选库：USE ... / CREATE DATABASE|SCHEMA ...
+bool selects_database(const std::string& statement) {
+    std::istringstream in(statement);
+    std::string line;
+    while (std::getline(in, line)) {
+        auto first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos) continue;
+        if (line.compare(first, 2, "--") == 0 || line[first] == '#') continue;
+        std::string head = line.substr(first);
+        std::transform(head.begin(), head.end(), head.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        std::istringstream words(head);
+        std::string w1, w2;
+        words >> w1 >> w2;
+        if (w1 == "USE") return true;
+        return w1 == "CREATE" && (w2 == "DATABASE" || w2 == "SCHEMA");
+    }
+    return false;
+}
+
+} // namespace
 
 // 静态成员初始化
 std::unique_ptr<MySQLPoolFactory> MySQLPoolFactory::s_instance = nullptr;
@@ -101,7 +127,26 @@ void MySQLPool::execute_sql_script(const std::string& script_path) {
         }
     }
 
-    LOG_DATABASE_DEBUG("Total SQL statements to execute: {}", sql_statements.size());
+    // 目标库只认配置（db_config.json 的 database），不认脚本：先对配置库做
+    // CREATE DATABASE IF NOT EXISTS + USE，再把脚本里残留的 USE / CREATE DATABASE 跳掉。
+    // 否则脚本写死的 `USE mail` 会把本连接切到别的库、把表建错地方，随后连接池 reconnect
+    // 回配置库时查不到表（多 agent 各用 mail_agent_N 时正好撞上）。
+    std::vector<std::string> statements_to_run;
+    statements_to_run.reserve(sql_statements.size() + 2);
+    if (!m_config.database.empty()) {
+        statements_to_run.push_back("CREATE DATABASE IF NOT EXISTS `" + m_config.database + "`");
+        statements_to_run.push_back("USE `" + m_config.database + "`");
+    }
+    for (const auto& statement : sql_statements) {
+        if (selects_database(statement)) {
+            LOG_DATABASE_WARN("Skipping database-selecting statement in script (database '{}' comes from config): {}...",
+                              m_config.database, statement.substr(0, 80));
+            continue;
+        }
+        statements_to_run.push_back(statement);
+    }
+
+    LOG_DATABASE_DEBUG("Total SQL statements to execute: {}", statements_to_run.size());
 
     // 获取一个连接并执行SQL语句
     auto connection = get_connection();
@@ -113,10 +158,10 @@ void MySQLPool::execute_sql_script(const std::string& script_path) {
     int success_count = 0;
     int failed_count = 0;
 
-    for (size_t i = 0; i < sql_statements.size(); ++i) {
-        const auto& statement = sql_statements[i];
+    for (size_t i = 0; i < statements_to_run.size(); ++i) {
+        const auto& statement = statements_to_run[i];
         try {
-            LOG_DATABASE_DEBUG("Executing statement #{}/{}", (i + 1), sql_statements.size());
+            LOG_DATABASE_DEBUG("Executing statement #{}/{}", (i + 1), statements_to_run.size());
             if (connection->execute(statement)) {
                 success_count++;
                 LOG_DATABASE_DEBUG("Statement #{} executed successfully", (i + 1));

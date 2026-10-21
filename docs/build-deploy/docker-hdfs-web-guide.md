@@ -34,8 +34,8 @@ mkdir -p deploy/config deploy/certs deploy/logs deploy/mail deploy/attachments
 - database: mail
 - initialize_script: sql/create_tables.sql
 
-说明：create_tables.sql 第一条语句包含 CREATE DATABASE IF NOT EXISTS mail。
-如果该账号无建库权限，请先手工创建数据库并授权。
+说明：create_tables.sql 本身不选库。服务启动执行 initialize_script 时会按 db_config.json 的 database
+先做 CREATE DATABASE IF NOT EXISTS + USE 再建表；如果该账号无建库权限，请先手工创建数据库并授权。
 
 ## 4. 证书准备（必须）
 

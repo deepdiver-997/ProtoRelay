@@ -332,7 +332,7 @@ def main():
     # 命中 PersistentQueue::is_duplicate_by_source_message_id_async → 跳过
     # 落盘（B log: "Message-ID dedup hit, skip persistence"）。A 自己接收时
     # 也入 PQ，B 收到同一 Message-ID → dedup → 9/9 落盘断言失败。
-    # 修法：建独立 mail_b 库，用 create_tables_mail2.sql 改库名 + 写临时
+    # 修法：建独立 mail_b 库，用 create_tables_mail2.sql 建表 + 写临时
     # db_config_b.json 指向它；e2e 跑完删库（finally 块）。
     B_DB_NAME = 'mail_b'
     db_cfg_b_path = db_cfg_path   # 兜底
@@ -355,15 +355,12 @@ def main():
             capture_output=True, timeout=10, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"CREATE DATABASE {B_DB_NAME} failed: {r.stderr[:200]}")
-        # 2) 用 create_tables_mail2.sql 模板替换库名 → 写临时 SQL → 跑表
+        # 2) 用 create_tables_mail2.sql 在 mail_b 里建表（脚本本身不选库，库名由 mysql 参数给）
         sql_template = os.path.join(proj_root, 'test/config/sql/create_tables_mail2.sql')
         if not os.path.exists(sql_template):
             raise RuntimeError(f"missing {sql_template}")
         with open(sql_template) as f:
             sql_text = f.read()
-        sql_text = sql_text.replace('CREATE DATABASE IF NOT EXISTS mail2;',
-                                    f'CREATE DATABASE IF NOT EXISTS {B_DB_NAME};')
-        sql_text = sql_text.replace('USE mail2;', f'USE {B_DB_NAME};')
         b_init_sql = os.path.join(work_root, 'init_b.sql')
         with open(b_init_sql, 'w') as f:
             f.write(sql_text)
