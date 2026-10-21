@@ -27,7 +27,11 @@ mail-system/
 │       ├── build.lock/               全局构建锁（pid / worktree / cmd / since）
 │       ├── build-history.tsv         每次构建一行
 │       ├── alloc/<name>.env          资源分配记录
+│       ├── runs/<name>/<ts>/         spawn 的无头会话记录
 │       └── STOP                      存在时 worktree 内新构建一律拒绝（紧急刹车）
+├── ~/.agent-workspaces/              ← 设备级磁盘账本（全机所有项目共享一份，不属于任何仓库）
+│   ├── budget.conf                   人工设定、经 df 实测校验的总预算
+│   └── ledger.tsv                    各项目各 worktree 的占用登记
 └── agents/                           ← AGENTS_DIR（默认 hub 父目录下的 agents/）
     └── <name>/                       worktree，分支 feat/<name>
         ├── build/                    自己的构建目录
@@ -123,6 +127,26 @@ worktree 共享用户级缓存，新 worktree 的冷构建大部分命中。hub 
 想让它们也用：`USE_CCACHE=1 ./build.sh Release`（一次性）；`USE_CCACHE=0` 关闭并撤掉 launcher。
 默认缓存上限是 5 GiB，多个 worktree 并用建议放大：`ccache -M 20G`。
 
+## 磁盘预算（设备级，生产修复 #1）
+
+教训：sbs 夜跑连开 91 个 worktree 没人收尾，每份躺一个 2.7G 构建副本，agents 目录涨到 234G。
+修法是"开工前强制检查 + 全设备共享一份额度"：
+
+- 账本在 `~/.agent-workspaces/`（不属于任何仓库）：`budget.conf` 是人工设定、经 `df` 实测校验的
+  设备总预算；`ledger.tsv` 是各项目各 worktree 的占用登记。**多个项目合计同一个池**——不存在
+  "每个项目看剩余空间还多、各拿 200G"的可能。
+- `new-worktree.sh` 开工前必须过 `budget.sh check`：预算未设置（退出码 2）或余量不足（1）一律拒绝。
+- worktree 内 `build.sh` 构建前再查一次增量（`BUILD_BUDGET_HEADROOM_GB`，默认 4G，Debug 建议 20），
+  不足退出 78；构建结束把真实 `du` 记回账本。`remove-worktree.sh` 释放登记。
+- 预算必须由人 `budget.sh set <GB>` 设定，set 会拒绝超过"当前可用空间 90%"的值；`suggest` 只给参考。
+
+```bash
+tools/agents/budget.sh suggest          # 参考值（可用空间的 30%）
+tools/agents/budget.sh set 300          # 人显式设定（拒绝拍脑袋的超大值）
+tools/agents/budget.sh show             # 预算 / 已用 / 卷剩余 / 分项目明细
+tools/agents/budget.sh refresh          # 全账本重算（清掉失效行）
+```
+
 ## 无头派发（spawn.sh）
 
 把一个粗粒度任务交给任意 harness（claude / codex / gemini / dummy）无头执行，人不在场：
@@ -161,7 +185,18 @@ tools/agents/spawn.sh stop smtp-dedup
 | `Waiting for the global build lock` 很久 | `tools/agents/status.sh` 看持有者；进程确实没了就等 60s 自动清扫，或 `rm -rf .git/agents/build.lock` |
 | `Refusing ... from an agent worktree`（退出 77） | 你在 worktree 里跑了 cross-x64/object-only/sync-sysroot，去 hub 跑 |
 | 退出 76 | `.git/agents/STOP` 存在，操作者按了刹车 |
+| 退出 78 / `磁盘预算检查未通过` | 设备预算没设或余量不足：`budget.sh show` 看占用，合并/删掉收尾的 worktree，或人工 `budget.sh set` 调高 |
 | worktree 里改了 `config/pop3Config.json` 却 `git status` 看不到 | 它被标了 skip-worktree；`git update-index --no-skip-worktree <file>` 后再提交 |
+
+## 落地到新项目（骨架复用检查单）
+
+1. 拷 `tools/agents/` 整目录 + 根 `AGENTS.md`；`budget.sh`/`lib.sh`/`spawn.sh`/`harnesses.conf` 原样可用。
+2. **改项目策略层**：`apply_agent_env.py` 的端口映射与要改写的配置清单、`db_init.sh` 的建库语义、
+   `agents.conf.example` 的资源命名（sbs 的对应物是任务编号与创作权，本项目是端口段/库名）。
+3. 把本仓库 `AGENTS.md` 第 6 节（资源上限）原样插进新项目的 AGENTS.md：并行模式的存在、
+   有人监管可直接在 hub、无人监管必须并行模式 + 人工设定经验证的磁盘预算、编译并行度用默认、不无限制吃资源。
+4. 人工执行一次 `budget.sh set <GB>`（全设备只需要一次，账本是共享的）。
+5. 跑一遍 `new-worktree.sh demo → build.sh Release → remove-worktree.sh demo` 验证管道。
 | 新 worktree 没有 `tools/agents/`、`AGENTS.md` | 这些文件还没合进基准分支；脚本一律用 hub 的副本操作 worktree，不依赖 worktree 里有它们 |
 | `db_init.sh` 建库失败 | 用户没有 CREATE 权限：由管理员 `CREATE DATABASE mail_agent_N; GRANT ALL ON mail_agent_N.* TO 'mail_test'@'%';` 后重跑 |
 | 端口段分配跳过了默认段 | 段内有端口被别的进程占着（探测用 127.0.0.1 bind），属正常后移 |

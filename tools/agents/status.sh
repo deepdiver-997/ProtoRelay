@@ -63,6 +63,9 @@ if [ -n "${orphans}" ]; then
     printf '\n\033[1;33m孤儿分配记录（有资源记录、无 worktree）：%s\033[0m\n  释放：tools/agents/remove-worktree.sh <name>\n' "${orphans}"
 fi
 
+printf '\n-- 设备磁盘预算（所有项目共享一份，~/.agent-workspaces/）--\n'
+bash "${AGENTS_LIB_DIR}/budget.sh" show 2>&1 | sed 's/^/  /'
+
 printf '\n-- 无头会话（tools/agents/spawn.sh）--\n'
 if ls "${STATE_DIR}/runs"/*/current >/dev/null 2>&1; then
     printf '%-14s %-8s %-10s %-8s %-22s %s\n' "name" "harness" "状态" "exit" "session" "最新输出"

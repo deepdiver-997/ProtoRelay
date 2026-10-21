@@ -83,6 +83,9 @@ else
 fi
 git -C "${HUB}" worktree prune
 
+# ---- 释放设备磁盘账本登记 ----
+bash "${AGENTS_LIB_DIR}/budget.sh" release "${WT}" 2>/dev/null || true
+
 # ---- tmp 目录（只删我们自己前缀下的）----
 if [ -n "${AGENT_TMP_ROOT:-}" ] && [[ "${AGENT_TMP_ROOT}" == ${TMP_ROOT_PREFIX}* ]] && [ -d "${AGENT_TMP_ROOT}" ]; then
     rm -rf "${AGENT_TMP_ROOT}"

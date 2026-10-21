@@ -48,6 +48,18 @@ FROM="${FROM:-${BASE_BRANCH}}"
 WT="$(worktree_path_for "${NAME}")"
 BR="$(branch_for "${NAME}")"
 
+# ---- 设备级磁盘预算（生产修复 #1）：没设预算或余量不足，一律不开工 ----
+# 账本是全设备共享的（~/.agent-workspaces/），多个项目不会各自领一份额度。
+BUDGET_TOOL="${AGENTS_LIB_DIR}/budget.sh"
+DISK_RESERVE_GB="${DISK_RESERVE_GB:-5}"
+budget_rc=0
+budget_msg="$(bash "${BUDGET_TOOL}" check "${DISK_RESERVE_GB}")" || budget_rc=$?
+if [ "${budget_rc}" != "0" ]; then
+    printf '%s\n' "${budget_msg}" >&2
+    die "磁盘预算检查未通过(rc=${budget_rc})。由人工设定：bash ${BUDGET_TOOL} set <GB>（参考值：bash ${BUDGET_TOOL} suggest）"
+fi
+log "磁盘预算 OK：${budget_msg}"
+
 log "hub        : ${HUB}"
 log "worktree   : ${WT}"
 log "branch     : ${BR}（基于 ${FROM}）"
@@ -108,6 +120,7 @@ else
 fi
 cp "$(alloc_record_for "${NAME}")" "${WT}/.agent-env"
 mkdir -p "${AGENT_TMP_ROOT}"
+bash "${BUDGET_TOOL}" register "${WT}" "${DISK_RESERVE_GB}"
 
 # ---- 4. 把资源写进 worktree 自己的配置副本 ----
 apply_out="$(python3 "${AGENTS_LIB_DIR}/apply_agent_env.py" "${WT}")"

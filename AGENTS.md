@@ -41,7 +41,19 @@
 - 不连任何非 `127.0.0.1` / `localhost` 的地址——包括 `test/scripts/test_ports.sh`、`test_auth.sh` 这类对真实端口探测的脚本。
 - 不改 `config/*.example.json` 里生产域名、密钥路径的语义。
 
-## 6. 状态落盘与汇报
+## 6. 资源上限（无人监管会话必读）
+
+- 本项目存在**并行模式**（`tools/agents/`）。有人在旁边监管的普通任务可以直接在 hub 做；
+  **无人监管的任务必须走并行模式**（`tools/agents/new-worktree.sh` 开工作区），不许直接占着 hub 跑长任务。
+- 开工作区前必须有**设备级磁盘预算**（全机所有项目共享一份，`tools/agents/budget.sh show` 可查）。
+  未设置时 `new-worktree.sh` 会直接拒绝；预算由人显式 `budget.sh set <GB>` 设定且经过 df 实测校验，
+  **不是每个项目各领一份**——账本在 `~/.agent-workspaces/`，跨项目合计。
+- 编译并行度用默认值（`build.sh` 按内存推导，per-target 默认 `-j4`），无头会话不要手动调高
+  （数字参数 / `SERIAL_JOBS`）；全局构建锁保证 hub + 所有 worktree 同时只有一个编译。
+- 不无限制消耗资源：不开 docker、不并行跑多个集成测试、不把测试数据灌进共享 `mail` 库、
+  worktree 收尾（合并或废弃）后立刻 `remove-worktree.sh` 释放，不留构建副本。
+
+## 7. 状态落盘与汇报
 
 - 上下文可能被压缩：进度写进 commit / 分支，不靠记忆。一个任务对应一个（或少数几个）语义清晰的 commit。
 - 完工在对话里汇报：分支名、`git log --oneline main..HEAD`、`test/run_all_tests.sh` 结果、遗留问题。

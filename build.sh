@@ -61,6 +61,7 @@ fi
 AGENTS_STATE_DIR=""
 if [ -n "$GIT_COMMON_DIR_ABS" ]; then
     AGENTS_STATE_DIR="${GIT_COMMON_DIR_ABS}/agents"
+    HUB_DIR="$(dirname "$GIT_COMMON_DIR_ABS")"
 fi
 
 # ---- 全局构建锁（hub 与所有 worktree 共用一把）----
@@ -129,12 +130,17 @@ release_build_lock() {
     BUILD_LOCK_HELD=0
 }
 
-# 一行构建历史（时间 / 检出 / 类型 / 退出码 / 耗时），tools/agents/status.sh 用来显示最近构建
+# 一行构建历史（时间 / 检出 / 类型 / 退出码 / 耗时），tools/agents/status.sh 用来显示最近构建；
+# worktree 里顺带把构建后的真实磁盘占用记回设备账本。
 _record_build_history() {
     [ -n "$AGENTS_STATE_DIR" ] && [ -n "$BUILD_STARTED_AT" ] || return 0
     local dur=$(( $(date +%s) - BUILD_STARTED_AT ))
     printf '%s\t%s\t%s\trc=%s\t%ss\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${REPO_TOPLEVEL:-$SCRIPT_DIR}" \
         "${BUILD_ARGS_SUMMARY:-?}" "$1" "$dur" >> "${AGENTS_STATE_DIR}/build-history.tsv" 2>/dev/null || true
+    if [ "$IN_AGENT_WORKTREE" = "1" ] && [ -n "$REPO_TOPLEVEL" ] && [ -x "${HUB_DIR}/tools/agents/budget.sh" ]; then
+        bash "${HUB_DIR}/tools/agents/budget.sh" record "$REPO_TOPLEVEL" \
+            "$(du -sk "$REPO_TOPLEVEL" 2>/dev/null | awk '{print $1}')" >/dev/null 2>&1 || true
+    fi
 }
 
 # 统一的 EXIT 处理：cross-x64 若临时挪走了 Homebrew 目录先还原，再记历史、放锁。
@@ -222,6 +228,7 @@ if [ "$#" -lt 1 ]; then
     echo "              PURE_LOG_DIR=<path>  # 纯日志变换输出目录"
     echo "              USE_CCACHE=<auto|1|0> # auto: 新构建目录自动用 ccache，老目录不碰；1 强制开；0 关"
     echo "              BUILD_LOCK_WAIT=<秒> # 全局构建锁最长等待（默认 3600；hub+所有 worktree 同时只跑一个构建）"
+    echo "              BUILD_BUDGET_HEADROOM_GB=<n> # worktree 构建前按设备磁盘账本预留的增量（默认 4；Debug 建议 20）"
     echo ""
     echo "Multi-agent: 每个 agent 在独立 git worktree 里工作（tools/agents/，规则见 AGENTS.md）；"
     echo "             worktree 内禁止 cross-x64 / object-only / sync-sysroot（生产部署链）。"
@@ -395,6 +402,20 @@ if [[ "$BUILD_TYPE" == "Asan" ]]; then
     SAFE_CMAKE_ARGS+=("-DENABLE_ASAN_SERVER=ON")
     SAFE_CMAKE_ARGS+=("-DCMAKE_CXX_FLAGS_RELEASE=-O1 -g${ASAN_GLEVEL} -DNDEBUG -fno-omit-frame-pointer")
     SAFE_CMAKE_ARGS+=("-DCMAKE_C_FLAGS_RELEASE=-O1 -g${ASAN_GLEVEL} -DNDEBUG -fno-omit-frame-pointer")
+fi
+
+# ---- agent worktree 磁盘预算（设备级，生产修复 #1）：余量不足就不开编译 ----
+# check 会把本次构建的预计增量（默认 4G；Debug 建议 BUILD_BUDGET_HEADROOM_GB=20）算进全设备账本。
+if [ "$IN_AGENT_WORKTREE" = "1" ] && [ -x "${HUB_DIR}/tools/agents/budget.sh" ]; then
+    _budget_rc=0
+    _budget_msg="$(bash "${HUB_DIR}/tools/agents/budget.sh" check "${BUILD_BUDGET_HEADROOM_GB:-4}")" || _budget_rc=$?
+    if [ "$_budget_rc" != "0" ]; then
+        printf '%s\n' "$_budget_msg" >&2
+        print_warning "Refusing to build from this worktree: device agent-disk budget check failed (exit ${_budget_rc})"
+        exit 78
+    fi
+    print_info "$_budget_msg"
+    unset _budget_rc _budget_msg
 fi
 
 # ---- 从这里开始会改动构建目录 / 占用编译资源：先拿全局构建锁 ----
