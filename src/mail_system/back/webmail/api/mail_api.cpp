@@ -1,4 +1,5 @@
 #include "mail_system/back/webmail/api/mail_api.h"
+#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/webmail/api/api_util.h"
 #include "mail_system/back/webmail/html_sanitize.h"
 
