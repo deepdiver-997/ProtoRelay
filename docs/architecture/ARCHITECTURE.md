@@ -1,5 +1,7 @@
 # ProtoRelay Architecture
 
+> 2026-10-22 更新：框架/邮件基类、客户端传输、数据库等待及模块构建的最新边界见 [依赖边界与后续重构](dependency-boundaries.md)。
+
 Updated: 2026-10-20. For the latest framework changes, commit boundaries and validation,
 see [backend decoupling](backend-decoupling.md).
 
@@ -76,10 +78,12 @@ Current implementation status:
 
 `include/framework/` contains generic infrastructure plus transport/protocol component directories
 (`connection/`, `net/`, `log/`, `http/`). Session/FSM infrastructure is independent of
-mail protocol handlers; ServerBase/config still reference application router/cache types:
+mail protocol handlers; generic configuration/runtime live in the framework, while
+`MailServerBase` owns mail configuration, routing, caches, DNS and mail metrics:
 - `SessionBase<ConnectionType>` — manages one TCP/SSL connection lifecycle, async read/write, command buffering
 - `FsmBase<ConnectionType, State, Event>` — transition table + handler registry + dispatch loop
-- `ServerBase` — config, metrics, intrusion detection and lifecycle; requires injected pools/router
+- `ServerBase` — generic config, metrics, intrusion detection and lifecycle; requires injected runtimes
+- `MailServerBase` — application resources and mail-specific configuration/reload
 - `TcpServerBase<TcpSession, SslSession>` — transport-provider admission, typed session factories and STARTTLS handoff
 
 `IConnection`, `IExecutor`/`ITimer` and `IServerTransport` define the backend boundary.
@@ -91,7 +95,7 @@ Business code in `include/mail_system/back/` inherits from these:
 - `SmtpsSession` / `ImapsSession` : public `SessionBase`
 - `TraditionalSmtpsFsm` / `TraditionalImapsFsm` : public `FsmBase`
 - `SmtpsServer` / `ImapsServer` / `Pop3Server` : public `TcpServerBase`
-- `WebmailServer` : public framework `HttpServer`
+- `WebmailServer` : public `BasicHttpServer<MailServerBase>`; generic `HttpServer` uses framework `ServerBase`
 
 `mail_system::bootstrap::assemble` is the composition root. It selects concrete DB/storage/router
 implementations and creates or reuses caller-provided pools. Servers/providers do not stop shared pools.
