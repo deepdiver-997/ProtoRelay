@@ -19,8 +19,17 @@
 #include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mock_connection.h"
 #include "mock_db_pool.h"
+#include "manual_executor.h"
+#include "mail_system/back/common/bcrypt.h"
 
 #include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <set>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -529,6 +538,364 @@ TEST(sweep_expired_locks_ok) {
     std::cout << "  [PASS] sweep_expired_locks_ok" << std::endl;
 }
 
+// Deterministic application-boundary tests: no sleeps or live DB. Completions
+// are explicitly delivered outside the connection owner to verify affinity.
+class Pop3ManualWorkers final : public pr::ThreadPoolBase {
+public:
+    std::deque<std::function<void()>> tasks;
+    void start() override {}
+    void stop(bool = true) override {}
+    size_t thread_count() const override { return 1; }
+    bool is_running() const override { return true; }
+    void drain() { while (!tasks.empty()) { auto task = std::move(tasks.front()); tasks.pop_front(); task(); } }
+protected:
+    void post_impl(std::function<void()> task) override { tasks.push_back(std::move(task)); }
+};
+class Pop3InjectedAuth final : public IAccountAuthenticator {
+public:
+    bool throws = false;
+    void login_async(const std::string&, const std::string&, Complete cb, bool = false) override {
+        if (throws) throw std::runtime_error("auth failed");
+        AccountAuthResult result; result.ok = true; result.user_id = 41; cb(std::move(result));
+    }
+};
+class Pop3InjectedMailboxes final : public repository::IPop3MailboxRepository {
+public:
+    InboxComplete inbox;
+    MessagesComplete messages;
+    DeleteComplete deletion;
+    repository::Pop3DeletionRequest request;
+    uint64_t user = 0, mailbox = 0;
+    int deletes = 0;
+    bool throw_inbox = false, throw_messages = false, throw_delete = false;
+    void get_inbox_async(repository::Pop3DbContext context, uint64_t id, InboxComplete cb) override {
+        assert(context && context->valid() && context->pool); user = id;
+        if (throw_inbox) throw std::runtime_error("inbox failed");
+        inbox = [context, cb = std::move(cb)](bool ok, uint64_t id) { cb(ok, id); };
+    }
+    void get_messages_async(repository::Pop3DbContext context, uint64_t id, uint64_t box, MessagesComplete cb) override {
+        assert(context && context->valid() && context->pool); user = id; mailbox = box;
+        if (throw_messages) throw std::runtime_error("messages failed");
+        messages = [context, cb = std::move(cb)](bool ok, std::vector<MailboxMailInfo> value) { cb(ok, std::move(value)); };
+    }
+    void apply_deletions_async(repository::Pop3DbContext context, repository::Pop3DeletionRequest value, DeleteComplete cb) override {
+        assert(context && context->valid() && context->pool); ++deletes; request = std::move(value);
+        if (throw_delete) throw std::runtime_error("deletion failed");
+        deletion = [context, cb = std::move(cb)](repository::Pop3DeletionResult value) { cb(value); };
+    }
+    void finish_inbox(bool ok, uint64_t id) { auto cb = std::move(inbox); assert(cb); cb(ok, id); }
+    void finish_messages(bool ok, std::vector<MailboxMailInfo> rows = {}) { auto cb = std::move(messages); assert(cb); cb(ok, std::move(rows)); }
+    void finish_delete(bool ok) { auto cb = std::move(deletion); assert(cb); cb({ok, true}); }
+};
+class Pop3InjectedLocks final : public repository::IPop3LockRepository {
+public:
+    Complete acquired, renewed;
+    ReleaseComplete released;
+    repository::Pop3LockKey key;
+    int acquires = 0, renews = 0, releases = 0;
+    bool throw_acquire = false, throw_renew = false, throw_release = false;
+    void acquire_async(repository::Pop3DbContext context, repository::Pop3LockKey value, Complete cb) override {
+        assert(context && context->valid() && context->pool); ++acquires; key = std::move(value);
+        if (throw_acquire) throw std::runtime_error("acquire failed");
+        acquired = [context, cb = std::move(cb)](repository::Pop3LockStatus status) { cb(status); };
+    }
+    void verify_async(repository::Pop3DbContext, repository::Pop3LockKey, Complete) override { assert(false); }
+    void renew_async(repository::Pop3DbContext context, repository::Pop3LockKey value, Complete cb) override {
+        assert(context && context->valid() && context->pool); ++renews; key = std::move(value);
+        if (throw_renew) throw std::runtime_error("renew failed");
+        renewed = [context, cb = std::move(cb)](repository::Pop3LockStatus status) { cb(status); };
+    }
+    void release_async(repository::Pop3DbContext context, repository::Pop3LockKey value, ReleaseComplete cb) override {
+        assert(context && context->valid() && context->pool); ++releases; key = std::move(value);
+        if (throw_release) throw std::runtime_error("release failed");
+        released = [context, cb = std::move(cb)](bool ok) { cb(ok); };
+    }
+    bool sweep_expired(repository::Pop3DbContext) override { return true; }
+    void finish_acquire(repository::Pop3LockStatus status) { auto cb = std::move(acquired); assert(cb); cb(status); }
+    void finish_renew(repository::Pop3LockStatus status) { auto cb = std::move(renewed); assert(cb); cb(status); }
+    void finish_release(bool ok) { auto cb = std::move(released); assert(cb); cb(ok); }
+};
+class ThrowingPop3Storage final : public pr::storage::IStorageProvider {
+public:
+    bool ensure_ready(pr::IoError&) override { return true; }
+    std::string build_mail_body_key(uint64_t id) override { return std::to_string(id); }
+    std::string build_attachment_key(uint64_t, const std::string& name) override { return name; }
+    bool append_binary(const std::string&, const char*, size_t, pr::IoError&) override { return false; }
+    bool remove_object(const std::string&, pr::IoError&) override { return false; }
+    bool read_all(const std::string&, std::string&, pr::IoError&) override { return false; }
+    bool object_size(const std::string&, uint64_t&, pr::IoError&) override { throw std::runtime_error("size probe failed"); }
+};
+struct Pop3ProtocolFixture {
+    using Fsm = TraditionalPop3Fsm<MockConnection>;
+    std::shared_ptr<test::ManualExecutor> owner = std::make_shared<test::ManualExecutor>();
+    std::shared_ptr<Pop3ManualWorkers> worker = std::make_shared<Pop3ManualWorkers>();
+    std::shared_ptr<test::MockDbPool> pool = std::make_shared<test::MockDbPool>();
+    std::shared_ptr<Pop3InjectedAuth> auth = std::make_shared<Pop3InjectedAuth>();
+    std::shared_ptr<Pop3InjectedMailboxes> mailboxes = std::make_shared<Pop3InjectedMailboxes>();
+    std::shared_ptr<Pop3InjectedLocks> locks = std::make_shared<Pop3InjectedLocks>();
+    std::shared_ptr<router::StaticShardRouter> router;
+    std::shared_ptr<Fsm> fsm;
+    MockConnection* wire;
+    std::shared_ptr<Pop3Session<MockConnection>> session;
+    explicit Pop3ProtocolFixture(bool with_worker = true, bool with_router = true,
+                                std::shared_ptr<pr::storage::IStorageProvider> provider = {},
+                                std::shared_ptr<test::MockDbPool> custom_pool = {}) {
+        if (custom_pool) pool = std::move(custom_pool);
+        router = std::make_shared<router::StaticShardRouter>(std::vector<std::pair<std::string, int>>{}, 0,
+            std::vector<std::shared_ptr<pr::DBPool>>{pool}, std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{std::move(provider)});
+        fsm = std::make_shared<Fsm>(worker, with_worker ? worker : nullptr, with_router ? router : nullptr);
+        fsm->set_authenticator(auth);
+        fsm->set_mailbox_repository(mailboxes); fsm->set_lock_repository(locks);
+        auto connection = std::make_unique<MockConnection>(owner); wire = connection.get();
+        wire->set_deferred_read(true);
+        session = std::make_shared<Pop3Session<MockConnection>>(nullptr, std::move(connection), fsm);
+        session->set_current_state(static_cast<int>(Pop3State::AUTHORIZATION));
+        context()->username = "owner@test";
+    }
+    ~Pop3ProtocolFixture() {
+        session->set_trace_clean_close(); session->close(); owner->drain();
+        session.reset(); owner->drain();
+    }
+    Pop3Context* context() { return static_cast<Pop3Context*>(session->get_context()); }
+    void command(std::string line) {
+        owner->post([this, line = std::move(line)] { session->parse_pop3_command(line + "\r\n"); session->process_read(); });
+        owner->drain();
+    }
+    void begin_login() { command("PASS secret"); worker->drain(); assert(mailboxes->inbox && session->is_paused()); }
+    void acquire_login() {
+        begin_login(); mailboxes->finish_inbox(true, 7);
+        assert(mailboxes->user == 41 && locks->acquires == 1 && !locks->key.session_id.empty());
+        locks->finish_acquire(repository::Pop3LockStatus::owned);
+        assert(mailboxes->messages && mailboxes->mailbox == 7);
+    }
+    void complete_login() {
+        acquire_login();
+        MailboxMailInfo mail; mail.mail_id = 51; mail.body_path = "opaque/51"; mail.is_deleted = true;
+        mailboxes->finish_messages(true, {mail}); worker->drain();
+        assert(!context()->is_authenticated && wire->written().empty());
+        owner->drain();
+        assert(context()->is_authenticated && context()->messages.size() == 1 && context()->messages[0].mail_id == 51);
+        assert(HAS(wire->written(), "+OK Mailbox locked and loaded") && context()->heartbeat_timer);
+        wire->clear_written();
+    }
+    void transaction() {
+        context()->is_authenticated = true; context()->user_id = 41; context()->mailbox_id = 7;
+        context()->session_id = "session-A"; context()->messages.push_back({51, "opaque/51", 10});
+        session->set_current_state(static_cast<int>(Pop3State::TRANSACTION));
+    }
+};
+TEST(injected_quit_reports_write_failures_on_owner) {
+    (void)fx;
+    for (bool deletion_ok : {false, true}) for (bool release_ok : {false, true}) {
+        Pop3ProtocolFixture fixture; fixture.transaction(); fixture.context()->deleted.insert(51);
+        fixture.command("QUIT"); fixture.worker->drain();
+        assert(fixture.mailboxes->deletes == 1 && fixture.locks->releases == 0);
+        const auto& request = fixture.mailboxes->request;
+        assert(request.user_id == 41 && request.mailbox_id == 7 && request.mail_ids == std::set<uint64_t>{51});
+        fixture.mailboxes->finish_delete(deletion_ok);
+        assert(fixture.locks->releases == 1 && fixture.locks->key.session_id == "session-A");
+        fixture.locks->finish_release(release_ok);
+        assert(fixture.wire->written().empty() && !fixture.session->is_closed() && fixture.session->is_paused());
+        fixture.owner->drain();
+        assert(fixture.session->is_closed() && !fixture.session->is_paused());
+        assert(HAS(fixture.wire->written(), "+OK Bye") == (deletion_ok && release_ok));
+        assert(HAS(fixture.wire->written(), "-ERR") == !(deletion_ok && release_ok));
+    }
+    std::cout << "  [PASS] injected QUIT reports deletion/release failures on owner" << std::endl;
+}
+TEST(quit_unavailable_resources_never_report_success) {
+    (void)fx;
+    for (int unavailable = 0; unavailable < 3; ++unavailable) {
+        Pop3ProtocolFixture fixture(unavailable != 0, unavailable != 1);
+        fixture.transaction(); fixture.context()->deleted.insert(51);
+        if (unavailable == 2) fixture.pool->mock_conn()->disconnect();
+        fixture.command("QUIT"); fixture.worker->drain(); fixture.owner->drain();
+        assert(fixture.session->is_closed() && HAS(fixture.wire->written(), "-ERR"));
+        assert(!HAS(fixture.wire->written(), "+OK Bye") && !fixture.mailboxes->deletes);
+    }
+    // An empty deletion set still completes lock release and succeeds normally.
+    Pop3ProtocolFixture fixture;
+    bool rejected = false;
+    try { fixture.fsm->set_mailbox_repository({}); } catch (const std::invalid_argument&) { rejected = true; }
+    assert(rejected); rejected = false;
+    try { fixture.fsm->set_lock_repository({}); } catch (const std::invalid_argument&) { rejected = true; }
+    assert(rejected);
+    fixture.transaction(); fixture.command("QUIT"); fixture.worker->drain();
+    assert(fixture.mailboxes->request.mail_ids.empty()); fixture.mailboxes->finish_delete(true);
+    fixture.locks->finish_release(true); fixture.owner->drain();
+    assert(HAS(fixture.wire->written(), "+OK Bye"));
+    std::cout << "  [PASS] QUIT fallback cannot claim an update succeeded" << std::endl;
+}
+TEST(pass_failure_and_disconnect_release_acquired_lock) {
+    (void)fx;
+    for (bool disconnected : {false, true}) {
+        Pop3ProtocolFixture fixture; fixture.acquire_login();
+        if (disconnected) { fixture.session->close(); fixture.owner->drain(); }
+        fixture.mailboxes->finish_messages(false); fixture.worker->drain();
+        assert(fixture.locks->releases == 1 && fixture.wire->written().empty());
+        fixture.locks->finish_release(true);
+        assert(fixture.wire->written().empty()); fixture.owner->drain();
+        assert(!fixture.context()->is_authenticated);
+        if (!disconnected) {
+            assert(HAS(fixture.wire->written(), "-ERR Cannot load mailbox"));
+            assert(!fixture.session->is_paused() && fixture.wire->has_pending_read());
+        }
+    }
+    // Peer closes while acquisition itself is pending; its successful completion
+    // must clean up without starting a mailbox read or authenticating the peer.
+    {
+        Pop3ProtocolFixture fixture; fixture.begin_login(); fixture.mailboxes->finish_inbox(true, 7);
+        fixture.session->close(); fixture.owner->drain(); fixture.locks->finish_acquire(repository::Pop3LockStatus::owned);
+        fixture.worker->drain(); assert(fixture.locks->releases == 1 && !fixture.mailboxes->messages);
+        fixture.locks->finish_release(true); fixture.owner->drain(); assert(fixture.wire->written().empty());
+    }
+    {
+        Pop3ProtocolFixture fixture; fixture.acquire_login();
+        fixture.mailboxes->finish_messages(true); fixture.worker->drain();
+        fixture.session->close(); fixture.owner->drain(); fixture.worker->drain();
+        assert(fixture.locks->releases == 1 && !fixture.context()->is_authenticated);
+        fixture.locks->finish_release(true); fixture.owner->drain(); assert(fixture.wire->written().empty());
+    }
+    for (bool read_ok : {false, true}) {
+        Pop3ProtocolFixture fixture; fixture.begin_login(); fixture.mailboxes->finish_inbox(read_ok, 0);
+        assert(fixture.wire->written().empty() && fixture.locks->acquires == 0);
+        fixture.owner->drain();
+        assert(HAS(fixture.wire->written(), read_ok ? "No INBOX for user" : "Server database unavailable"));
+        assert(!fixture.session->is_paused());
+    }
+    // A verified conflict is not a DB outage; only an uncertain acquisition
+    // needs scoped best-effort cleanup before the error reply.
+    for (auto status : {repository::Pop3LockStatus::not_owned, repository::Pop3LockStatus::database_error}) {
+        Pop3ProtocolFixture fixture; fixture.begin_login(); fixture.mailboxes->finish_inbox(true, 7);
+        fixture.locks->finish_acquire(status); fixture.worker->drain();
+        if (status == repository::Pop3LockStatus::database_error) fixture.locks->finish_release(false);
+        fixture.owner->drain();
+        assert(!fixture.context()->is_authenticated && !fixture.session->is_paused());
+        assert(HAS(fixture.wire->written(), "[IN-USE]") == (status == repository::Pop3LockStatus::not_owned));
+        assert(HAS(fixture.wire->written(), "-ERR"));
+    }
+    std::cout << "  [PASS] failed/abandoned PASS releases acquired or uncertain lock" << std::endl;
+}
+TEST(pass_storage_exception_releases_lock_and_resumes) {
+    (void)fx;
+    Pop3ProtocolFixture fixture(true, true, std::make_shared<ThrowingPop3Storage>());
+    fixture.acquire_login(); MailboxMailInfo message; message.mail_id = 51; message.body_path = "opaque/51";
+    fixture.mailboxes->finish_messages(true, {message}); fixture.worker->drain();
+    assert(fixture.locks->releases == 1 && fixture.wire->written().empty() && fixture.session->is_paused());
+    fixture.locks->finish_release(true); fixture.owner->drain();
+    assert(!fixture.context()->is_authenticated && !fixture.session->is_paused());
+    assert(HAS(fixture.wire->written(), "-ERR Cannot load mailbox") && fixture.wire->has_pending_read());
+    std::cout << "  [PASS] delayed Worker storage exception releases lock and resumes PASS" << std::endl;
+}
+TEST(injected_heartbeat_and_quit_share_owner_policy) {
+    (void)fx;
+    for (bool quit_pending : {false, true}) {
+        Pop3ProtocolFixture fixture; fixture.complete_login();
+        auto timer = std::static_pointer_cast<test::ManualTimer>(fixture.context()->heartbeat_timer);
+        timer->fire(); fixture.owner->drain(); fixture.worker->drain();
+        assert(fixture.locks->renews == 1 && timer->waits == 1);
+        if (quit_pending) { fixture.command("QUIT"); assert(timer->cancels == 1 && !fixture.context()->heartbeat_timer); }
+        fixture.locks->finish_renew(repository::Pop3LockStatus::database_error);
+        assert(!fixture.session->is_closed()); fixture.owner->drain();
+        if (!quit_pending) { assert(fixture.session->is_closed() && timer->cancels == 1); }
+        else {
+            assert(!fixture.session->is_closed() && timer->waits == 1);
+            fixture.worker->drain(); fixture.mailboxes->finish_delete(true); fixture.locks->finish_release(true); fixture.owner->drain();
+            assert(HAS(fixture.wire->written(), "+OK Bye") && fixture.session->is_closed());
+        }
+    }
+    std::cout << "  [PASS] heartbeat failure closes on owner; QUIT suppresses late renewal" << std::endl;
+}
+
+// Fixed capacity of one: a second checkout is rejected deterministically rather
+// than blocking the test process. The real authenticator holds this lease while
+// calling its completion, matching production's single-slot pool deadlock case.
+class Pop3SingleSlotPool final : public test::MockDbPool {
+public:
+    bool checked_out = false, throw_checkout = false;
+    int checkouts = 0, returns = 0, collisions = 0;
+    std::shared_ptr<pr::IDBConnection> get_connection() override {
+        if (throw_checkout) throw std::runtime_error("checkout failed");
+        if (checked_out) { ++collisions; return {}; }
+        checked_out = true; ++checkouts; return mock_conn();
+    }
+    void release_connection(std::shared_ptr<pr::IDBConnection>) override { assert(checked_out); checked_out = false; ++returns; }
+};
+TEST(pass_real_authenticator_releases_single_slot_before_mailbox) {
+    (void)fx;
+    auto pool = std::make_shared<Pop3SingleSlotPool>(); pool->mock_conn()->set_deferred(false);
+    Pop3ProtocolFixture fixture(true, true, {}, pool);
+    fixture.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fixture.router, std::make_shared<AuthCache>(), fixture.worker));
+    pool->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"id", "41"}, {"status", "1"}, {"password", bcrypt_hash("secret", 4)}}}));
+    fixture.begin_login();
+    assert(pool->checkouts == 2 && pool->returns == 1 && !pool->collisions && pool->checked_out);
+    fixture.mailboxes->finish_inbox(true, 7); fixture.locks->finish_acquire(repository::Pop3LockStatus::owned);
+    fixture.mailboxes->finish_messages(true); fixture.worker->drain(); fixture.owner->drain();
+    assert(fixture.context()->is_authenticated && HAS(fixture.wire->written(), "+OK Mailbox locked"));
+    assert(pool->returns == 2 && !pool->checked_out && !pool->collisions);
+    std::cout << "  [PASS] real authenticator releases single-slot lease before POP3 checkout" << std::endl;
+}
+TEST(pop3_async_continuation_exceptions_complete_once) {
+    (void)fx;
+    for (int stage = 0; stage < 5; ++stage) {
+        Pop3ProtocolFixture fixture;
+        if (stage == 0) fixture.auth->throws = true;
+        if (stage == 1) fixture.mailboxes->throw_inbox = true;
+        if (stage == 2) fixture.locks->throw_acquire = true;
+        if (stage == 3) fixture.mailboxes->throw_messages = true;
+        if (stage >= 4) fixture.locks->throw_release = true;
+        fixture.command("PASS secret"); fixture.worker->drain();
+        if (stage >= 2) fixture.mailboxes->finish_inbox(true, 7);
+        if (stage >= 3) fixture.locks->finish_acquire(repository::Pop3LockStatus::owned);
+        if (stage >= 4) fixture.mailboxes->finish_messages(false);
+        fixture.worker->drain();
+        if (stage == 2 || stage == 3) fixture.locks->finish_release(true);
+        assert(fixture.wire->written().empty()); fixture.owner->drain();
+        const auto reply = fixture.wire->written();
+        assert(HAS(reply, "-ERR") && reply.find("-ERR", reply.find("-ERR") + 1) == std::string::npos);
+        assert(!fixture.context()->is_authenticated && !fixture.session->is_paused());
+        assert(!fixture.mailboxes->deletes);
+    }
+    for (bool release_throws : {false, true}) {
+        Pop3ProtocolFixture fixture; fixture.transaction();
+        fixture.mailboxes->throw_delete = !release_throws; fixture.locks->throw_release = release_throws;
+        fixture.command("QUIT"); fixture.worker->drain();
+        if (release_throws) fixture.mailboxes->finish_delete(true);
+        else fixture.locks->finish_release(true);
+        assert(fixture.wire->written().empty()); fixture.owner->drain();
+        assert(fixture.session->is_closed() && HAS(fixture.wire->written(), "-ERR") && fixture.locks->releases == 1);
+    }
+    // Pool checkout exceptions are inside queued tasks, after post() has returned.
+    for (bool quit : {false, true}) {
+        auto pool = std::make_shared<Pop3SingleSlotPool>(); pool->throw_checkout = true;
+        Pop3ProtocolFixture fixture(true, true, {}, pool);
+        if (quit) fixture.transaction();
+        fixture.command(quit ? "QUIT" : "PASS secret"); fixture.worker->drain(); fixture.owner->drain();
+        assert(HAS(fixture.wire->written(), "-ERR") && !fixture.session->is_paused());
+        assert(fixture.session->is_closed() == quit);
+    }
+    // Throwing renewal is also completed on the owner and never rearms a timer.
+    {
+        Pop3ProtocolFixture fixture; fixture.complete_login(); fixture.locks->throw_renew = true;
+        auto timer = std::static_pointer_cast<test::ManualTimer>(fixture.context()->heartbeat_timer);
+        timer->fire(); fixture.owner->drain(); fixture.worker->drain();
+        assert(!fixture.session->is_closed()); fixture.owner->drain();
+        assert(fixture.session->is_closed() && timer->cancels == 1 && timer->waits == 1);
+    }
+    std::cout << "  [PASS] POP3 delayed orchestration exceptions clean up and complete once" << std::endl;
+}
+TEST(retr_completion_resumes_only_on_owner) {
+    (void)fx;
+    Pop3ProtocolFixture fixture(true, true, std::make_shared<ThrowingPop3Storage>());
+    fixture.transaction(); fixture.command("RETR 1"); fixture.worker->drain();
+    assert(fixture.wire->written().empty() && fixture.session->is_paused()); fixture.owner->drain();
+    assert(HAS(fixture.wire->written(), "-ERR Failed to read message body") && !fixture.session->is_paused());
+    assert(fixture.wire->has_pending_read());
+    std::cout << "  [PASS] RETR completion resumes on owner" << std::endl;
+}
+
 // ========== main ==========
 
 int main() {
@@ -580,6 +947,14 @@ int main() {
     run("heartbeat_lock_lost_closes",test_heartbeat_lock_lost_closes);
     run("heartbeat_stops_after_close",test_heartbeat_stops_after_close);
     run("sweep_expired_locks_ok",    test_sweep_expired_locks_ok);
+    run("injected_quit_reports_write_failures_on_owner", test_injected_quit_reports_write_failures_on_owner);
+    run("quit_unavailable_resources_never_report_success", test_quit_unavailable_resources_never_report_success);
+    run("pass_failure_and_disconnect_release_acquired_lock", test_pass_failure_and_disconnect_release_acquired_lock);
+    run("pass_storage_exception_releases_lock_and_resumes", test_pass_storage_exception_releases_lock_and_resumes);
+    run("injected_heartbeat_and_quit_share_owner_policy", test_injected_heartbeat_and_quit_share_owner_policy);
+    run("pass_real_authenticator_releases_single_slot_before_mailbox", test_pass_real_authenticator_releases_single_slot_before_mailbox);
+    run("pop3_async_continuation_exceptions_complete_once", test_pop3_async_continuation_exceptions_complete_once);
+    run("retr_completion_resumes_only_on_owner", test_retr_completion_resumes_only_on_owner);
 
     std::cout << "pop3_fsm_test: " << passed << " passed, " << failed << " failed" << std::endl;
     return failed == 0 ? 0 : 1;
