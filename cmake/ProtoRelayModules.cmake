@@ -89,6 +89,11 @@ protorelay_module(protorelay_mail_core
     src/mail_system/back/repository/mailbox_repository.cpp
     src/mail_system/back/repository/imap_mutation_repository.cpp
     src/mail_system/back/repository/webmail_read_repository.cpp
+    src/mail_system/back/repository/imap_message_repository.cpp
+    src/mail_system/back/repository/imap_folder_repository.cpp
+    src/mail_system/back/common/imap_append_service.cpp
+    src/mail_system/back/repository/webmail_action_repository.cpp
+    src/mail_system/back/repository/web_session_repository.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp

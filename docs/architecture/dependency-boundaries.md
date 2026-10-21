@@ -9,7 +9,9 @@
 - SMTP 客户端通过 `IClientTransport`、`IExecutor`、`ITimer` 工作。CA 与主机名是配置数据，Asio socket、resolver、SSL context 只存在于后端适配器。
 - 认证由可注入的 `IAccountAuthenticator` 统一承担；SMTP/Webmail 的 `AccountPolicy` 与 IMAP/POP3 委托同一实现，保留缓存、Worker 密码验证、fresh 重读、CAS rehash 和 last-login 顺序。
 - IMAP 常用邮箱读取由 `IMailboxRepository` 返回业务 DTO，SQL 与列映射在实现中。连接租约继续贯穿既有协议/写操作链，UTF-7 解码留在协议适配器。
-- IMAP 消息写操作由 `IImapMutationRepository` 承担，STORE 属性链、COPY/MOVE 的复制计数及源标删、EXPUNGE 使用明确请求/结果。协议层保留序号解析、响应和缓存失效，最终写操作续作回到 session executor；APPEND 与文件夹管理仍待迁移。
+- IMAP 消息写操作由 `IImapMutationRepository` 承担，STORE 属性链、COPY/MOVE 的复制计数及源标删、EXPUNGE 使用明确请求/结果。协议层保留序号解析、响应和缓存失效，最终写操作续作回到 session executor；写失败返回 NO，不提前报告属性或删除成功。
+- IMAP APPEND 通过独立服务编排 Worker 正文存储、元数据仓储及失败补偿；FETCH 元数据与文件夹操作分别使用消息、文件夹仓储，协议模板不直接构造 SQL 或解释数据库结果。
+- Webmail 操作和会话分别使用 `IWebmailActionRepository`、`IWebSessionRepository`；仓储保留授权校验、事务和 fresh 凭据验证，服务负责 Worker 调度、下载流和内存会话。事务回滚失败会断开连接，避免复用未结束事务。
 - Webmail 通过 `IWebmailReadRepository` 获取邮箱列表、分页和邮件元数据，`MailService` 保留分页防御、存储和 MIME 编排。SQL 查询链同时保活池与连接，元数据和正文回调不借用服务对象生命周期。
 - MariaDB 通过 `IReadinessWaiter` 注入 socket 就绪等待；Asio 与阻塞 poll 是独立适配器，驱动不再探测线程局部 IO context。同步驱动可显式选用 Worker/完成 executor 装饰器。
 - 存储对象操作不包含本地流实现；MIME 解析与元数据缓存分开。仅明确提供本地缓存能力的存储后端写本地 sidecar，其他对象 key 不作为文件路径解释。
@@ -43,12 +45,12 @@
 
 单测使用进程独占临时目录；设置 `AGENT_TMP_ROOT` 可选择目录所在位置。仓库关于串行集成测试和独立测试库的规则继续适用。
 
-依赖方向由 `dependency_boundaries` 检查：框架不得包含邮件应用头，客户端公共 API 不得包含或暴露 Boost 类型。独立后端契约测试同时验证替代实现和行为。
+依赖方向由 `dependency_boundaries` 检查：框架不得包含邮件应用头，客户端及仓储公共 API 不得暴露具体后端类型，已迁移的业务服务和协议不得直接执行 SQL。独立后端契约测试同时验证替代实现和行为。
 
 ## 后续范围
 
-- 将 IMAP APPEND 的落盘、事务和清理补偿，以及文件夹管理继续迁入业务仓储；避免仅将长函数机械换位置。
-- 继续抽离 Webmail 写操作、会话存储及 IMAP/POP3 剩余查询，并在业务服务间复用查询语义；保持各协议的响应、排序与权限规则。
+- 抽离 POP3 邮箱与分布式锁查询，以及共享认证、配额和别名的持久化；保持各协议的响应、排序、缓存与权限规则。
+- 隔离持久化队列的数据库操作及具体队列实现，保留压力控制、持久化确认、事务和关闭语义。
 - 邮件正文/附件 key 生成接口当前保留兼容方法，后续可在所有提供者迁移后移到邮件对象布局策略。
 - 原生网络运行时、SQLite、持久化队列中 Boost lockfree 的替换仍是独立工作；移除 Asio 不代表已经移除全部 Boost，也不保证 SQL 方言可移植。
 
@@ -74,8 +76,8 @@ BUILD_DIR=build/contracts bash test/run_all_tests.sh --no-build
 
 | 方向 | 可并发性与前置条件 |
 |---|---|
-| IMAP APPEND/文件夹仓储 | 可与 Webmail 写服务并发；先约定事务、连接租约、正文落盘及失败补偿接口 |
-| Webmail 写操作/会话存储 | 可独立开始；与 IMAP/POP3 共享 DTO 和权限语义由集成者统一 |
+| POP3 邮箱/锁仓储 | 可与共享账户仓储并发；连接租约、锁持有者与 QUIT 删除语义需保持 |
+| 账户认证/配额仓储 | 可独立开始；保持 CAS 密码升级、同连接配额更新和缓存语义 |
 | 对象 key 布局策略 | 可与上述两项并发；保持旧 key 可读，集中由一个 agent 修改提供者公共接口 |
 | 原生网络后端 | 可基于现有连接/执行器/定时器/传输契约独立开发，复用相同契约测试 |
 | SQLite 等数据库后端 | 驱动可并发验证；业务 SQL 方言适配需等仓储接口和事务语义稳定 |

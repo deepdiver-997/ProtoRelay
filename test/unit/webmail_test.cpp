@@ -25,6 +25,14 @@
 #include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mock_db_pool.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -1194,12 +1202,204 @@ static void test_mail_service_survives_delayed_metadata_and_body() {
     std::cout << "  [PASS] mail_service_delayed_dependency_lifetimes" << std::endl;
 }
 
+struct PersistenceWorker final : pr::ThreadPoolBase {
+    std::deque<std::function<void()>> tasks;
+    void start() override {}
+    void stop(bool = true) override {}
+    size_t thread_count() const override { return 1; }
+    bool is_running() const override { return true; }
+    void drain() {
+        while (!tasks.empty()) { auto task = std::move(tasks.front()); tasks.pop_front(); task(); }
+    }
+    void post_impl(std::function<void()> task) override { tasks.push_back(std::move(task)); }
+};
+struct SessionRepositoryState {
+    int puts = 0, lookups = 0, erases = 0;
+    std::chrono::seconds ttl{0};
+    bool throwing = false;
+};
+struct StubSessionRepository final : repository::IWebSessionRepository {
+    std::shared_ptr<SessionRepositoryState> state;
+    explicit StubSessionRepository(std::shared_ptr<SessionRepositoryState> value) : state(std::move(value)) {}
+    bool put(const std::string& token, const WebSessionInfo& user, std::chrono::seconds ttl) override {
+        ++state->puts; state->ttl = ttl;
+        assert(valid_web_session_token(token) && user.user_id == 42 && user.credential_stamp == "stamp");
+        if (state->throwing) throw std::runtime_error("put failure");
+        return true;
+    }
+    WebSessionLookup lookup(const std::string&) override {
+        ++state->lookups;
+        if (state->throwing) throw std::runtime_error("lookup failure");
+        return {true, false, {42, "user@test.local", "stamp", 0}};
+    }
+    bool erase(const std::string&) override {
+        ++state->erases;
+        if (state->throwing) throw std::runtime_error("erase failure");
+        return true;
+    }
+};
+static void test_session_repository_injection_worker_lifetime() {
+    auto workers = std::make_shared<PersistenceWorker>();
+    auto state = std::make_shared<SessionRepositoryState>();
+    auto repo = std::make_shared<StubSessionRepository>(state);
+    std::weak_ptr<StubSessionRepository> lifetime = repo;
+    auto store = std::make_unique<SessionStore>(nullptr, workers, std::chrono::seconds(120), repo);
+    int calls = 0;
+    store->lookup_async("bad", [&](SessionStore::LookupResult result) { ++calls; assert(!result.found && !result.server_error); });
+    store->erase_async("bad", [&](bool ok) { ++calls; assert(ok); });
+    assert(calls == 2 && workers->tasks.empty());
+    const std::string token(64, 'a');
+    SessionPasswordPtr password = std::make_shared<SessionPassword>("never-persist");
+    std::weak_ptr<const SessionPassword> secret = password;
+    store->put_async(token, {42, "user@test.local", "stamp", 0}, password, [&](bool ok) { ++calls; assert(ok); });
+    password.reset();
+    assert(secret.expired()); // persistent work must not retain the supplied password
+    store->lookup_async(token, [&](SessionStore::LookupResult result) {
+        ++calls; assert(result.found && !result.server_error && result.user.user_id == 42 && !result.password);
+    });
+    store->erase_async(token, [&](bool ok) { ++calls; assert(ok); });
+    store.reset(); repo.reset();
+    assert(calls == 2 && !lifetime.expired());
+    workers->drain();
+    assert(calls == 5 && lifetime.expired());
+    assert(state->puts == 1 && state->lookups == 1 && state->erases == 1 && state->ttl.count() == 120);
+
+    state->throwing = true;
+    repo = std::make_shared<StubSessionRepository>(state);
+    SessionStore failures(nullptr, nullptr, std::chrono::seconds(120), repo);
+    failures.put_async(token, {42, "user@test.local", "stamp", 0}, nullptr, [&](bool ok) { ++calls; assert(!ok); });
+    failures.lookup_async(token, [&](SessionStore::LookupResult result) { ++calls; assert(!result.found && result.server_error && !result.password); });
+    failures.erase_async(token, [&](bool ok) { ++calls; assert(!ok); });
+    assert(calls == 8);
+    std::cout << "  [PASS] injected session repository scheduling, lifetime and secret isolation\n";
+}
+
+struct ActionRepositoryState {
+    int updates = 0, downloads = 0;
+    MailActionResult update;
+    AuthorizedAttachment attachment{false, false, 0, "opaque/attachment", "file.bin"};
+};
+struct StubActionRepository final : repository::IWebmailActionRepository {
+    std::shared_ptr<ActionRepositoryState> state;
+    explicit StubActionRepository(std::shared_ptr<ActionRepositoryState> value) : state(std::move(value)) {}
+    MailActionResult update_flags(const MailFlagUpdate& update) override {
+        ++state->updates;
+        assert(update.scope.user_id == 42 && update.scope.address == "user@test.local");
+        assert(update.scope.mailbox_id == 7 && update.scope.mail_id == 9 && update.read.value() && !update.starred.value());
+        return state->update;
+    }
+    AuthorizedAttachment find_attachment(const MailResourceScope& scope, uint64_t attachment) override {
+        ++state->downloads;
+        assert(scope.user_id == 42 && scope.mailbox_id == 7 && scope.mail_id == 9 && attachment == 11);
+        return state->attachment;
+    }
+};
+struct TinyAttachment final : pr::IDownloadStream {
+    uint64_t size() const override { return 3; }
+    bool read_at(uint64_t offset, char* buffer, size_t capacity, size_t& count, pr::IoError& error) override {
+        count = 0;
+        if (offset > size()) { error = pr::IoError::permanent("bad offset"); return false; }
+        const std::string bytes("a\0b", 3);
+        count = std::min<size_t>(capacity, bytes.size() - static_cast<size_t>(offset));
+        for (size_t i = 0; i < count; ++i) buffer[i] = bytes[static_cast<size_t>(offset) + i];
+        return true;
+    }
+};
+struct BoundedAttachmentProvider final : pr::storage::IStorageProvider {
+    int downloads = 0;
+    bool ensure_ready(pr::IoError&) override { return true; }
+    std::string build_mail_body_key(uint64_t) override { return {}; }
+    std::string build_attachment_key(uint64_t, const std::string&) override { return {}; }
+    bool append_binary(const std::string&, const char*, size_t, pr::IoError&) override { return false; }
+    bool remove_object(const std::string&, pr::IoError&) override { return false; }
+    bool read_all(const std::string&, std::string&, pr::IoError&) override { assert(false); return false; }
+    std::unique_ptr<pr::IDownloadStream> open_download(const std::string& key, pr::IoError& error) override {
+        ++downloads;
+        if (key != "opaque/attachment") { error = pr::IoError::permanent("missing attachment"); return {}; }
+        return std::make_unique<TinyAttachment>();
+    }
+};
+static void test_action_repository_injection_bounded_download_and_callback_once() {
+    auto workers = std::make_shared<PersistenceWorker>();
+    auto state = std::make_shared<ActionRepositoryState>();
+    auto repo = std::make_shared<StubActionRepository>(state);
+    std::weak_ptr<StubActionRepository> repo_lifetime = repo;
+    auto provider = std::make_shared<BoundedAttachmentProvider>();
+    auto shards = std::make_shared<router::StaticShardRouter>(std::vector<std::pair<std::string,int>>{}, 0,
+        std::vector<std::shared_ptr<DBPool>>{}, std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{provider});
+    std::weak_ptr<router::StaticShardRouter> router_lifetime = shards;
+    auto actions = std::make_unique<MailActions>(shards, workers, repo);
+    int calls = 0;
+    actions->update_async(42, "user@test.local", 7, 9, true, false, [&](MailActionResult out) {
+        ++calls; assert(!out.server_error && !out.not_found);
+    });
+    actions->download_async(42, "user@test.local", 7, 9, 11, [&](AttachmentDownload out) {
+        ++calls; assert(!out.server_error && !out.not_found && out.filename == "file.bin" && out.source->size() == 3);
+        char bytes[2]; size_t count = 0; pr::IoError error;
+        assert(out.source->read_at(1, bytes, 2, count, error) && count == 2 && bytes[0] == '\0' && bytes[1] == 'b');
+    });
+    actions.reset(); repo.reset(); shards.reset();
+    assert(!calls && !repo_lifetime.expired() && !router_lifetime.expired());
+    workers->drain();
+    assert(calls == 2 && repo_lifetime.expired() && router_lifetime.expired());
+    assert(state->updates == 1 && state->downloads == 1 && provider->downloads == 1);
+
+    repo = std::make_shared<StubActionRepository>(state);
+    MailActions immediate(nullptr, nullptr, repo);
+    bool threw = false;
+    int callbacks = 0;
+    try {
+        immediate.update_async(42, "user@test.local", 7, 9, true, false, [&](MailActionResult) {
+            ++callbacks; throw std::runtime_error("caller exception");
+        });
+    } catch (const std::runtime_error&) { threw = true; }
+    assert(threw && callbacks == 1); // do not catch a caller exception and invoke it again
+    state->attachment = {false, true, -1, {}, {}};
+    immediate.download_async(42, "user@test.local", 7, 9, 11, [&](AttachmentDownload out) {
+        ++callbacks; assert(out.not_found && !out.server_error && !out.source);
+    });
+    assert(callbacks == 2 && provider->downloads == 1);
+    std::cout << "  [PASS] injected flag/download repositories, bounded storage and one completion\n";
+}
+
+static void test_persistence_worker_retains_default_repository_pools() {
+    auto workers = std::make_shared<PersistenceWorker>();
+    auto pool = std::make_shared<test::MockDbPool>();
+    auto shards = std::make_shared<router::StaticShardRouter>(std::vector<std::pair<std::string,int>>{}, 0,
+        std::vector<std::shared_ptr<DBPool>>{pool}, std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{});
+    std::weak_ptr<test::MockDbPool> pool_lifetime = pool;
+    auto db = pool->mock_conn();
+    db->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{{{"box_type", "1"}}}));
+    auto actions = std::make_unique<MailActions>(shards, workers);
+    int calls = 0;
+    actions->update_async(42, "user@test.local", 7, 9, true, false, [&](MailActionResult result) {
+        ++calls; assert(!result.server_error && !result.not_found && !pool_lifetime.expired());
+    });
+    auto store = std::make_unique<SessionStore>(shards, workers);
+    db->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{
+        {{"user_id", "42"}, {"account_address", "user@test.local"}, {"account_shard", "0"},
+         {"credential_stamp", credential_stamp("password")}}}));
+    db->push_sync_result(std::make_shared<test::MockDbResult>(MockRows{
+        {{"id", "42"}, {"status", "1"}, {"password", "password"}}}));
+    store->lookup_async(std::string(64, 'a'), [&](SessionStore::LookupResult result) {
+        ++calls; assert(result.found && !result.server_error && !result.password && !pool_lifetime.expired());
+    });
+    actions.reset(); store.reset(); pool.reset(); shards.reset();
+    assert(!pool_lifetime.expired() && !calls);
+    workers->drain();
+    assert(calls == 2 && pool_lifetime.expired());
+    std::cout << "  [PASS] queued default repositories retain owning pools through completion\n";
+}
+
 void run_webmail_submission_tests();
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--unread-detail-regression") {
         test_mail_api_get_message_flow(); return 0;
     }
+    test_session_repository_injection_worker_lifetime();
+    test_action_repository_injection_bounded_download_and_callback_once();
+    test_persistence_worker_retains_default_repository_pools();
     test_mail_service_injected_repository();
     test_mail_service_survives_delayed_metadata_and_body();
     test_resource_ids_are_lossless();

@@ -3,9 +3,13 @@
 #include "framework/http/http_types.hpp"
 #include "mail_system/back/webmail/session_password.h"
 
-#include "mail_system/back/router/i_shard_router.h"
+#include "mail_system/back/repository/web_session_repository.h"
 #include "framework/thread_pool/thread_pool_base.h"
+#include <cstddef>
 #include <functional>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 #include <mutex>
 #include <chrono>
 #include <cstdint>
@@ -13,13 +17,6 @@
 #include <string>
 
 namespace mail_system::webmail {
-
-struct WebSessionInfo {
-    uint64_t user_id = 0;
-    std::string address;
-    std::string credential_stamp;
-    int shard = 0;
-};
 
 // 生产装配使用共享 DB；内存构造仅供嵌入和测试。固定 TTL，不滑动续期。
 class SessionStore {
@@ -33,8 +30,11 @@ public:
 
     SessionStore(std::shared_ptr<router::IShardRouter> router,
                  std::shared_ptr<pr::ThreadPoolBase> workers,
-                 std::chrono::seconds ttl = kDefaultTtl)
-        : cache_(1, ttl), current_tokens_(1, ttl), ttl_(ttl), router_(std::move(router)), workers_(std::move(workers)), database_(true) {}
+                 std::chrono::seconds ttl = kDefaultTtl,
+                 std::shared_ptr<repository::IWebSessionRepository> persistence = nullptr)
+        : cache_(1, ttl), current_tokens_(1, ttl), ttl_(ttl), workers_(std::move(workers)),
+          repository_(persistence ? std::move(persistence)
+              : repository::make_sql_web_session_repository(std::move(router))), database_(true) {}
     struct LookupResult {
         bool found = false;
         bool server_error = false;
@@ -155,8 +155,8 @@ private:
     pr::LruCache<std::string, std::string> current_tokens_;
     mutable std::mutex memory_mutex_;
     std::chrono::seconds ttl_;
-    std::shared_ptr<router::IShardRouter> router_;
     std::shared_ptr<pr::ThreadPoolBase> workers_;
+    std::shared_ptr<repository::IWebSessionRepository> repository_;
     bool database_ = false;
 };
 
