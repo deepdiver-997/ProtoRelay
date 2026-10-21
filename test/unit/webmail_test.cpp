@@ -1059,12 +1059,149 @@ static void test_message_actions_contract() {
     std::cout << "  [PASS] flags and attachment API validation, ownership, errors, binary stream and safe filename\n";
 }
 
+// Service-level substitution: no DB pool is needed for the read-side application.
+struct StubWebmailReadRepository final : repository::IWebmailReadRepository {
+    uint64_t user_id = 0, mailbox_id = 0, mail_id = 0;
+    uint32_t page = 0, page_size = 0;
+    std::string address;
+    std::function<void(MailboxListResult)> mailboxes;
+    std::function<void(MessagePageResult)> messages;
+    std::function<void(MessageMetadataResult)> metadata;
+
+    void list_mailboxes_async(uint64_t user, const std::string& who,
+        std::function<void(MailboxListResult)> cb) override {
+        user_id = user; address = who; mailboxes = std::move(cb);
+    }
+    void list_messages_async(uint64_t user, const std::string& who, uint64_t mailbox,
+        uint32_t requested_page, uint32_t size, std::function<void(MessagePageResult)> cb) override {
+        user_id = user; address = who; mailbox_id = mailbox;
+        page = requested_page; page_size = size; messages = std::move(cb);
+    }
+    void get_message_metadata_async(uint64_t user, const std::string& who,
+        uint64_t mailbox, uint64_t mail, std::function<void(MessageMetadataResult)> cb) override {
+        user_id = user; address = who; mailbox_id = mailbox; mail_id = mail; metadata = std::move(cb);
+    }
+};
+
+static void test_mail_service_injected_repository() {
+    auto repo = std::make_shared<StubWebmailReadRepository>();
+    MailService service(nullptr, repo);
+    int calls = 0;
+    service.list_mailboxes_async(42, "user@test.local", [&](MailboxListResult result) {
+        ++calls; assert(result.ok && result.mailboxes.size() == 1 && result.mailboxes[0].id == 7);
+    });
+    assert(!calls && repo->user_id == 42 && repo->address == "user@test.local");
+    MailboxListResult boxes;
+    boxes.ok = true;
+    boxes.mailboxes.push_back({7, "INBOX", 1, 3, 2});
+    auto list_complete = std::move(repo->mailboxes);
+    list_complete(std::move(boxes));
+    assert(calls == 1);
+
+    service.list_messages_async(42, "user@test.local", 7, 0, 0, [&](MessagePageResult result) {
+        ++calls; assert(result.not_found && !result.ok && !result.server_error);
+    });
+    assert(repo->page == 1 && repo->page_size == 1 && repo->mailbox_id == 7);
+    MessagePageResult missing;
+    missing.not_found = true;
+    auto missing_complete = std::move(repo->messages);
+    missing_complete(std::move(missing));
+    assert(calls == 2);
+    service.list_messages_async(42, "user@test.local", 7, UINT32_MAX, UINT32_MAX,
+        [&](MessagePageResult result) { ++calls; assert(result.server_error); });
+    assert(repo->page == UINT32_MAX && repo->page_size == MailService::kMaxPageSize);
+    MessagePageResult unavailable;
+    unavailable.server_error = true;
+    auto unavailable_complete = std::move(repo->messages);
+    unavailable_complete(std::move(unavailable));
+    assert(calls == 3);
+
+    for (bool server_error : {false, true}) {
+        service.get_message_async(42, "user@test.local", 7, 9, [&](MessageDetail result) {
+            ++calls;
+            assert(!result.ok && result.server_error == server_error && result.not_found == !server_error);
+        });
+        assert(repo->user_id == 42 && repo->mailbox_id == 7 && repo->mail_id == 9);
+        MessageMetadataResult result;
+        result.server_error = server_error;
+        result.not_found = !server_error;
+        auto complete = std::move(repo->metadata);
+        complete(std::move(result));
+    }
+    assert(calls == 5);
+    std::cout << "  [PASS] mail_service_injected_repository" << std::endl;
+}
+
+struct DeferredWebmailBody final : pr::storage::IStorageProvider {
+    ReadAllCallback pending;
+    std::string requested_key;
+    bool ensure_ready(pr::IoError&) override { return true; }
+    std::string build_mail_body_key(uint64_t) override { return "opaque/message"; }
+    std::string build_attachment_key(uint64_t, const std::string&) override { return "opaque/attachment"; }
+    bool append_binary(const std::string&, const char*, size_t, pr::IoError&) override { return false; }
+    bool remove_object(const std::string&, pr::IoError&) override { return false; }
+    bool read_all(const std::string&, std::string&, pr::IoError&) override { assert(false); return false; }
+    void async_read_all(const std::string& key, ReadAllCallback cb) override {
+        requested_key = key; pending = std::move(cb);
+    }
+    void finish(bool ok) {
+        auto complete = std::move(pending);
+        assert(complete);
+        complete(ok, ok ? "Content-Type: text/plain; charset=utf-8\r\n\r\nhello" : "",
+                 ok ? pr::IoError{} : pr::IoError::permanent("missing body"));
+    }
+};
+
+static void test_mail_service_survives_delayed_metadata_and_body() {
+    for (bool body_available : {true, false}) {
+        auto repo = std::make_shared<StubWebmailReadRepository>();
+        auto provider = std::make_shared<DeferredWebmailBody>();
+        auto router = std::make_shared<router::StaticShardRouter>(
+            std::vector<std::pair<std::string,int>>{}, 0,
+            std::vector<std::shared_ptr<DBPool>>{},
+            std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{provider});
+        std::weak_ptr<router::StaticShardRouter> router_lifetime = router;
+        auto service = std::make_unique<MailService>(router, repo);
+        int calls = 0;
+        service->get_message_async(42, "user@test.local", 7, 9, [&](MessageDetail result) {
+            ++calls;
+            assert(result.ok && result.id == 9 && result.subject == "subject");
+            assert(result.send_time == 123 && result.sender == "from@test" && result.status == 1);
+            assert(result.starred && result.important && !result.deleted);
+            assert(result.recipients == std::vector<std::string>{"to@test"});
+            assert(result.attachments.size() == 1 && result.attachments[0].id == 11);
+            assert(result.body_available == body_available);
+            if (body_available) assert(result.text_available && result.text == "hello");
+            else assert(!result.text_available && result.text.empty());
+        });
+        service.reset(); router.reset();
+        assert(!router_lifetime.expired());
+        MessageMetadataResult result;
+        result.ok = true; result.id = 9; result.subject = "subject"; result.send_time = 123;
+        result.sender = "from@test"; result.recipients = {"to@test"}; result.status = 1;
+        result.starred = result.important = true;
+        result.attachments.push_back({11, "attachment.bin", 42, "application/octet-stream"});
+        result.body_key = "opaque/message";
+        auto metadata_complete = std::move(repo->metadata);
+        metadata_complete(std::move(result));
+        metadata_complete = nullptr; // release the metadata callback's stable router
+        repo.reset();
+        assert(!calls && router_lifetime.expired());
+        assert(provider->requested_key == "opaque/message" && provider->pending);
+        provider->finish(body_available);
+        assert(calls == 1 && !provider->pending);
+    }
+    std::cout << "  [PASS] mail_service_delayed_dependency_lifetimes" << std::endl;
+}
+
 void run_webmail_submission_tests();
 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--unread-detail-regression") {
         test_mail_api_get_message_flow(); return 0;
     }
+    test_mail_service_injected_repository();
+    test_mail_service_survives_delayed_metadata_and_body();
     test_resource_ids_are_lossless();
     test_message_actions_contract();
     if (argc == 2 && std::string(argv[1]) == "--single-login-regression") {
