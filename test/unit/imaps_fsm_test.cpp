@@ -1139,6 +1139,38 @@ TEST(idle_with_done) {
 }
 
 // ========== UIDNEXT 高水位（原子推进，防并发撞值/expunge 回退） ==========
+// An application repository can replace SQL-backed reads without changing the
+// protocol FSM, including modified UTF-7 decoding before the repository call.
+class FakeMailboxRepository final : public repository::IMailboxRepository {
+public:
+    std::string found_name;
+    void get_mailboxes_async(Lease, uint64_t, ListCallback cb) override { cb(true, {{77, "injected", 1}}); }
+    void find_mailbox_id_async(Lease, uint64_t, const std::string& name, std::function<void(uint64_t)> cb) override {
+        found_name = name; cb(77);
+    }
+    void get_mailbox_mails_async(Lease, uint64_t, uint64_t, MessagesCallback cb) override { cb(true, {}); }
+    void get_mailbox_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(4); }
+    void get_mailbox_unseen_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(2); }
+    void get_mailbox_uidnext_async(Lease, uint64_t, uint64_t, std::function<void(uint64_t)> cb) override { cb(88); }
+};
+TEST(mailbox_repository_injection) {
+    auto injected = std::make_shared<FakeMailboxRepository>();
+    auto original = fx.fsm->get_mailbox_repository();
+    fx.fsm->set_mailbox_repository(injected);
+    int calls = 0;
+    fx.fsm->get_mailboxes_async({}, 41, [&](bool ok, std::vector<MailboxSummary> boxes) {
+        assert(ok && boxes.size() == 1 && boxes[0].name == "injected"); ++calls;
+    });
+    fx.fsm->find_mailbox_id_async({}, 41, imap_utils::encode_mailbox_name("收件箱"), [&](uint64_t id) {
+        assert(id == 77); ++calls;
+    });
+    assert(injected->found_name == "收件箱");
+    fx.fsm->get_mailbox_uidnext_async({}, 77, 41, [&](uint64_t value) { assert(value == 88); ++calls; });
+    assert(calls == 3);
+    fx.fsm->set_mailbox_repository(original);
+    std::cout << "  [PASS] mailbox repository injection and protocol name decoding" << std::endl;
+}
+
 TEST(uidnext_advance_read) {
     // 剧情：SELECT/STATUS 报告 UIDNEXT。新实现 = 原子推进高水位(advance,写)
     // + 读(advance 后的 mailbox_uidnext 行)。mock 同步模式下 advance 的
@@ -1913,6 +1945,7 @@ int main() {
         test_literal_too_large_rejected(fx);
 
         // ── UIDNEXT 高水位 ──
+        test_mailbox_repository_injection(fx);
         test_uidnext_advance_read(fx);
         test_uidnext_no_db_default(fx);
 

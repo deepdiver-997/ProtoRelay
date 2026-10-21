@@ -722,7 +722,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
     TraditionalImapsFsm<ConnectionType>::get_mailboxes_async(
         conn, user_id,
         [self, tag = std::move(tag)](bool ok,
-            std::vector<std::tuple<uint64_t, std::string, int>> mailboxes) mutable {
+            std::vector<MailboxSummary> mailboxes) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
                 send_tagged(self, tag, "OK", "LIST completed");
@@ -731,8 +731,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
             }
             std::string response;
             for (const auto& mb : mailboxes) {
-                const std::string& name = std::get<1>(mb);
-                int box_type = std::get<2>(mb);
+                const std::string& name = mb.name;
+                int box_type = mb.box_type;
 
                 std::string encoded_name = encode_mailbox_name(name);
 
@@ -779,12 +779,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_lsub(
     TraditionalImapsFsm<ConnectionType>::get_mailboxes_async(
         conn, user_id,
         [self, tag = std::move(tag)](bool,
-            std::vector<std::tuple<uint64_t, std::string, int>> mailboxes) mutable {
+            std::vector<MailboxSummary> mailboxes) mutable {
             if (!self || self->is_closed()) return;
             std::string response;
             for (const auto& mb : mailboxes) {
-                const std::string& name = std::get<1>(mb);
-                int box_type = std::get<2>(mb);
+                const std::string& name = mb.name;
+                int box_type = mb.box_type;
                 std::string encoded_name = encode_mailbox_name(name);
 
                 if (box_type == 1) {
@@ -2778,21 +2778,9 @@ void TraditionalImapsFsm<ConnectionType>::auth_user_async(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::get_mailboxes_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
-    std::function<void(bool, std::vector<std::tuple<uint64_t, std::string, int>>)> cb)
+    std::function<void(bool, std::vector<MailboxSummary>)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(false, {}); return; }
-    (*conn)->async_query(db::sql::build_imap_list_mailboxes(), {std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            std::vector<std::tuple<uint64_t, std::string, int>> mailboxes;
-            if (!result) { cb(false, std::move(mailboxes)); return; }
-            for (size_t i = 0; i < result->get_row_count(); ++i) {
-                uint64_t id = safe_stoull(result->get_value(i, "id"));
-                std::string name = result->get_value(i, "name");
-                int box_type = static_cast<int>(safe_stoull(result->get_value(i, "box_type")));
-                mailboxes.emplace_back(id, name, box_type);
-            }
-            cb(true, std::move(mailboxes));
-        });
+    m_mailboxRepository->get_mailboxes_async(std::move(conn), user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -2800,30 +2788,12 @@ void TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
     const std::string& mailbox_name, std::function<void(uint64_t)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(0); return; }
     std::string name_utf8 = mailbox_name;
     if (mailbox_name.find('&') != std::string::npos) {
-        std::string decoded = decode_imap_utf7(mailbox_name);
-        if (!decoded.empty()) name_utf8 = decoded;
+        auto decoded = decode_imap_utf7(mailbox_name);
+        if (!decoded.empty()) name_utf8 = std::move(decoded);
     }
-    (*conn)->async_query(db::sql::build_imap_get_mailbox_by_name(),
-        {std::to_string(user_id), name_utf8},
-        [conn, user_id, name_utf8, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0) {
-                cb(safe_stoull(result->get_value(0, "id")));
-                return;
-            }
-            // INBOX 兜底（box_type=1，中文名邮箱可能直接查不到）
-            std::string upper = name_utf8;
-            std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-            if (upper != "INBOX") { cb(0); return; }
-            (*conn)->async_query(db::sql::build_imap_get_inbox_id(),
-                {std::to_string(user_id)},
-                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r2) mutable {
-                    if (r2 && r2->get_row_count() > 0) cb(safe_stoull(r2->get_value(0, "id")));
-                    else cb(0);
-                });
-        });
+    m_mailboxRepository->find_mailbox_id_async(std::move(conn), user_id, name_utf8, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -2831,28 +2801,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(bool, std::vector<MailboxMailInfo>)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(false, {}); return; }
-    (*conn)->async_query(db::sql::build_imap_get_mailbox_mails(),
-        {std::to_string(mailbox_id), std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            std::vector<MailboxMailInfo> mails;
-            if (!result) { cb(false, std::move(mails)); return; }
-            for (size_t i = 0; i < result->get_row_count(); ++i) {
-                MailboxMailInfo info;
-                info.mail_id = safe_stoull(result->get_value(i, "id"));
-                info.sender = result->get_value(i, "sender");
-                info.recipient = result->get_value(i, "recipient");
-                info.subject = result->get_value(i, "subject");
-                info.body_path = result->get_value(i, "body_path");
-                info.is_starred = result->get_value(i, "is_starred") == "1";
-                info.is_deleted = result->get_value(i, "is_deleted") == "1";
-                info.is_important = result->get_value(i, "is_important") == "1";
-                info.status = result->get_value(i, "status").empty() ? 0 : static_cast<int>(safe_stoull(result->get_value(i, "status")));
-                info.send_time = static_cast<time_t>(safe_stoull(result->get_value(i, "send_time")));
-                mails.push_back(std::move(info));
-            }
-            cb(true, std::move(mails));
-        });
+    m_mailboxRepository->get_mailbox_mails_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -3115,11 +3064,12 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_stats_cached_async(
         }
     };
 
-    get_mailbox_count_async(conn, mailbox_id, user_id,
-        [conn, mailbox_id, user_id, finish = std::move(finish)](size_t exists) mutable {
-            get_mailbox_unseen_count_async(conn, mailbox_id, user_id,
-                [conn, mailbox_id, user_id, finish = std::move(finish), exists](size_t unseen) mutable {
-                    get_mailbox_uidnext_async(conn, mailbox_id, user_id,
+    auto repository = m_mailboxRepository;
+    repository->get_mailbox_count_async(conn, mailbox_id, user_id,
+        [repository, conn, mailbox_id, user_id, finish = std::move(finish)](size_t exists) mutable {
+            repository->get_mailbox_unseen_count_async(conn, mailbox_id, user_id,
+                [repository, conn, mailbox_id, user_id, finish = std::move(finish), exists](size_t unseen) mutable {
+                    repository->get_mailbox_uidnext_async(conn, mailbox_id, user_id,
                         [mailbox_id, finish = std::move(finish), exists, unseen](uint64_t uidnext) mutable {
                             MailboxCacheEntry entry;
                             entry.exists = exists;
@@ -3137,14 +3087,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_count_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(size_t)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(0); return; }
-    (*conn)->async_query(db::sql::build_imap_select_status_total(),
-        {std::to_string(mailbox_id), std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0)
-                cb(static_cast<size_t>(safe_stoull(result->get_value(0, "cnt"))));
-            else cb(0);
-        });
+    m_mailboxRepository->get_mailbox_count_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -3152,14 +3095,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_unseen_count_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(size_t)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(0); return; }
-    (*conn)->async_query(db::sql::build_imap_mailbox_unseen_count(),
-        {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0)
-                cb(static_cast<size_t>(safe_stoull(result->get_value(0, "cnt"))));
-            else cb(0);
-        });
+    m_mailboxRepository->get_mailbox_unseen_count_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -3167,23 +3103,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_uidnext_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(uint64_t)> cb)
 {
-    (void)user_id;   // mailbox_id 是 mailboxes 主键，全局唯一，无需 user_id 过滤
-    if (!conn || !conn->is_valid()) { if (cb) cb(1); return; }
-    // 原子推进高水位：行锁串行化并发/跨实例读者，GREATEST 防 expunge 后回退；
-    // 推进后再读取（advance 是写，read 才是值）
-    (*conn)->async_execute(db::sql::build_imap_uidnext_advance(),
-        {std::to_string(mailbox_id), std::to_string(mailbox_id), std::to_string(mailbox_id)},
-        [conn, mailbox_id, cb = std::move(cb)](bool) mutable {
-            (*conn)->async_query(db::sql::build_imap_uidnext_read(),
-                {std::to_string(mailbox_id)},
-                // ⚠ 持 conn：外层回调返回后链上只剩此捕获撑住 ScopedConnection，
-                // 漏捕 = advance 查询完成瞬间连接带飞归池（2026-09-24 crash 根因）
-                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-                    if (result && result->get_row_count() > 0)
-                        cb(safe_stoull(result->get_value(0, "uidnext")));
-                    else cb(1);
-                });
-        });
+    m_mailboxRepository->get_mailbox_uidnext_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 // ---------- 批量 flag 更新（STORE）：单条 IN SQL 拍平 N 循环 ----------
