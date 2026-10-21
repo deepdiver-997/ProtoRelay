@@ -74,6 +74,10 @@ public:
     }
 
     ~TraditionalSmtpsFsm() override = default;
+    void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
+        account_policy_->set_authenticator(std::move(authenticator));
+    }
+
 
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }

@@ -2,6 +2,7 @@
 #define TRADITIONAL_IMAPS_FSM_H
 
 #include "framework/session_base.h"
+#include "mail_system/back/common/account_authentication.h"
 #include "framework/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
@@ -65,6 +66,7 @@ protected:
     std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
+    std::shared_ptr<IAccountAuthenticator> authenticator_;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
     std::shared_ptr<MailboxListCache> m_mailboxListCache;
     // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
@@ -84,11 +86,17 @@ public:
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
         m_shardRouter(std::move(shard_router)) {
+        authenticator_ = std::make_shared<AccountAuthenticationService>(
+            m_shardRouter, m_authCache, m_workerThreadPool);
         init_transition_table();
         init_state_handlers();
     }
 
     ~TraditionalImapsFsm() override = default;
+    void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
+        if (authenticator) authenticator_ = std::move(authenticator);
+    }
+
 
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
@@ -182,8 +190,7 @@ public:
     // 用户认证（复用和 SMTP 相同的 users 表）
     // 登录认证（查 DB + bcrypt）。bcrypt 几十~几百 ms 纯 CPU，调用方
     // 必须在 worker 线程发起本函数（见 handle_login）。
-    static void auth_user_async(const std::shared_ptr<router::IShardRouter>& shard_router,
-                                const std::shared_ptr<AuthCache>& auth_cache,
+    static void auth_user_async(const std::shared_ptr<IAccountAuthenticator>& authenticator,
                                 const std::string& mail_address,
                                 const std::string& password,
                                 std::function<void(bool ok, uint64_t user_id, int shard)> cb);

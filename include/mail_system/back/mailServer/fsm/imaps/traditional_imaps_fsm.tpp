@@ -383,8 +383,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
     // pause 后把「查 DB + 验密码」整体丢给 worker 线程池；回调在 worker
     // 线程触发，pause 期间独占 session（SPF/DNS/commit 回调同一约定）。
     // 登录者自己的延迟不变（bcrypt 该算多久还是多久），变的是别人不再陪等。
-    auto router = this->m_shardRouter;
-    auto auth_cache = this->m_authCache;
+    auto authenticator = this->authenticator_;
     auto worker = this->m_workerThreadPool;
     if (!worker) {
         send_tagged(session, tag, "NO", "Server not ready");
@@ -394,13 +393,13 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
     auto self = session->shared_from_this();
     worker->post(
         [self, tag, username = std::move(username), password = std::move(password),
-         router, auth_cache, ok_text, fail_text]() mutable {
+         authenticator, ok_text, fail_text]() mutable {
             // async CPS 链（仿 POP3/SMTP auth）：每步 async_query + 回调续作。
             // 底层 MySQL async_* 是默认同步包装（回调内联执行），链在 worker
             // 线程跑完；将来接真异步 DB，回调在 DB 线程触发，conn 由链内
             // shared ScopedConnection 保活，调用方结构无需改动。
             TraditionalImapsFsm<ConnectionType>::auth_user_async(
-                router, auth_cache, username, password,
+                authenticator, username, password,
                 [self, tag, username = username, ok_text, fail_text](
                     bool ok, uint64_t user_id, int shard) mutable {
                     if (!self || self->is_closed()) return;
@@ -2764,71 +2763,15 @@ void TraditionalImapsFsm<ConnectionType>::handle_timeout(
 // 线程发起（bcrypt 几十~几百 ms 纯 CPU，不许在 io 线程算）。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::auth_user_async(
-    const std::shared_ptr<router::IShardRouter>& shard_router,
-    const std::shared_ptr<AuthCache>& auth_cache,
-    const std::string& mail_address,
-    const std::string& password,
-    std::function<void(bool, uint64_t, int)> cb)
+    const std::shared_ptr<IAccountAuthenticator>& authenticator,
+    const std::string& mail_address, const std::string& password,
+    std::function<void(bool, uint64_t, int)> complete)
 {
-    if (!cb) return;
-    LOG_AUTH_INFO("IMAP AUTH attempt: mail_address=[{}]", mail_address);
-
-    int shard = 0;
-    if (shard_router) {
-        int r = shard_router->route(mail_address);
-        if (r >= 0) shard = r;
-    }
-
-    // 快路径：缓存命中（含 status!=1 的负缓存）同步回调
-    AuthCacheEntry ce;
-    if (auth_cache && auth_cache->lookup(mail_address, ce)) {
-        if (ce.status != 1) { cb(false, 0, shard); return; }
-        bool ok = verify_password_hash(password, ce.password_hash);
-        cb(ok, ce.user_id, ce.shard);
-        return;
-    }
-
-    if (!shard_router) { cb(false, 0, shard); return; }
-    auto db_pool = shard_router->get_db_pool(static_cast<size_t>(shard));
-    if (!db_pool) {
-        LOG_AUTH_ERROR("No database pool for shard {}", shard);
-        cb(false, 0, shard);
-        return;
-    }
-    // conn 用 shared 保活：真异步接入后回调在 DB 线程触发，链中捕获不悬垂
-    auto conn = db_pool->acquire_connection();
-    if (!conn->is_valid()) {
-        LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
-        cb(false, 0, shard);
-        return;
-    }
-
-    (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},
-        [auth_cache, mail_address, password, shard, conn,
-         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (!result || result->get_row_count() == 0) {
-                LOG_AUTH_WARN("User not found: {}", mail_address);
-                cb(false, 0, shard);
-                return;
-            }
-            int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
-            if (status != 1) {
-                LOG_AUTH_WARN("User account disabled: {}", mail_address);
-                cb(false, 0, shard);
-                return;
-            }
-            std::string stored = result->get_value(0, "password");
-            uint64_t user_id = safe_stoull(result->get_value(0, "id"));
-            AuthCacheEntry entry{stored, status, user_id, shard};
-            if (auth_cache) auth_cache->store(mail_address, entry);
-            if (!verify_password_hash(password, stored)) { cb(false, 0, shard); return; }
-            // 验密通过：MD5/明文历史行 → bcrypt 回写 + 刷缓存（已是 bcrypt 则直通），
-            // 再记 last_login，最后回调。见 common/password_rehash.h 的契约说明。
-            rehash_password_if_needed_async(conn, auth_cache, mail_address, password, stored, entry,
-                [conn, mail_address, user_id, shard, cb = std::move(cb)]() mutable {
-                    (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                        [conn, cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
-                });
+    if (!complete) return;
+    if (!authenticator) { complete(false, 0, 0); return; }
+    authenticator->login_async(mail_address, password,
+        [complete = std::move(complete)](AccountAuthResult result) {
+            complete(result.ok, result.user_id, result.shard);
         });
 }
 
