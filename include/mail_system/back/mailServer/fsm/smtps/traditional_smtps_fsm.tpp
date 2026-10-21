@@ -1288,10 +1288,20 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     const std::string& password, AuthCallback cb)
 {
+    if (!cb) return;
     if (!session) { cb(false, 0); return; }
     session->set_paused(true);
+    auto executor = session->get_connection().executor();
     account_policy_->login_async(mail_address, password,
-        [session, cb = std::move(cb)](AccountAuthResult out) { cb(out.ok, out.ok ? out.shard : 0); });
+        [session, executor, cb = std::move(cb)](AccountAuthResult out) mutable {
+            // Password work completes on a worker/DB thread. Resume protocol
+            // state and buffered commands on the connection's serial executor,
+            // after the input-dispatch loop which paused this session has exited.
+            executor->post([session, cb = std::move(cb), out = std::move(out)]() mutable {
+                if (session->is_closed()) return;
+                cb(out.ok, out.ok ? out.shard : 0);
+            });
+        });
 }
 
 

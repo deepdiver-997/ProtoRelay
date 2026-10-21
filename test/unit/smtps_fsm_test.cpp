@@ -16,6 +16,7 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/algorithm/line_folder.h"
 #include "mock_connection.h"
+#include "manual_executor.h"
 
 #include <filesystem>
 #include <fstream>
@@ -1201,6 +1202,43 @@ TEST(auth_from_alias_accepted_at_data_end) {
     std::cout << "  [PASS] auth_from_alias_accepted_at_data_end (别名命中 → 入队)" << std::endl;
 }
 
+TEST(auth_completion_resumes_on_connection_executor) {
+    struct DeferredAuthenticator final : IAccountAuthenticator {
+        Complete pending;
+        void login_async(const std::string&, const std::string&, Complete complete, bool) override {
+            pending = std::move(complete);
+        }
+    };
+    auto authenticator = std::make_shared<DeferredAuthenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    auto executor = std::make_shared<test::ManualExecutor>();
+    auto connection = std::make_unique<MockConnection>(executor);
+    auto session = std::make_shared<SmtpsSession<MockConnection>>(
+        fx.server.get(), std::move(connection), fx.fsm);
+    int completed = 0;
+    fx.fsm->auth_user_async(session, "user0@test.local", "test123",
+        [&](bool ok, int shard) {
+            assert(executor->running); // A service/DB thread cannot reenter the protocol.
+            assert(ok && shard == 3);
+            ++completed;
+        });
+    assert(session->is_paused() && authenticator->pending && completed == 0);
+    AccountAuthResult result;
+    result.ok = true;
+    result.shard = 3;
+    auto complete = std::move(authenticator->pending);
+    complete(std::move(result)); // Simulate a service/DB completion outside the executor.
+    assert(completed == 0 && executor->tasks.size() == 1);
+    executor->drain();
+    assert(completed == 1);
+    session->close();
+    executor->drain();
+    session.reset();
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] auth_completion_resumes_on_connection_executor" << std::endl;
+}
+
 TEST(auth_from_alias_case_normalized_accepted_at_data_end) {
     // 规则 3 别名分支大小写规范化：别名目标大小写与登录账号不同也命中
     fx.fsm->m_aliasCache->put("casealias@test.local", {"User0@Test.LOCAL"});
@@ -1362,6 +1400,7 @@ int main() {
         test_auth_from_mismatch_rejected_at_data_end(fx);
         test_auth_from_match_accepted_at_data_end(fx);
         test_auth_from_alias_accepted_at_data_end(fx);
+        test_auth_completion_resumes_on_connection_executor(fx);
         test_auth_from_alias_case_normalized_accepted_at_data_end(fx);
         test_auth_from_alias_miss_rejected_at_data_end(fx);
         test_auth_from_alias_db_unavailable_fails_closed_at_data_end(fx);
