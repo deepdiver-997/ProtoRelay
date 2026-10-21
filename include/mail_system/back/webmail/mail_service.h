@@ -289,7 +289,7 @@ private:
             return;
         }
         provider->async_read_all(body_path,
-            [this, ctx, body_path](bool ok, std::string raw, const pr::storage::IoError& error) mutable {
+            [this, ctx, body_path, provider](bool ok, std::string raw, const pr::storage::IoError& error) mutable {
                 if (!ok || raw.empty()) {
                     LOG_AT("WEBAPI", warn, "message {}: body read failed ({})",
                            ctx->detail.id, error.message);
@@ -298,7 +298,7 @@ private:
                     return;
                 }
                 ctx->detail.body_available = true;
-                fill_body(ctx->detail, body_path, raw);
+                fill_body(ctx->detail, body_path, raw, provider);
                 ctx->detail.ok = true;
                 ctx->cb(std::move(ctx->detail));
             });
@@ -307,9 +307,11 @@ private:
     // MIME 取材：sidecar 优先（miss 则现场解析并回写，与 IMAP 同一份缓存）。
     // 纯文本兜底：无 MIME 树的旧邮件按"顶层 header 后全文"处理。
     static void fill_body(MessageDetail& st, const std::string& body_path,
-                          const std::string& raw) {
+                          const std::string& raw,
+                          const std::shared_ptr<pr::storage::IStorageProvider>& provider) {
         MimePart tree;
-        if (!ensure_mime_tree(body_path, raw, tree)) {
+        auto metadata = mime_metadata_store_for(provider);
+        if (!ensure_mime_tree(metadata, body_path, raw, tree)) {
             size_t sep = raw.find("\r\n\r\n");
             if (sep == std::string::npos) sep = raw.find("\n\n");
             if (sep != std::string::npos) {

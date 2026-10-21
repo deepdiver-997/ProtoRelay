@@ -1176,7 +1176,8 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
                                             [](const imap_utils::ImapBodySection& s) {
                                                 return !s.path.empty();
                                             });
-        const bool have_tree = need_parts && ensure_mime_tree(mail_info.body_path, body_content, mime_tree);
+        auto metadata = mime_metadata_store_for(c.provider);
+        const bool have_tree = need_parts && ensure_mime_tree(metadata, mail_info.body_path, body_content, mime_tree);
         for (const auto& section : c.body_sections) {
             std::string part_content;
             const std::string* content = &body_content;
@@ -1197,7 +1198,8 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
     if (c.want_body_struct) {
         if (c.struct_sidecar_hit) {
             c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree, body_content) + " ";
-        } else if (ensure_mime_tree(mail_info.body_path, body_content, c.struct_tree)) {
+        } else if (auto metadata = mime_metadata_store_for(c.provider);
+                   ensure_mime_tree(metadata, mail_info.body_path, body_content, c.struct_tree)) {
             c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree, body_content) + " ";
         } else {
             c.cur += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
@@ -1249,10 +1251,11 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
             std::to_string(mail_info.mail_id)) + " ";
     }
 
-    // BODYSTRUCTURE 先试 sidecar（本地小文件，同步读即可）
+    // Metadata caching is an explicit provider capability; remote keys are never local paths.
     ctx->struct_sidecar_hit = false;
     if (ctx->want_body_struct) {
-        ctx->struct_sidecar_hit = load_mime_tree(mail_info.body_path, ctx->struct_tree) &&
+        auto metadata = mime_metadata_store_for(ctx->provider);
+        ctx->struct_sidecar_hit = load_mime_tree(metadata, mail_info.body_path, ctx->struct_tree) &&
                                   ctx->struct_tree.metadata_version >= kMimeMetadataVersion;
     }
     // rfc822 部件的 BODYSTRUCTURE 需要内嵌消息头（ENVELOPE），sidecar 只存结构
@@ -2233,6 +2236,9 @@ std::string search_read_body(const std::shared_ptr<storage::IStorageProvider>& s
         storage::IoError err;
         std::string data;
         if (storage->read_all(body_path, data, err)) return data;
+        // A provider failure is not permission to interpret its opaque key as a local path.
+        LOG_FILE_IO_ERROR("Failed to read SEARCH body {}: {}", body_path, err.message);
+        return {};
     }
     std::ifstream in(body_path, std::ios::binary);
     if (!in.is_open()) return {};

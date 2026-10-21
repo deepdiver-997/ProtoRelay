@@ -2,6 +2,7 @@
 #define PR_FRAMEWORK_STORAGE_ASYNC_STORAGE_PROVIDER_H
 
 #include "framework/storage/i_storage_provider.h"
+#include "framework/storage/i_object_metadata_cache.h"
 
 #include <functional>
 #include <memory>
@@ -61,7 +62,7 @@ private:
     Executor executor_;
 };
 
-class AsyncStorageProvider : public IStorageProvider {
+class AsyncStorageProvider : public IStorageProvider, public IObjectMetadataCache {
 public:
     using Executor = AsyncCommitStream::Executor;
 
@@ -70,6 +71,18 @@ public:
         : inner_(std::move(inner)), executor_(std::move(executor)) {}
 
     bool ensure_ready(IoError& error) override { return inner_->ensure_ready(error); }
+
+    bool load_metadata(const std::string& key, const std::string& name, std::string& value) override {
+        auto cache = std::dynamic_pointer_cast<IObjectMetadataCache>(inner_);
+        if (!cache) { value.clear(); return false; }
+        return cache->load_metadata(key, name, value);
+    }
+    bool save_metadata(const std::string& key, const std::string& name,
+                       const std::string& value) override {
+        auto cache = std::dynamic_pointer_cast<IObjectMetadataCache>(inner_);
+        return cache && cache->save_metadata(key, name, value);
+    }
+
 
     std::string build_mail_body_key(std::uint64_t mail_id) override {
         return inner_->build_mail_body_key(mail_id);

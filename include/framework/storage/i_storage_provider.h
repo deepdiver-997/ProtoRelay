@@ -4,9 +4,6 @@
 #include "framework/storage/i_read_stream.h"
 #include "framework/storage/i_download_stream.h"
 #include "framework/storage/i_write_stream.h"
-#include "framework/storage/buffered_upload_stream.h"
-#include "framework/storage/local_file_read_stream.h"
-#include "framework/storage/local_file_write_stream.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,9 +20,6 @@ namespace storage {
 using pr::IReadStream;
 using pr::IWriteStream;
 using pr::BufferedReadStream;
-using pr::BufferedUploadStream;
-using pr::LocalFileWriteStream;
-using pr::MappedReadStream;
 using CommitCallback = pr::IWriteStream::CommitCallback;
 using pr::IoError;
 

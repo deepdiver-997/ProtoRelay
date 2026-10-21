@@ -130,7 +130,8 @@ struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation
     }
     void enqueue() {
         parse_mime_tree(request.raw, data->mime_root);
-        if (!save_mime_tree(data->body_path, data->mime_root))
+        auto metadata = mime_metadata_store_for(storage);
+        if (!save_mime_tree(metadata, data->body_path, data->mime_root))
             LOG_AT("SUBMISSION", warn, "MIME sidecar save failed mail_id={}", data->id);
         auto path = data->body_path;
         request.raw.clear();
