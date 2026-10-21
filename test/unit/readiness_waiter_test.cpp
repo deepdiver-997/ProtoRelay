@@ -4,6 +4,9 @@
 #include "framework/net/asio_executor.h"
 #include <boost/asio/io_context.hpp>
 #include <fcntl.h>
+#include <csignal>
+#include <pthread.h>
+#include <thread>
 #include <unistd.h>
 
 int main() {
@@ -33,6 +36,22 @@ int main() {
     assert(calls == 1);
     char byte;
     assert(::read(handles[0], &byte, 1) == 1);
+    // A signal does not make a borrowed descriptor readable.
+    struct sigaction previous{}, interrupt{};
+    interrupt.sa_handler = +[](int) {};
+    sigemptyset(&interrupt.sa_mask);
+    assert(::sigaction(SIGUSR1, &interrupt, &previous) == 0);
+    const auto owner = ::pthread_self();
+    std::thread interrupt_then_write([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        assert(::pthread_kill(owner, SIGUSR1) == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        assert(::write(handles[1], "b", 1) == 1);
+    });
+    assert(poll->wait({handles[0], ReadyRead, std::chrono::milliseconds(1000)}).events == ReadyRead);
+    assert(::read(handles[0], &byte, 1) == 1 && byte == 'b');
+    interrupt_then_write.join();
+    assert(::sigaction(SIGUSR1, &previous, nullptr) == 0);
     io.restart();
     waiter->async_wait({handles[0], ReadyRead, std::chrono::milliseconds(1)}, [&](ReadinessResult result) {
         assert(!result.error && result.events == ReadyTimeout);

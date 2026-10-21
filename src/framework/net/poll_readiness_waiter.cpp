@@ -19,13 +19,24 @@ public:
         if (io & ReadyWrite) descriptor.events |= POLLOUT;
         if (io & ReadyExcept) descriptor.events |= POLLPRI;
         const auto timeout = request.timeout.count();
-        const int milliseconds = timeout < 0 ? -1 : static_cast<int>(timeout > INT_MAX ? INT_MAX : timeout);
-        const int count = ::poll(io ? &descriptor : nullptr, io ? 1 : 0, milliseconds);
-        if (count < 0) {
-            if (errno == EINTR) return {request.events, {}};
-            return {0, std::error_code(errno, std::generic_category())};
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeout < 0 ? 0 : timeout);
+        long long remaining = timeout;
+        int count = 0;
+        for (;;) {
+            const int milliseconds = remaining < 0 ? -1 :
+                static_cast<int>(remaining > INT_MAX ? INT_MAX : remaining);
+            count = ::poll(io ? &descriptor : nullptr, io ? 1 : 0, milliseconds);
+            if (count > 0) break;
+            if (count < 0 && errno != EINTR)
+                return {0, std::error_code(errno, std::generic_category())};
+            if (timeout >= 0) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) return {ReadyTimeout, {}};
+                remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            }
+            // Retry interruption without claiming readiness or extending the deadline.
         }
-        if (count == 0) return {ReadyTimeout, {}};
         unsigned ready = 0;
         if (descriptor.revents & POLLIN) ready |= ReadyRead;
         if (descriptor.revents & POLLOUT) ready |= ReadyWrite;
