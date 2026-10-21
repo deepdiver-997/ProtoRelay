@@ -1,6 +1,7 @@
 #ifndef PR_FRAMEWORK_TCP_SERVER_BASE_H
 #define PR_FRAMEWORK_TCP_SERVER_BASE_H
 #include "framework/server_base.h"
+#include "framework/log/log_macros.h"
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/net/server_transport.h"
