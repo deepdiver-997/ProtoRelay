@@ -165,6 +165,7 @@ $RECYCLE.BIN/
 # 每个 worktree 的身份/独占资源文件，以及本机参数；共享运行态在 .git/agents/ 下天然不入库
 .agent-env
 tools/agents/agents.conf
+tools/agents/harnesses.conf.local
 
 # 测试环境（由 setup_test_env.py 生成）
 test/config/crt/

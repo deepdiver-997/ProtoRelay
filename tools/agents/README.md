@@ -123,6 +123,32 @@ worktree 共享用户级缓存，新 worktree 的冷构建大部分命中。hub 
 想让它们也用：`USE_CCACHE=1 ./build.sh Release`（一次性）；`USE_CCACHE=0` 关闭并撤掉 launcher。
 默认缓存上限是 5 GiB，多个 worktree 并用建议放大：`ccache -M 20G`。
 
+## 无头派发（spawn.sh）
+
+把一个粗粒度任务交给任意 harness（claude / codex / gemini / dummy）无头执行，人不在场：
+
+```bash
+tools/agents/spawn.sh start claude smtp-dedup task.md --new   # 没有工作区就先建
+tools/agents/spawn.sh status smtp-dedup                       # 运行状态 / session id / 最新输出
+tools/agents/spawn.sh resume smtp-dedup "方向改一下：先写测试"   # 追加指令（同一会话续话）
+tools/agents/spawn.sh stop smtp-dedup
+```
+
+设计立场（也是"交互问题"的答案）：
+
+- **编排是哑的**：spawn.sh 只负责派发和收割，不做任何智能决策；派什么活由人（或编排会话）决定。
+- **任务粒度是粗的**：一次调用 = 一个有完成标准的任务（构建绿 + 单测绿 + 报告落盘）。运行中不插话，
+  纠偏靠 `resume`（同 session 续话）——agent 拿着完整上下文继续，而不是被实时打断。
+- **沟通媒介是磁盘和 git**：提示词要求 agent 把最终报告写到 run 目录的 `report.md`
+  （`.git/agents/runs/<name>/<ts>/`），改动留在 `feat/<name>` 分支。跨 agent 协作 = 各自分支 + 各自报告，合并时对质。
+- 每个 run 落一个目录：`task.md` / `prompt.txt` / `stream.log`（JSONL）/ `meta` / `exit` / `report.md`。
+
+适配表在 `tools/agents/harnesses.conf`：每家 harness 两个函数（起跑命令、resume 命令）+ 通用 session id
+提取。本机微调写 `harnesses.conf.local`（gitignored）覆盖同名函数或变量（如 `CLAUDE_PERM_ARGS`、
+`CODEX_SANDBOX`）。无头运行没人批权限：claude 默认 `--dangerously-skip-permissions`、codex 默认
+`--sandbox workspace-write`——安全栏杆就是 AGENTS.md 红线 + build.sh 全局锁/生产拦截/STOP 哨兵，这套
+约定对无头 agent 同样生效。`--light` 跳过"构建+全量单测"完成标准（冒烟/轻任务用）。
+
 ## 本机参数
 
 `cp tools/agents/agents.conf.example tools/agents/agents.conf` 后按需改：`AGENTS_DIR`、`BASE_BRANCH`、

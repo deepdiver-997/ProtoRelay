@@ -63,6 +63,26 @@ if [ -n "${orphans}" ]; then
     printf '\n\033[1;33m孤儿分配记录（有资源记录、无 worktree）：%s\033[0m\n  释放：tools/agents/remove-worktree.sh <name>\n' "${orphans}"
 fi
 
+printf '\n-- 无头会话（tools/agents/spawn.sh）--\n'
+if ls "${STATE_DIR}/runs"/*/current >/dev/null 2>&1; then
+    printf '%-14s %-8s %-10s %-8s %-22s %s\n' "name" "harness" "状态" "exit" "session" "最新输出"
+    for d in "${STATE_DIR}/runs"/*/current; do
+        [ -L "${d}" ] || continue
+        n="$(basename "$(dirname "${d}")")"
+        rd="$(readlink "${d}")"
+        pid="$(alloc_field "${rd}/meta" PID)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then st="运行中"; else st="已结束"; fi
+        ec="$(cat "${rd}/exit" 2>/dev/null || printf '-')"
+        sid="$(grep -oE '"(session_id|thread_id|conversation_id)": *"[^"]*"' "${rd}/stream.log" 2>/dev/null | head -1 | cut -d'"' -f4)"
+        last="$(tail -n 1 "${rd}/stream.log" 2>/dev/null | cut -c1-60)"
+        printf '%-14s %-8s %-10s %-8s %-22s %s\n' "${n}" "$(alloc_field "${rd}/meta" HARNESS)" "${st}" "exit=${ec}" \
+            "${sid:+$(printf '%.18s…' "${sid}")}${sid:-$(printf '%.18s' "$(alloc_field "${rd}/meta" STARTED)")}" "${last}"
+    done
+    printf '  详情: tools/agents/spawn.sh status <name>   续话: spawn.sh resume <name> "指令"\n'
+else
+    printf '  （没有派发记录）\n'
+fi
+
 printf '\n-- 最近构建（.git/agents/build-history.tsv）--\n'
 if [ -f "${STATE_DIR}/build-history.tsv" ]; then
     tail -n 6 "${STATE_DIR}/build-history.tsv" | awk -F'\t' '{ n=split($2,a,"/"); printf "  %s  %-16s %-28s %-6s %s\n", $1, a[n], $3, $4, $5 }'
