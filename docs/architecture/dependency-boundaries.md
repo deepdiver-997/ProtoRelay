@@ -8,6 +8,8 @@
 - 邮件配置位于 `mail_system/back/server_config.h`；旧 `framework/server_config.h` 仅保留应用兼容入口，框架实现不得引用它取得邮件类型。
 - SMTP 客户端通过 `IClientTransport`、`IExecutor`、`ITimer` 工作。CA 与主机名是配置数据，Asio socket、resolver、SSL context 只存在于后端适配器。
 - 认证由可注入的 `IAccountAuthenticator` 统一承担；SMTP/Webmail 的 `AccountPolicy` 与 IMAP/POP3 委托同一实现，保留缓存、Worker 密码验证、fresh 重读、CAS rehash 和 last-login 顺序。
+- 账户持久化由 `IAccountRepository` 提供，认证上下文在初读、密码 CAS、fresh 重读与 last-login 链中持有同一连接。认证服务保留密码验证和缓存策略，配额仓储封装原子更新及同连接计数，submission 复用账户查询。
+- POP3 邮箱和分布式锁分别通过窄仓储操作，协议保留快照、DELE 标记、Worker 与定时器。已知写入失败停止后续写入，QUIT 在删除及释放锁完成后回到所属 executor 响应。
 - IMAP 常用邮箱读取由 `IMailboxRepository` 返回业务 DTO，SQL 与列映射在实现中。连接租约继续贯穿既有协议/写操作链，UTF-7 解码留在协议适配器。
 - IMAP 消息写操作由 `IImapMutationRepository` 承担，STORE 属性链、COPY/MOVE 的复制计数及源标删、EXPUNGE 使用明确请求/结果。协议层保留序号解析、响应和缓存失效，最终写操作续作回到 session executor；写失败返回 NO，不提前报告属性或删除成功。
 - IMAP APPEND 通过独立服务编排 Worker 正文存储、元数据仓储及失败补偿；FETCH 元数据与文件夹操作分别使用消息、文件夹仓储，协议模板不直接构造 SQL 或解释数据库结果。
@@ -49,7 +51,6 @@
 
 ## 后续范围
 
-- 抽离 POP3 邮箱与分布式锁查询，以及共享认证、配额和别名的持久化；保持各协议的响应、排序、缓存与权限规则。
 - 隔离持久化队列的数据库操作及具体队列实现，保留压力控制、持久化确认、事务和关闭语义。
 - 邮件正文/附件 key 生成接口当前保留兼容方法，后续可在所有提供者迁移后移到邮件对象布局策略。
 - 原生网络运行时、SQLite、持久化队列中 Boost lockfree 的替换仍是独立工作；移除 Asio 不代表已经移除全部 Boost，也不保证 SQL 方言可移植。
@@ -76,8 +77,7 @@ BUILD_DIR=build/contracts bash test/run_all_tests.sh --no-build
 
 | 方向 | 可并发性与前置条件 |
 |---|---|
-| POP3 邮箱/锁仓储 | 可与共享账户仓储并发；连接租约、锁持有者与 QUIT 删除语义需保持 |
-| 账户认证/配额仓储 | 可独立开始；保持 CAS 密码升级、同连接配额更新和缓存语义 |
+| 持久化事务仓储/队列实现 | 可与对象布局策略并发；持久化确认、去重、出站记录和关闭顺序由统一回归约束 |
 | 对象 key 布局策略 | 可与上述两项并发；保持旧 key 可读，集中由一个 agent 修改提供者公共接口 |
 | 原生网络后端 | 可基于现有连接/执行器/定时器/传输契约独立开发，复用相同契约测试 |
 | SQLite 等数据库后端 | 驱动可并发验证；业务 SQL 方言适配需等仓储接口和事务语义稳定 |
