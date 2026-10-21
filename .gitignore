@@ -74,7 +74,6 @@ config/db_config.json
 config/db_config_mail2.json
 config/db_config_local.json
 config/*_local.json
-smtps_test.sh
 
 # SSL 证书和私钥
 config/crt/*.key
@@ -158,7 +157,14 @@ $RECYCLE.BIN/
 !test/bench/*/profile.sh
 !test/run_all_tests.sh
 !scripts/generate_dkim_keys.sh
+!scripts/generate_server_cert.sh
 !scripts/clear_mysql_mail_data.sh
+!tools/agents/*.sh
+
+# ==================== 多 agent 并行工作区（tools/agents/）====================
+# 每个 worktree 的身份/独占资源文件，以及本机参数；共享运行态在 .git/agents/ 下天然不入库
+.agent-env
+tools/agents/agents.conf
 
 # 测试环境（由 setup_test_env.py 生成）
 test/config/crt/
@@ -172,7 +178,6 @@ test/config/smtps_mock.json
 test/config/imaps_mock.json
 test/config/smtps_real.json
 test/config/imaps_real.json
-test/config/cleanup_test_env.sh
 .gitignore
 .dockerignore
 

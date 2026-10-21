@@ -35,6 +35,120 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+# ---- 仓库拓扑：hub（主检出）还是 agent worktree ----
+# 多 agent 并行方案（tools/agents/）里每个 agent 在独立 `git worktree` 中工作，
+# 跨 worktree 共享的运行态（构建锁、构建历史、STOP 哨兵）统一放主仓库 .git/agents/。
+# 判定：linked worktree 的 --git-dir 是 <hub>/.git/worktrees/<name>，与 --git-common-dir
+# （<hub>/.git）不同；主检出两者相同。不在 git 检出内（如 Docker 构建上下文）时全部为空。
+_git_abs() {
+    local p
+    p="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute "$1" 2>/dev/null || true)"
+    if [ -z "$p" ]; then
+        p="$(git -C "$SCRIPT_DIR" rev-parse "$1" 2>/dev/null || true)"
+        if [ -n "$p" ]; then
+            p="$(cd "$SCRIPT_DIR" && cd "$p" 2>/dev/null && pwd || true)"
+        fi
+    fi
+    printf '%s' "$p"
+}
+REPO_TOPLEVEL="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+GIT_DIR_ABS="$(_git_abs --git-dir)"
+GIT_COMMON_DIR_ABS="$(_git_abs --git-common-dir)"
+IN_AGENT_WORKTREE=0
+if [ -n "$GIT_DIR_ABS" ] && [ -n "$GIT_COMMON_DIR_ABS" ] && [ "$GIT_DIR_ABS" != "$GIT_COMMON_DIR_ABS" ]; then
+    IN_AGENT_WORKTREE=1
+fi
+AGENTS_STATE_DIR=""
+if [ -n "$GIT_COMMON_DIR_ABS" ]; then
+    AGENTS_STATE_DIR="${GIT_COMMON_DIR_ABS}/agents"
+fi
+
+# ---- 全局构建锁（hub 与所有 worktree 共用一把）----
+# 同一台机器同一时刻只跑一个编译任务：本项目不小、机器上可能还有别的项目在跑，
+# 串行编译几乎不浪费时间，却能避免多个 agent 同时 -j 编译把内存打爆。
+# mkdir 原子抢锁；锁目录内记录 pid / worktree / 起始时间；持有者进程已退出且锁龄
+# 超过 60s 视为陈旧自动清理。无人争用时即时获取、脚本退出即释放，单人使用行为不变。
+#   BUILD_LOCK_WAIT=<秒>   最长等待（默认 3600），超时退出码 75
+#   BUILD_LOCK_DISABLE=1   跳过加锁（仅调试用）
+BUILD_LOCK_WAIT="${BUILD_LOCK_WAIT:-3600}"
+BUILD_LOCK_DIR=""
+BUILD_LOCK_HELD=0
+BUILD_STARTED_AT=""
+if [ -n "$AGENTS_STATE_DIR" ]; then
+    BUILD_LOCK_DIR="${AGENTS_STATE_DIR}/build.lock"
+fi
+
+_path_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || date +%s
+}
+
+acquire_build_lock() {
+    if [ "${BUILD_LOCK_DISABLE:-0}" = "1" ]; then
+        print_warning "BUILD_LOCK_DISABLE=1: skipping the global build lock"
+        return 0
+    fi
+    if [ -z "$BUILD_LOCK_DIR" ] || ! mkdir -p "$AGENTS_STATE_DIR" 2>/dev/null; then
+        print_warning "Not inside a writable git checkout; building without the global build lock"
+        return 0
+    fi
+    local waited=0 holder_pid holder_wt age
+    until mkdir "$BUILD_LOCK_DIR" 2>/dev/null; do
+        holder_pid="$(cat "${BUILD_LOCK_DIR}/pid" 2>/dev/null || true)"
+        holder_wt="$(cat "${BUILD_LOCK_DIR}/worktree" 2>/dev/null || true)"
+        age=$(( $(date +%s) - $(_path_mtime "$BUILD_LOCK_DIR") ))
+        if [ "$age" -gt 60 ] && { [ -z "$holder_pid" ] || ! kill -0 "$holder_pid" 2>/dev/null; }; then
+            print_warning "Removing stale build lock (holder pid ${holder_pid:-?} is gone, age ${age}s)"
+            rm -rf "$BUILD_LOCK_DIR"
+            continue
+        fi
+        if [ "$waited" -ge "$BUILD_LOCK_WAIT" ]; then
+            print_warning "Timed out after ${waited}s waiting for the global build lock"
+            echo "  Holder: pid ${holder_pid:-?} in ${holder_wt:-?}"
+            echo "  Lock:   ${BUILD_LOCK_DIR} (removed automatically 60s after the holder exits)"
+            exit 75
+        fi
+        if [ $((waited % 30)) -eq 0 ]; then
+            print_info "Waiting for the global build lock: held by pid ${holder_pid:-?} in ${holder_wt:-?} (${waited}s)..."
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "$$" > "${BUILD_LOCK_DIR}/pid"
+    echo "${REPO_TOPLEVEL:-$SCRIPT_DIR}" > "${BUILD_LOCK_DIR}/worktree"
+    echo "${BUILD_ARGS_SUMMARY:-}" > "${BUILD_LOCK_DIR}/cmd"
+    date +%s > "${BUILD_LOCK_DIR}/since"
+    BUILD_LOCK_HELD=1
+    BUILD_STARTED_AT="$(date +%s)"
+}
+
+release_build_lock() {
+    [ "$BUILD_LOCK_HELD" = "1" ] || return 0
+    if [ "$(cat "${BUILD_LOCK_DIR}/pid" 2>/dev/null)" = "$$" ]; then
+        rm -rf "$BUILD_LOCK_DIR"
+    fi
+    BUILD_LOCK_HELD=0
+}
+
+# 一行构建历史（时间 / 检出 / 类型 / 退出码 / 耗时），tools/agents/status.sh 用来显示最近构建
+_record_build_history() {
+    [ -n "$AGENTS_STATE_DIR" ] && [ -n "$BUILD_STARTED_AT" ] || return 0
+    local dur=$(( $(date +%s) - BUILD_STARTED_AT ))
+    printf '%s\t%s\t%s\trc=%s\t%ss\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${REPO_TOPLEVEL:-$SCRIPT_DIR}" \
+        "${BUILD_ARGS_SUMMARY:-?}" "$1" "$dur" >> "${AGENTS_STATE_DIR}/build-history.tsv" 2>/dev/null || true
+}
+
+# 统一的 EXIT 处理：cross-x64 若临时挪走了 Homebrew 目录先还原，再记历史、放锁。
+# 脚本内不要再单独 `trap ... EXIT` 覆盖它。
+_build_exit_handler() {
+    local rc=$?
+    if declare -F _restore_masks >/dev/null 2>&1; then
+        _restore_masks
+    fi
+    _record_build_history "$rc"
+    release_build_lock
+    exit "$rc"
+}
+
 cleanup_root_cmake_artifacts() {
     local root_artifacts=(
         "${SCRIPT_DIR}/CMakeCache.txt"
@@ -106,12 +220,22 @@ if [ "$#" -lt 1 ]; then
     echo "              CROSS_SYSROOT=<path>, CROSS_SYSROOT_SERVER=<ssh-host>"
     echo "              SERIAL_JOBS=<n>  # per-target 并行度（默认 4，可被数字参数覆盖）"
     echo "              PURE_LOG_DIR=<path>  # 纯日志变换输出目录"
+    echo "              USE_CCACHE=<auto|1|0> # auto: 新构建目录自动用 ccache，老目录不碰；1 强制开；0 关"
+    echo "              BUILD_LOCK_WAIT=<秒> # 全局构建锁最长等待（默认 3600；hub+所有 worktree 同时只跑一个构建）"
+    echo ""
+    echo "Multi-agent: 每个 agent 在独立 git worktree 里工作（tools/agents/，规则见 AGENTS.md）；"
+    echo "             worktree 内禁止 cross-x64 / object-only / sync-sysroot（生产部署链）。"
     echo ""
     exit 1
 fi
 
 # ---- sync-sysroot 子命令 ----
 if [ "$1" = "sync-sysroot" ]; then
+    if [ "$IN_AGENT_WORKTREE" = "1" ]; then
+        print_warning "Refusing 'sync-sysroot' from an agent worktree: it talks to the production server"
+        echo "  Multi-agent sessions must never touch production (see AGENTS.md). Run this from the hub checkout."
+        exit 77
+    fi
     SERVER="${2:-${CROSS_SYSROOT_SERVER}}"
     SYSROOT="$CROSS_SYSROOT"
     echo -e "${BLUE}[INFO]${NC} Syncing sysroot headers from ${SERVER}..."
@@ -132,6 +256,7 @@ if [ "$1" = "sync-sysroot" ]; then
 fi
 
 BUILD_TYPE="$1"
+BUILD_ARGS_SUMMARY="$*"
 CLEAN_BUILD=""
 USER_JOBS=""
 BUILD_OBJECT_ONLY="OFF"
@@ -160,6 +285,23 @@ for arg in "${@:2}"; do
         exit 1
     fi
 done
+
+# ---- agent worktree 红线：不碰生产 ----
+# cross-x64 / object-only 是对象部署链（产物给线上用，还会临时挪动 Homebrew 目录），
+# 多 agent 并行会话一律不允许；只有 hub 主检出里的人可以跑。
+# .git/agents/STOP 哨兵存在时，worktree 里的新构建也一律拒绝（给人一个紧急刹车）。
+if [ "$IN_AGENT_WORKTREE" = "1" ]; then
+    if [ "$CROSS_X64_LINUX" = "ON" ] || [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
+        print_warning "Refusing '${BUILD_ARGS_SUMMARY}' from an agent worktree: cross-x64 / object-only are production deployment paths"
+        echo "  Worktree: ${REPO_TOPLEVEL}"
+        echo "  Multi-agent sessions must never touch production (see AGENTS.md); run such builds from the hub only."
+        exit 77
+    fi
+    if [ -n "$AGENTS_STATE_DIR" ] && [ -e "${AGENTS_STATE_DIR}/STOP" ]; then
+        print_warning "STOP sentinel present (${AGENTS_STATE_DIR}/STOP): agent builds are paused by the operator"
+        exit 76
+    fi
+fi
 
 # 不同编译模式使用独立的构建目录，避免 host/cross 切换时互相清缓存
 if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
@@ -254,6 +396,12 @@ if [[ "$BUILD_TYPE" == "Asan" ]]; then
     SAFE_CMAKE_ARGS+=("-DCMAKE_CXX_FLAGS_RELEASE=-O1 -g${ASAN_GLEVEL} -DNDEBUG -fno-omit-frame-pointer")
     SAFE_CMAKE_ARGS+=("-DCMAKE_C_FLAGS_RELEASE=-O1 -g${ASAN_GLEVEL} -DNDEBUG -fno-omit-frame-pointer")
 fi
+
+# ---- 从这里开始会改动构建目录 / 占用编译资源：先拿全局构建锁 ----
+trap _build_exit_handler EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+acquire_build_lock
 
 # 清理构建目录（可选）
 if [ "$CLEAN_BUILD" = "clean" ]; then
@@ -400,7 +548,8 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
         for _d in "${_MASKS[@]}"; do
             mv "$_d" "${_d}.bak"
         done
-        # 确保在脚本退出（正常/异常）时恢复
+        # 异常退出时由统一的 _build_exit_handler（EXIT trap）调用 _restore_masks 还原；
+        # 这里不要再 trap EXIT，否则会覆盖掉锁释放。
         _restore_masks() {
             for _d in "${_MASKS[@]}"; do
                 if [ -e "${_d}.bak" ] && [ ! -e "$_d" ]; then
@@ -408,7 +557,6 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
                 fi
             done
         }
-        trap _restore_masks EXIT
     fi
 
     # Cross mode commonly lacks target libcurl development files on macOS hosts.
@@ -443,6 +591,32 @@ if [ -n "$GENERATOR" ]; then
     cmake_args+=( -G "$GENERATOR" )
 fi
 
+# ---- ccache：hub 与所有 worktree 共享编译缓存，新 worktree 的冷构建近乎免费 ----
+# USE_CCACHE=auto（默认）：新建的构建目录、以及已经在用 ccache 的目录自动启用；
+#                          已有但没用过 ccache 的老目录不碰（否则会触发一次全量重编），只提示。
+# USE_CCACHE=1：对当前目录强制启用（接受一次全量重编）。USE_CCACHE=0：关闭并撤掉 launcher。
+# EXTRA_CMAKE_ARGS 里已显式给了 *_COMPILER_LAUNCHER 时不干预。
+USE_CCACHE="${USE_CCACHE:-auto}"
+if [[ "$EXTRA_CMAKE_ARGS_STR" != *"COMPILER_LAUNCHER"* ]]; then
+    if [ "$USE_CCACHE" = "0" ]; then
+        cmake_args+=( -UCMAKE_C_COMPILER_LAUNCHER -UCMAKE_CXX_COMPILER_LAUNCHER )
+    elif command -v ccache >/dev/null 2>&1; then
+        _ccache_fresh_dir=1
+        _ccache_already_on=0
+        if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+            _ccache_fresh_dir=0
+            if grep -q '^CMAKE_CXX_COMPILER_LAUNCHER:.*=ccache$' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
+                _ccache_already_on=1
+            fi
+        fi
+        if [ "$USE_CCACHE" = "1" ] || [ "$_ccache_fresh_dir" = "1" ] || [ "$_ccache_already_on" = "1" ]; then
+            cmake_args+=( -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache )
+        else
+            print_info "ccache is installed but left off for this existing build dir (enabling = one-time full rebuild); opt in with USE_CCACHE=1"
+        fi
+    fi
+fi
+
 if [ -n "$EXTRA_CMAKE_ARGS_STR" ]; then
     # shellcheck disable=SC2206
     user_extra_args=( $EXTRA_CMAKE_ARGS_STR )
@@ -455,7 +629,6 @@ cmake "${cmake_args[@]}"
 
 # ---- 恢复 Homebrew（cmake configure 完成后即可恢复） ----
 if [ ${#_MASKS[@]} -gt 0 ]; then
-    trap - EXIT  # 取消 trap，手动恢复
     for _d in "${_MASKS[@]}"; do
         if [ -e "${_d}.bak" ] && [ ! -e "$_d" ]; then
             mv "${_d}.bak" "$_d"

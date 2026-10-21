@@ -1,0 +1,22 @@
+# tools/agents/agents.conf —— 本机参数。拷一份：cp agents.conf.example agents.conf（agents.conf 已 gitignore）
+# 全部可省略，省略即默认值。被 lib.sh 以 bash 语法 source，只写 KEY=VALUE。
+
+# worktree 存放目录（默认 <hub 的父目录>/agents，即与 v8/ 并列的 agents/）
+#AGENTS_DIR=/Users/me/code/c++/project/mail-system/agents
+
+# 新 worktree 的基准分支
+#BASE_BRANCH=main
+
+# build.sh 等全局构建锁的最长秒数（hub + 所有 worktree 同时只跑一个构建）
+#BUILD_LOCK_WAIT=3600
+
+# 装了 ccache 就自动启用；0 关闭
+#USE_CCACHE=auto
+
+# 端口分配：agent N 默认拿 [START + N*SIZE, +SIZE) 这一段；被占则整段后移
+#PORT_BLOCK_START=20000
+#PORT_BLOCK_SIZE=100
+
+# 临时目录 / 数据库名前缀（后接 AGENT_INDEX）
+#TMP_ROOT_PREFIX=/tmp/protorelay_agent_
+#DB_NAME_PREFIX=mail_agent_

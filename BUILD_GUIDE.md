@@ -51,6 +51,16 @@
 BUILD_JOBS=1 ./build.sh Release
 ```
 
+`build.sh` 还有三件事是自动的，单人使用不用管：
+
+- **全局构建锁**：hub 与所有 `git worktree` 同一时刻只跑一个编译（`mkdir .git/agents/build.lock` 原子锁，
+  陈旧锁 60s 自动清扫）。被占时会打印 `Waiting for the global build lock ...`，`BUILD_LOCK_WAIT` 控制最长等待。
+- **ccache**：本机装了 `ccache` 时，新建的构建目录自动启用并跨 worktree 共享缓存；已有的老目录不碰
+  （`USE_CCACHE=1` 显式开启，会触发一次全量重编；`USE_CCACHE=0` 关闭）。
+- **worktree 生产拦截**：在 agent worktree 里 `cross-x64` / `object-only` / `sync-sysroot` 会被直接拒绝。
+
+多 agent 并行开发（每个 agent 独立 worktree、端口段、测试库）见 [`tools/agents/README.md`](tools/agents/README.md)。
+
 ### 手动 CMake 命令
 
 ```bash

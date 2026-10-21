@@ -70,6 +70,8 @@ API/会话以邮件业务架构文档为准；前端运行见 [webmail/README.md
 - **找某协议设计**：进 `mail-system/architecture/`。
 - **找某次事故复盘**：`mail-system/bugfixes/`（业务）或 `bugfixes/`（框架）。
 - **找覆盖率数据**：`reports/`。
+- **多个 AI agent 并行开发**：根目录 [`AGENTS.md`](../AGENTS.md)（agent 会话规则）与
+  [`tools/agents/README.md`](../tools/agents/README.md)（worktree / 构建锁 / 端口与库隔离的设计和日常流程）。
 
 新 bugfix 文档按 `YYYY-MM-DD-简短描述.md` 格式命名；邮件业务相关的放
 `mail-system/bugfixes/`，框架级的放 `bugfixes/`。
