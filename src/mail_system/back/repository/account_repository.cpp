@@ -38,6 +38,7 @@ public:
     int shard() const override { return shard_; }
     void read_async(ReadComplete complete) override {
         auto lease = lease_;
+        if (!lease->connection->is_valid()) { if (complete) complete({}); return; }
         (*lease->connection)->async_query(db::sql::build_auth_user_query(), {address_},
             [lease, complete = std::move(complete)](std::shared_ptr<pr::IDBResult> rows) {
                 if (complete) complete(credentials(rows));
@@ -46,6 +47,7 @@ public:
     void upgrade_legacy_hash_async(const std::string& expected, const std::string& replacement,
                                    Complete complete) override {
         auto lease = lease_;
+        if (!lease->connection->is_valid()) { if (complete) complete(false); return; }
         (*lease->connection)->async_execute(db::sql::build_update_password_hash(),
             {replacement, address_, expected}, [lease, complete = std::move(complete)](bool ok) {
                 if (complete) complete(ok);
@@ -53,6 +55,7 @@ public:
     }
     void touch_login_async(Complete complete) override {
         auto lease = lease_;
+        if (!lease->connection->is_valid()) { if (complete) complete(false); return; }
         (*lease->connection)->async_execute(db::sql::build_update_last_login(), {address_},
             [lease, complete = std::move(complete)](bool ok) { if (complete) complete(ok); });
     }

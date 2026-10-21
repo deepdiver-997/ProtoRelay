@@ -106,6 +106,17 @@ void credential_sequence_and_mapping() {
     }
     access.reset(); assert(f.pool->counts->returns == 1 && calls == 7);
 }
+void disconnected_credential_context_does_not_start_more_work() {
+    Fixture f;
+    auto access = f.repository->open_credentials(address, 0);
+    f.pool->db->disconnect();
+    int calls = 0;
+    access->read_async([&](CredentialLookup result) { assert(result.status == AccountLookupStatus::query_failed); ++calls; });
+    access->upgrade_legacy_hash_async("legacy", "new", [&](bool ok) { assert(!ok); ++calls; });
+    access->touch_login_async([&](bool ok) { assert(!ok); ++calls; });
+    assert(calls == 3 && !f.pool->db->has_pending_query() && !f.pool->db->has_pending_execute());
+    access.reset(); assert(f.pool->counts->returns == 1);
+}
 void delayed_credentials_keep_the_pool_alive() {
     Fixture f;
     auto db = f.pool->db; auto counts = f.pool->counts;
@@ -202,7 +213,8 @@ void fresh_actor_releases_lease_and_denies_stale_accounts() {
 }
 } // namespace
 int main() {
-    credential_sequence_and_mapping(); delayed_credentials_keep_the_pool_alive();
+    credential_sequence_and_mapping(); disconnected_credential_context_does_not_start_more_work();
+    delayed_credentials_keep_the_pool_alive();
     recipients_and_aliases(); quota_sequence_and_failures(); fresh_actor_releases_lease_and_denies_stale_accounts();
     std::cout << "Account repository contracts passed\n";
 }
