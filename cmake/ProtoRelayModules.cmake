@@ -76,6 +76,7 @@ target_link_libraries(protorelay_smtp_client PUBLIC protorelay_runtime)
 
 protorelay_module(protorelay_mail_core
     src/mail_system/back/cli/help_text.cpp src/mail_system/back/bootstrap.cpp
+    src/mail_system/back/mailServer/mail_server_base.cpp
     src/mail_system/back/db/sql_queries.cpp src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp src/mail_system/back/common/bcrypt.cpp
     src/mail_system/back/common/account_policy.cpp

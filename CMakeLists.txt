@@ -328,7 +328,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # ===== 公共源文件 =====
-set(ASIO_NETWORK_SRCS src/framework/net/asio_connection.cpp src/framework/net/asio_server_transport.cpp)
+set(ASIO_NETWORK_SRCS src/framework/net/asio_connection.cpp src/framework/net/asio_server_transport.cpp src/framework/net/asio_client_transport.cpp)
 add_library(protorelay_asio STATIC ${ASIO_NETWORK_SRCS})
 target_include_directories(protorelay_asio PUBLIC "${CMAKE_SOURCE_DIR}/include")
 target_include_directories(protorelay_asio SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
@@ -349,6 +349,7 @@ set(COMMON_SRCS
     src/mail_system/back/db/sql_queries.cpp
     src/framework/server_base.cpp
     src/mail_system/back/bootstrap.cpp
+    src/mail_system/back/mailServer/mail_server_base.cpp
     ${WORKER_SRCS}
     src/framework/thread_pool/io_thread_pool.cpp
     src/framework/thread_pool/io_context_registry.cpp
@@ -784,6 +785,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     target_include_directories(thread_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(thread_pool_test)
+
+    add_executable(smtp_client_contract_test
+        src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_contract_test.cpp)
+    target_include_directories(smtp_client_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+    target_link_libraries(smtp_client_contract_test PRIVATE protorelay_logging OpenSSL::Crypto)
+    add_executable(storage_boundary_test test/unit/storage_boundary_test.cpp)
+    target_include_directories(storage_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+    target_link_libraries(storage_boundary_test PRIVATE Threads::Threads)
 
     add_executable(logger_test test/unit/logger_test.cpp)
     target_link_libraries(logger_test PRIVATE protorelay_logging)
