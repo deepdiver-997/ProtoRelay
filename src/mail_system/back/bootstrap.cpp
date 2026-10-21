@@ -22,6 +22,8 @@
 #endif
 #ifdef HAVE_MARIADB
 #include "mail_system/back/db/mariadb_pool.h"
+#include "mail_system/back/db/mariadb_service.h"
+#include "framework/net/asio_readiness_waiter.h"
 #endif
 #include <functional>
 #include <stdexcept>
@@ -30,7 +32,7 @@ namespace mail_system {
 namespace bootstrap {
 
 // 前置声明（实现见下）：主 DB 池工厂，从原 pr::ServerBase 构造函数原样搬来
-static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config);
+static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config, const std::shared_ptr<pr::ThreadPoolBase>& io);
 static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config);
 
 Assembled assemble(const ServerConfig& config, const Options& opts) {
@@ -60,7 +62,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
                     out.io_pool->thread_count(), out.worker_pool->thread_count());
 
     // ---- 2. 主 DB 池 ----
-    auto main_db_pool = build_main_db_pool(config);
+    auto main_db_pool = build_main_db_pool(config, out.io_pool);
     if (!main_db_pool) {
         main_db_pool = std::make_shared<NullDBPool>();
         LOG_SERVER_INFO("Null database pool created");
@@ -152,7 +154,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     return out;
 }
 
-static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config) {
+static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config, const std::shared_ptr<pr::ThreadPoolBase>& io) {
     if (!config.use_database) return nullptr;
     if (config.db_pool_config.achieve.find("mysql") == 0) {
         try {
@@ -169,9 +171,12 @@ static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config
 #ifdef HAVE_MARIADB
     if (config.db_pool_config.achieve == "mariadb") {
         try {
-            // db_service 传 nullptr：工厂内部创建 MariaDBService
-            return MariaDBPoolFactory::get_instance().create_pool(
-                config.db_pool_config, nullptr);
+            auto provider = std::dynamic_pointer_cast<pr::net::IExecutorProvider>(io);
+            if (!provider) throw std::runtime_error("MariaDB runtime must provide executors");
+            auto service = std::make_shared<MariaDBService>([provider] {
+                return pr::net::make_asio_readiness_waiter(provider->next_executor());
+            });
+            return MariaDBPoolFactory::get_instance().create_pool(config.db_pool_config, service);
         } catch (const std::exception& e) {
             LOG_SERVER_ERROR("Failed to create MariaDB pool: {}", e.what());
             return nullptr;

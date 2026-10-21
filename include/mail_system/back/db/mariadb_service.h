@@ -2,6 +2,7 @@
 #define MAIL_SYSTEM_MARIADB_SERVICE_H
 
 #include "mail_system/back/db/db_service.h"
+#include "framework/net/readiness_waiter.h"
 #include <mariadb/mysql.h>   // libmariadb（MariaDB Connector/C）类型与常量
 #include <atomic>
 #include <mutex>
@@ -75,7 +76,7 @@ public:
     // ---- 工具 ----
     unsigned long (*mysql_real_escape_string)(MYSQL*, char*, const char*, unsigned long) = nullptr;
 
-    // ---- 非阻塞 API（阶段 2：非阻塞状态机 + io_context async_wait 集成） ----
+    // ---- 非阻塞 API（非阻塞状态机 + 可注入就绪等待） ----
     // libmariadb 对每个可能阻塞的调用提供 *_start / *_cont 对：
     //   *_start 首次发起；返回 0 = 已完成（*ret 存阻塞版返回值），
     //   非 0 = MYSQL_WAIT_READ/WRITE/EXCEPT/TIMEOUT 位掩码（等待 socket）。
@@ -141,14 +142,14 @@ private:
 // ====================================================================
 // MariaDBConnection —— IDBConnection 实现（同步 + 非阻塞 async 双路径）
 // ====================================================================
-// enable_shared_from_this：非阻塞 async 在 io_context.async_wait 挂起期间持有
+// enable_shared_from_this：非阻塞 async 在注入的就绪等待器挂起期间持有
 // shared_ptr 保活连接（池里释放/销毁也不会悬垂，续作回调安全）。连接始终由池的
 // shared_ptr 拥有（MariaDBService::create_connection 用 make_shared）。
 class MariaDBConnection : public IDBConnection,
                           public std::enable_shared_from_this<MariaDBConnection> {
 public:
     enum class ParamType { String, Int };
-    MariaDBConnection();
+    explicit MariaDBConnection(std::shared_ptr<pr::net::IReadinessWaiter> waiter = {});
     ~MariaDBConnection() override;
 
     void set_connection_params(const std::string& host, const std::string& user,
@@ -173,8 +174,8 @@ public:
     std::string escape_string(const std::string& str) const override;
 
     // ---- 非阻塞 async（阶段 2 override） ----
-    // libmariadb 非阻塞路径可用时走真异步状态机（io 线程 async_wait 不阻塞，
-    // worker 线程阻塞 poll）；不可用（缺符号）回退同步执行后内联回调（旧行为）。
+    // The injected waiter selects asynchronous runtime IO or explicit blocking poll.
+    // Missing Connector/C symbols still fall back to sync + inline completion.
     void async_query(const std::string& sql, QueryCallback cb) override;
     void async_query(const std::string& sql, const std::vector<std::string>& params,
                      QueryCallback cb) override;
@@ -193,6 +194,7 @@ public:
     bool async_in_flight() const override { return m_asyncInFlight.load(std::memory_order_acquire); }
 
 private:
+    std::shared_ptr<pr::net::IReadinessWaiter> m_readinessWaiter;
     MYSQL* m_mysql;
     std::string m_host;
     std::string m_user;
@@ -236,7 +238,8 @@ private:
 // ====================================================================
 class MariaDBService : public DBService {
 public:
-    MariaDBService() = default;
+    explicit MariaDBService(pr::net::ReadinessWaiterFactory waiters = {})
+        : waiters_(std::move(waiters)) {}
     ~MariaDBService() override = default;
 
     std::shared_ptr<IDBConnection> create_connection(
@@ -244,6 +247,8 @@ public:
         const std::string& database, unsigned int port) override;
 
     std::string get_service_name() const override { return "mariadb"; }
+private:
+    pr::net::ReadinessWaiterFactory waiters_;
 };
 
 } // namespace mail_system

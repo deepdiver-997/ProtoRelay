@@ -1,14 +1,10 @@
 #include "mail_system/back/db/mariadb_service.h"
 #include "mail_system/back/common/logger.h"
-#include "framework/thread_pool/io_context_registry.h"
-#include <boost/asio/posix/stream_descriptor.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <stdexcept>
 #include <unistd.h>
 
@@ -236,8 +232,9 @@ std::string MariaDbResult::get_value(size_t row_index, const std::string& column
 // MariaDBConnection
 // ====================================================================
 
-MariaDBConnection::MariaDBConnection()
-    : m_mysql(nullptr), m_port(3306), m_connected(false) {
+MariaDBConnection::MariaDBConnection(std::shared_ptr<pr::net::IReadinessWaiter> waiter)
+    : m_readinessWaiter(waiter ? std::move(waiter) : pr::net::make_poll_readiness_waiter()),
+      m_mysql(nullptr), m_port(3306), m_connected(false) {
 }
 
 MariaDBConnection::~MariaDBConnection() {
@@ -692,7 +689,7 @@ void MariaDBConnection::clear_stmt_cache() {
 }
 
 // ====================================================================
-// 阶段 2：非阻塞状态机（io 线程 async_wait / worker 阻塞 poll）
+// 非阻塞状态机（显式注入的异步等待器或阻塞 poll 适配器）
 // ====================================================================
 // libmariadb 非阻塞协议是请求-响应：*_start 首次发起，返回 0=已完成（*ret 存阻塞版
 // 返回值）或 MYSQL_WAIT_READ/WRITE/EXCEPT/TIMEOUT 位掩码（需等 socket/超时）；
@@ -701,8 +698,8 @@ void MariaDBConnection::clear_stmt_cache() {
 // （store 完成后行数据全在客户端内存，fetch 不碰网络）。
 //
 // 连接被 FSM 链独占（ScopedConnection 持链）→ 每连接单飞行是结构性保证；op 状态只在
-// 驱动线程推进。io 线程路径等 socket 时把控制权交还 io 事件循环（io_context.async_wait），
-// worker 线程路径阻塞 poll（worker 本就干阻塞活）。
+// 驱动线程推进。等待策略由构造注入，不能通过调用线程的局部状态猜测。
+// 异步适配器交还执行器；默认 poll 适配器用于明确允许阻塞的调用方。
 // 一条非阻塞查询/执行的驱动状态机。run() 迭代推进 step()：Wait → 调度续作（io
 // async_wait / worker 阻塞 poll）后交还或继续；Done/Fail → 锁外跑 finish（回调可能
 // 重入连接，不能在持锁时调）。worker 路径是迭代循环而非递归——大结果集 store_result
@@ -763,6 +760,7 @@ struct MariaDBConnection::AsyncStmtOp : std::enable_shared_from_this<AsyncStmtOp
 
     StepResult step();
     void run();
+    bool wait_request(int mask, pr::net::ReadinessRequest& request);
     void schedule_async_wait(int mask);
     bool blocking_wait(int mask);
 };
@@ -998,123 +996,57 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
     return {Step::Done, 0};
 }
 
-// io 线程路径：用 io_context.async_wait 等 socket 就绪，控制权交还事件循环。
-// 一个 fd 上可能同时等多个事件（READ|WRITE|EXCEPT），各自注册 async_wait；
-// 首个触发的续作（fired 自增），其余忽略。posix::stream_descriptor::assign 会
-// 接管 fd 所有权（析构时 close），续作回调里必须 release() 归还 mariadb。
-void MariaDBConnection::AsyncStmtOp::schedule_async_wait(int mask) {
-    auto& D = MariaDbDriver::instance();
-    boost::asio::io_context* ctx = pr::current_io_context();
-    int fd = 0;
-    unsigned int timeout_ms = 0;
-    {
-        std::lock_guard<std::mutex> lk(conn->m_mutex);
-        if (!conn->m_mysql) { complete_fail(); return; }
-        fd = static_cast<int>(D.mysql_get_socket(conn->m_mysql));
-        if (D.mysql_get_timeout_value_ms)
-            timeout_ms = D.mysql_get_timeout_value_ms(conn->m_mysql);
-    }
-
-    int io_events = mask & (MYSQL_WAIT_READ | MYSQL_WAIT_WRITE | MYSQL_WAIT_EXCEPT);
-    if (io_events == 0) {
-        // 纯超时（MYSQL_WAIT_TIMEOUT）或无事件：用 steady_timer 等 timeout 后续
-        auto self = shared_from_this();
-        auto fired = std::make_shared<std::atomic<int>>(0);
-        auto timer = std::make_shared<boost::asio::steady_timer>(*ctx);
-        timer->expires_after(std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 1000));
-        timer->async_wait([self, timer, fired](const boost::system::error_code& tec) {
-            if (fired->exchange(1) == 0) {
-                self->last_wait = MYSQL_WAIT_TIMEOUT;
-                self->run();
-            }
-        });
-        return;
-    }
-
-    auto self = shared_from_this();
-    auto fired = std::make_shared<std::atomic<int>>(0);
-    auto desc = std::make_shared<boost::asio::posix::stream_descriptor>(ctx->get_executor());
-    boost::system::error_code ec;
-    // 带 ec 的 assign 重载在本构建（无 BOOST_ASIO_NO_DEPRECATED）返回 error_code，
-    // 值即 ec——收下它（同名互赋）满足 clang-tidy unused-return-value。
-    ec = desc->assign(fd, ec);
-    if (ec) {
-        desc->release();   // assign 失败也要归还 fd，避免析构 close 掉 mariadb 的 socket
-        LOG_DB_QUERY_ERROR("MariaDB async: descriptor assign error: {}", ec.message());
-        complete_fail();
-        return;
-    }
-
-    // 每个请求的事件注册一个 async_wait；首个触发者续作并 release，其余忽略。
-    auto make_handler = [self, desc, fired](int event) {
-        return [self, desc, fired, event](const boost::system::error_code& wec) {
-            if (wec) {
-                if (fired->exchange(1) == 0) {
-                    desc->release();
-                    self->complete_fail();
-                }
-                return;
-            }
-            if (fired->fetch_add(1) == 0) {
-                desc->release();          // 归还 fd 所有权给 mariadb
-                self->last_wait = event;
-                self->run();
-            }
-        };
-    };
-
-    if (io_events & MYSQL_WAIT_READ)
-        desc->async_wait(boost::asio::posix::stream_descriptor::wait_read,
-                         make_handler(MYSQL_WAIT_READ));
-    if (io_events & MYSQL_WAIT_WRITE)
-        desc->async_wait(boost::asio::posix::stream_descriptor::wait_write,
-                         make_handler(MYSQL_WAIT_WRITE));
-    if (io_events & MYSQL_WAIT_EXCEPT)
-        desc->async_wait(boost::asio::posix::stream_descriptor::wait_error,
-                         make_handler(MYSQL_WAIT_EXCEPT));
+// Translate Connector/C masks at the driver boundary. The injected waiter owns
+// scheduling, deadlines, and handle observation; the connector owns all socket IO.
+static unsigned readiness_events(int mask) {
+    unsigned events = 0;
+    if (mask & MYSQL_WAIT_READ) events |= pr::net::ReadyRead;
+    if (mask & MYSQL_WAIT_WRITE) events |= pr::net::ReadyWrite;
+    if (mask & MYSQL_WAIT_EXCEPT) events |= pr::net::ReadyExcept;
+    if (mask & MYSQL_WAIT_TIMEOUT) events |= pr::net::ReadyTimeout;
+    return events;
 }
-
-// worker 线程路径：阻塞 poll 直到 socket 就绪/超时；返回 false 表示连接失效，直接收尾。
+static int connector_events(unsigned events) {
+    int mask = 0;
+    if (events & pr::net::ReadyRead) mask |= MYSQL_WAIT_READ;
+    if (events & pr::net::ReadyWrite) mask |= MYSQL_WAIT_WRITE;
+    if (events & pr::net::ReadyExcept) mask |= MYSQL_WAIT_EXCEPT;
+    if (events & pr::net::ReadyTimeout) mask |= MYSQL_WAIT_TIMEOUT;
+    return mask;
+}
+bool MariaDBConnection::AsyncStmtOp::wait_request(int mask, pr::net::ReadinessRequest& request) {
+    auto& driver = MariaDbDriver::instance();
+    std::lock_guard<std::mutex> lock(conn->m_mutex);
+    if (!conn->m_mysql) return false;
+    request.native_handle = static_cast<int>(driver.mysql_get_socket(conn->m_mysql));
+    request.events = readiness_events(mask);
+    const unsigned timeout = driver.mysql_get_timeout_value_ms
+        ? driver.mysql_get_timeout_value_ms(conn->m_mysql) : 0;
+    const bool has_io = request.events & (pr::net::ReadyRead | pr::net::ReadyWrite | pr::net::ReadyExcept);
+    request.timeout = std::chrono::milliseconds(timeout ? static_cast<long long>(timeout) : (has_io ? -1 : 1000));
+    return true;
+}
+void MariaDBConnection::AsyncStmtOp::schedule_async_wait(int mask) {
+    pr::net::ReadinessRequest request;
+    if (!wait_request(mask, request)) { complete_fail(); return; }
+    auto self = shared_from_this();
+    try {
+        conn->m_readinessWaiter->async_wait(request, [self](pr::net::ReadinessResult ready) {
+            if (ready.error) { self->complete_fail(); return; }
+            self->last_wait = connector_events(ready.events);
+            self->run();
+        });
+    } catch (const std::exception& error) {
+        LOG_DB_QUERY_ERROR("MariaDB readiness wait failed: {}", error.what());
+        complete_fail();
+    }
+}
 bool MariaDBConnection::AsyncStmtOp::blocking_wait(int mask) {
-    auto& D = MariaDbDriver::instance();
-    int fd = 0;
-    unsigned int timeout_ms = 0;
-    {
-        std::lock_guard<std::mutex> lk(conn->m_mutex);
-        if (!conn->m_mysql) return false;
-        fd = static_cast<int>(D.mysql_get_socket(conn->m_mysql));
-        if (D.mysql_get_timeout_value_ms)
-            timeout_ms = D.mysql_get_timeout_value_ms(conn->m_mysql);
-    }
-
-    int io_events = mask & (MYSQL_WAIT_READ | MYSQL_WAIT_WRITE | MYSQL_WAIT_EXCEPT);
-    if (io_events != 0) {
-        struct pollfd pfd{fd, 0, 0};
-        if (io_events & MYSQL_WAIT_READ) pfd.events |= POLLIN;
-        if (io_events & MYSQL_WAIT_WRITE) pfd.events |= POLLOUT;
-        if (io_events & MYSQL_WAIT_EXCEPT) pfd.events |= POLLPRI;
-        int rc = ::poll(&pfd, 1, timeout_ms > 0 ? static_cast<int>(timeout_ms) : -1);
-        if (rc < 0) {
-            if (errno == EINTR) { last_wait = mask; return true; }
-            return false;
-        }
-        if (rc == 0) { last_wait = MYSQL_WAIT_TIMEOUT; return true; }
-        int fired = 0;
-        if (pfd.revents & POLLIN) fired |= MYSQL_WAIT_READ;
-        if (pfd.revents & POLLOUT) fired |= MYSQL_WAIT_WRITE;
-        if (pfd.revents & POLLPRI) fired |= MYSQL_WAIT_EXCEPT;
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return false;
-        last_wait = fired ? fired : mask;
-        return true;
-    }
-
-    // 纯超时等待
-    if (timeout_ms > 0) {
-        struct timespec ts{static_cast<time_t>(timeout_ms / 1000),
-                           static_cast<long>((timeout_ms % 1000) * 1000000)};
-        nanosleep(&ts, nullptr);
-    }
-    last_wait = MYSQL_WAIT_TIMEOUT;
+    pr::net::ReadinessRequest request;
+    if (!wait_request(mask, request)) return false;
+    auto ready = conn->m_readinessWaiter->wait(request);
+    if (ready.error) return false;
+    last_wait = connector_events(ready.events);
     return true;
 }
 
@@ -1127,7 +1059,7 @@ void MariaDBConnection::AsyncStmtOp::run() {
             if (done) done(result, r.s == Step::Done && exec_ok);
             return;
         }
-        if (pr::current_io_context()) {
+        if (conn->m_readinessWaiter->asynchronous()) {
             schedule_async_wait(r.mask);   // io 线程：交还事件循环
             return;
         }
@@ -1261,7 +1193,7 @@ void MariaDBConnection::async_rollback(ExecuteCallback cb) {
 std::shared_ptr<IDBConnection> MariaDBService::create_connection(
     const std::string& host, const std::string& user, const std::string& password,
     const std::string& database, unsigned int port) {
-    auto conn = std::make_shared<MariaDBConnection>();
+    auto conn = std::make_shared<MariaDBConnection>(waiters_ ? waiters_() : nullptr);
     conn->set_connection_params(host, user, password, database, port);
     return conn;
 }
