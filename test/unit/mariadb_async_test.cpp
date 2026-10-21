@@ -12,14 +12,22 @@
 // （NO Server error），客户端表现即"账号连不上"。修复后必须完整取回长列。
 //
 // 依赖真实 DB（config/db_config.json 指向的 MySQL/MariaDB 服务 + mail 库）：
-// 文件不存在或连不上 → 明确 SKIP（返回 77），不影响 CI。
-// 本测试跑在主线程（无 io_context 注册）→ async 走阻塞 poll 路径，回调同步触发。
+// 数据库配置缺失或不可用时明确 SKIP（返回 77）。
+// 前半段使用显式 poll 适配，末尾在独立 IO executor 注入 Asio waiter，
+// 验证真实延迟查询、回调归属与连接租约归还。
 
 #include "mail_system/back/db/mariadb_pool.h"
 #include "mail_system/back/db/mariadb_service.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/db_pool.h"
 #include <iostream>
+#include "framework/net/asio_readiness_waiter.h"
+#include "framework/thread_pool/io_thread_pool.h"
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <future>
+#include <thread>
 
 using namespace mail_system;
 
@@ -29,6 +37,80 @@ namespace {
 // UTF-8 字面量会被非 utf8 连接字符集 reinterpret（实测 900 字节
 // 长度对内容错），与被测逻辑无关的假阳性。
 const char* kBigExpr = "REPEAT('x', 900)";
+
+class CountingWaiter final : public pr::net::IReadinessWaiter {
+public:
+    CountingWaiter(std::shared_ptr<pr::net::IReadinessWaiter> inner,
+                   std::shared_ptr<std::atomic<unsigned>> waits)
+        : inner_(std::move(inner)), waits_(std::move(waits)) {}
+    bool asynchronous() const noexcept override { return true; }
+    std::shared_ptr<pr::net::IReadinessOperation> async_wait(
+        pr::net::ReadinessRequest request, Complete complete) override {
+        waits_->fetch_add(1);
+        return inner_->async_wait(request, std::move(complete));
+    }
+private:
+    std::shared_ptr<pr::net::IReadinessWaiter> inner_;
+    std::shared_ptr<std::atomic<unsigned>> waits_;
+};
+
+bool injected_runtime_query(DBPoolConfig config) {
+    auto io = std::make_shared<pr::IOThreadPool>(1);
+    io->start();
+    auto executor = io->next_executor();
+    auto waits = std::make_shared<std::atomic<unsigned>>(0);
+    auto waiter = std::make_shared<CountingWaiter>(
+        pr::net::make_asio_readiness_waiter(executor), waits);
+    config.initial_pool_size = config.max_pool_size = 1;
+    config.initialize_script.clear(); // this read-only regression never reruns schema setup
+    auto async_pool = MariaDBPoolFactory::get_instance().create_pool(
+        config, make_mariadb_service([waiter] { return waiter; }));
+    const auto baseline = async_pool->get_available_connections();
+    auto lease = async_pool->acquire_connection();
+    if (!lease || !lease->is_valid()) {
+        std::cerr << "FAIL: injected runtime could not acquire a DB connection\n";
+        io->stop();
+        return false;
+    }
+    auto promise = std::make_shared<std::promise<bool>>();
+    auto completed = promise->get_future();
+    executor->post([lease = std::move(lease), promise, waits]() mutable {
+        auto initiating = std::make_shared<std::atomic<bool>>(true);
+        const auto owner_thread = std::this_thread::get_id();
+        (*lease)->async_query("SELECT SLEEP(0.01) AS delayed",
+            [lease, promise, initiating, owner_thread, waits](std::shared_ptr<IDBResult> result) {
+                const bool ok = result && result->get_row_count() == 1 &&
+                    result->get_value(0, "delayed") == "0" &&
+                    !initiating->load() && waits->load() > 0 &&
+                    std::this_thread::get_id() == owner_thread;
+                promise->set_value(ok);
+            });
+        initiating->store(false);
+    });
+    if (completed.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        std::cerr << "FAIL: injected runtime query exceeded five seconds\n";
+        std::quick_exit(1); // bounded failure without destroying an in-flight driver
+    }
+    const bool result_ok = completed.get();
+    // Queue a barrier behind callback/operation destruction before checking RAII return.
+    auto barrier = std::make_shared<std::promise<void>>();
+    auto drained = barrier->get_future();
+    executor->post([barrier] { barrier->set_value(); });
+    if (drained.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        std::cerr << "FAIL: injected runtime completion barrier exceeded five seconds\n";
+        std::quick_exit(1);
+    }
+    const bool returned = async_pool->get_available_connections() == baseline;
+    async_pool->close();
+    io->stop();
+    if (!result_ok || !returned) {
+        std::cerr << "FAIL: injected async wait/result/executor/lease-return contract\n";
+        return false;
+    }
+    std::cout << "PASS: injected runtime awaited SLEEP, completed on its executor, returned lease\n";
+    return true;
+}
+
 
 } // namespace
 
@@ -200,6 +282,8 @@ int main() {
 
         std::cout << "PASS: truncated long column in multi-row result, later rows intact\n";
     }
+
+    if (!injected_runtime_query(cfg)) return 1;
 
     return 0;
 }
