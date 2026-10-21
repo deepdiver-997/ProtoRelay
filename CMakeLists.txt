@@ -377,6 +377,11 @@ set(COMMON_SRCS
     src/mail_system/back/repository/mailbox_repository.cpp
     src/mail_system/back/repository/imap_mutation_repository.cpp
     src/mail_system/back/repository/webmail_read_repository.cpp
+    src/mail_system/back/repository/imap_message_repository.cpp
+    src/mail_system/back/repository/imap_folder_repository.cpp
+    src/mail_system/back/common/imap_append_service.cpp
+    src/mail_system/back/repository/webmail_action_repository.cpp
+    src/mail_system/back/repository/web_session_repository.cpp
     src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
@@ -824,6 +829,13 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         setup_mail_target(${_repository}_test)
     endforeach()
 
+    foreach(_completion imap_completion_repository webmail_persistence_repository)
+        add_executable(${_completion}_test test/unit/${_completion}_test.cpp)
+        target_include_directories(${_completion}_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        setup_mail_target(${_completion}_test)
+        target_link_libraries(${_completion}_test PRIVATE protorelay_mail_core)
+    endforeach()
+
     add_executable(smtp_client_contract_test
         src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_contract_test.cpp)
     target_include_directories(smtp_client_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
@@ -1087,6 +1099,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
             readiness_waiter_test async_db_adapter_test account_authentication_test
             mailbox_repository_test imap_mutation_repository_test webmail_read_repository_test
+            imap_completion_repository_test webmail_persistence_repository_test
             smtp_client_contract_test storage_boundary_test
             logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
