@@ -124,6 +124,37 @@ struct FsmTestFixture {
 #define TEST(name) void test_##name(FsmTestFixture& fx)
 #define HAS(str, sub) ((str).find(sub) != std::string::npos)
 
+TEST(connection_lease_keeps_pool_after_fsm_destruction) {
+    struct TrackingPool final : test::MockDbPool {
+        std::shared_ptr<std::vector<std::string>> events;
+        explicit TrackingPool(std::shared_ptr<std::vector<std::string>> value) : events(std::move(value)) {}
+        ~TrackingPool() override { events->push_back("destroy"); }
+        void release_connection(std::shared_ptr<pr::IDBConnection>) override { events->push_back("return"); }
+    };
+    auto events = std::make_shared<std::vector<std::string>>();
+    auto pool = std::make_shared<TrackingPool>(events);
+    auto db = pool->mock_conn();
+    std::weak_ptr<TrackingPool> weak = pool;
+    auto router = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{}, 0,
+        std::vector<std::shared_ptr<DBPool>>{pool},
+        std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+    auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(nullptr, nullptr, router);
+    auto lease = fsm->acquire_connection(0);
+    bool complete = false;
+    fsm->get_message_repository()->get_mail_async(lease, 81,
+        [&](bool ok, MailboxMailInfo value) {
+            assert(ok && value.mail_id == 81 && !weak.expired()); complete = true;
+        });
+    lease.reset(); fsm.reset(); router.reset(); pool.reset();
+    assert(!weak.expired() && events->empty());
+    db->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"id", "81"}, {"body_path", "opaque/81"}}}));
+    assert(complete && weak.expired());
+    assert((*events == std::vector<std::string>{"return", "destroy"}));
+    std::cout << "  [PASS] connection_lease_keeps_pool_after_fsm_destruction" << std::endl;
+}
+
 // ========== 基础命令 ==========
 
 TEST(capability_response) {
@@ -2262,6 +2293,7 @@ int main() {
         FsmTestFixture fx;
 
         // ── 基础命令 ──
+        test_connection_lease_keeps_pool_after_fsm_destruction(fx);
         test_capability_response(fx);
         test_login_response(fx);
         test_login_success_real_auth(fx);
