@@ -61,9 +61,20 @@ struct ControlledConnection final : test::MockDbConnection {
         assert(!pending()); if (throw_write) throw std::runtime_error("write start failed");
         MockDbConnection::async_execute(sql, params, std::move(cb));
     }
-    void fire_begin(bool ok = true) { auto cb = std::move(begin_callback); assert(cb); cb(ok); }
-    void fire_commit(bool ok = true) { auto cb = std::move(commit_callback); assert(cb); cb(ok); }
-    void fire_rollback(bool ok = true) { auto cb = std::move(rollback_callback); assert(cb); cb(ok); }
+    // A moved-from std::function can retain its small callable in libc++.
+    // Clear the pending slot before a continuation starts its next operation.
+    void fire_begin(bool ok = true) {
+        auto cb = std::exchange(begin_callback, pr::ExecuteCallback{});
+        assert(cb && !pending()); cb(ok);
+    }
+    void fire_commit(bool ok = true) {
+        auto cb = std::exchange(commit_callback, pr::ExecuteCallback{});
+        assert(cb && !pending()); cb(ok);
+    }
+    void fire_rollback(bool ok = true) {
+        auto cb = std::exchange(rollback_callback, pr::ExecuteCallback{});
+        assert(cb && !pending()); cb(ok);
+    }
     bool execute(const std::string& sql) override {
         assert(!pending()); executed.push_back(sql); ++sync_writes;
         if (throw_sync_write == sync_writes) throw std::runtime_error("sync write failed");
