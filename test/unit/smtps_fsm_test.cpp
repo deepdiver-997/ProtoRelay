@@ -189,7 +189,9 @@ static bool wait_for_response(Handle& h, const std::string& needle, int timeout_
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     h.conn->pump_executor();
-    return h.conn->written().find(needle) != std::string::npos;
+    const bool found = h.conn->written().find(needle) != std::string::npos;
+    if (!found) std::cerr << "Timed out waiting for: " << needle << "\nSMTP replies:\n" << h.conn->written() << std::endl;
+    return found;
 }
 
 // ========== 测试宏 ==========

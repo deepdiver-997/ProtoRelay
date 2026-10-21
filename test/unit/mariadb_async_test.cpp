@@ -77,10 +77,10 @@ bool injected_runtime_query(DBPoolConfig config) {
     executor->post([lease = std::move(lease), promise, waits]() mutable {
         auto initiating = std::make_shared<std::atomic<bool>>(true);
         const auto owner_thread = std::this_thread::get_id();
-        (*lease)->async_query("SELECT SLEEP(0.01) AS delayed",
+        (*lease)->async_query("SELECT SLEEP(0.01) AS waited_value",
             [lease, promise, initiating, owner_thread, waits](std::shared_ptr<IDBResult> result) {
                 const bool ok = result && result->get_row_count() == 1 &&
-                    result->get_value(0, "delayed") == "0" &&
+                    result->get_value(0, "waited_value") == "0" &&
                     !initiating->load() && waits->load() > 0 &&
                     std::this_thread::get_id() == owner_thread;
                 promise->set_value(ok);
