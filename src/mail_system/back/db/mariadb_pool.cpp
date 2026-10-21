@@ -4,6 +4,10 @@
 
 namespace mail_system {
 
+std::shared_ptr<DBService> make_mariadb_service(pr::net::ReadinessWaiterFactory waiters) {
+    return std::make_shared<MariaDBService>(std::move(waiters));
+}
+
 std::unique_ptr<MariaDBPoolFactory> MariaDBPoolFactory::s_instance = nullptr;
 std::mutex MariaDBPoolFactory::s_mutex;
 

@@ -22,7 +22,6 @@
 #endif
 #ifdef HAVE_MARIADB
 #include "mail_system/back/db/mariadb_pool.h"
-#include "mail_system/back/db/mariadb_service.h"
 #include "framework/net/asio_readiness_waiter.h"
 #endif
 #include <functional>
@@ -173,7 +172,7 @@ static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config
         try {
             auto provider = std::dynamic_pointer_cast<pr::net::IExecutorProvider>(io);
             if (!provider) throw std::runtime_error("MariaDB runtime must provide executors");
-            auto service = std::make_shared<MariaDBService>([provider] {
+            auto service = make_mariadb_service([provider] {
                 return pr::net::make_asio_readiness_waiter(provider->next_executor());
             });
             return MariaDBPoolFactory::get_instance().create_pool(config.db_pool_config, service);
