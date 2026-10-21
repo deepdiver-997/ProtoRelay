@@ -1,0 +1,45 @@
+#!/bin/bash
+# tools/agents/codex — codex 的代理门卫包装
+#
+# 背景：codex 默认接 GPT 订阅，对网络环境有要求；网络时好时坏时最怕的是
+# "没走代理直连上了一次"——那是账号安全问题。所以本包装只允许经本机代理出网：
+#   1. 依次探测本地代理端口（默认 12002、7897）；
+#   2. 谁通就把 HTTP(S)_PROXY / ALL_PROXY 指到谁，然后 exec 真实 codex，参数原样透传；
+#   3. 都不通 → 直接报错退出，绝不调用真实 codex 二进制。
+#
+# 本机微调（环境变量）：
+#   CODEX_PROXY_PORTS="12002 7897"   端口表
+#   CODEX_PROXY_HOST=127.0.0.1       代理地址
+#   CODEX_BIN=/path/to/real/codex    真实二进制（默认从 PATH 找）
+#
+# 想全局生效：alias codex='~/code/c++/project/mail-system/v8/tools/agents/codex'
+
+set -e
+
+PROXY_PORTS="${CODEX_PROXY_PORTS:-12002 7897}"
+PROXY_HOST="${CODEX_PROXY_HOST:-127.0.0.1}"
+
+REAL_CODEX="${CODEX_BIN:-codex}"
+if [ "${REAL_CODEX}" = "codex" ]; then
+    REAL_CODEX="$(command -v codex)" || { echo "[codex-proxy] 找不到真实 codex 二进制" >&2; exit 1; }
+fi
+
+chosen=""
+for port in ${PROXY_PORTS}; do
+    if nc -z -w 1 "${PROXY_HOST}" "${port}" >/dev/null 2>&1; then
+        chosen="${port}"
+        break
+    fi
+done
+
+if [ -z "${chosen}" ]; then
+    echo "[codex-proxy] 本机代理 ${PROXY_HOST} 的端口（${PROXY_PORTS}）都不通：拒绝运行 codex（防直连封号）。" >&2
+    echo "  先把代理打开，或用 CODEX_PROXY_PORTS 调整端口表。" >&2
+    exit 1
+fi
+
+export HTTP_PROXY="http://${PROXY_HOST}:${chosen}" HTTPS_PROXY="http://${PROXY_HOST}:${chosen}" ALL_PROXY="http://${PROXY_HOST}:${chosen}"
+export http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" all_proxy="${ALL_PROXY}"
+export NO_PROXY="localhost,127.0.0.1" no_proxy="localhost,127.0.0.1"
+echo "[codex-proxy] 经 ${PROXY_HOST}:${chosen} 出网" >&2
+exec "${REAL_CODEX}" "$@"

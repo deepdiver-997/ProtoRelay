@@ -32,7 +32,7 @@ mail-system/
 ├── ~/.agent-workspaces/              ← 设备级磁盘账本（全机所有项目共享一份，不属于任何仓库）
 │   ├── budget.conf                   人工设定、经 df 实测校验的总预算
 │   └── ledger.tsv                    各项目各 worktree 的占用登记
-└── agents/                           ← AGENTS_DIR（默认 hub 父目录下的 agents/）
+└── agents/<项目名>/                   ← AGENTS_DIR（默认 hub 父目录/agents/<项目名>/，项目命名空间防串名）
     └── <name>/                       worktree，分支 feat/<name>
         ├── build/                    自己的构建目录
         ├── config/                   从 hub 播种的 gitignored 配置（已改成独占端口/库名）
@@ -49,7 +49,7 @@ tools/agents/new-worktree.sh smtp-dedup                 # 基于 main
 tools/agents/new-worktree.sh k2 --from feature/x --build Release
 ```
 
-做的事：`git worktree add ../agents/<name> -b feat/<name> main` → 拷 hub 里 gitignored 的 `config/`
+做的事：`git worktree add ../agents/<项目名>/<name> -b feat/<name> main` → 拷 hub 里 gitignored 的 `config/`
 文件（`db_config.json`、`smtpsConfig.json`、证书、DKIM…；缺证书则自签）→ 分配 `AGENT_INDEX`/端口段/tmp/库名 →
 `apply_agent_env.py` 改写 worktree 自己的 `config/*.json`、`test/config/*_test.json`（被跟踪的几份标
 `skip-worktree`，端口改动不会出现在 `git status`）→ 用独占端口重生成 `test/config` → `db_init.sh` 建
@@ -172,6 +172,11 @@ tools/agents/spawn.sh stop smtp-dedup
 `CODEX_SANDBOX`）。无头运行没人批权限：claude 默认 `--dangerously-skip-permissions`、codex 默认
 `--sandbox workspace-write`——安全栏杆就是 AGENTS.md 红线 + build.sh 全局锁/生产拦截/STOP 哨兵，这套
 约定对无头 agent 同样生效。`--light` 跳过"构建+全量单测"完成标准（冒烟/轻任务用）。
+
+**codex 门卫**：适配器默认调用的不是裸 `codex`，而是同目录的 `tools/agents/codex` 包装——
+先探测本机代理端口（默认 12002、7897），通则带上 `HTTP(S)_PROXY/ALL_PROXY` 再 `exec` 真实 codex，
+全不通则直接报错、**绝不裸跑**（防网络抖动时直连导致账号风控）。端口表用 `CODEX_PROXY_PORTS`
+改；人手动跑 codex 也可以直接调这个包装，或加 alias 全局生效。
 
 ## 本机参数
 

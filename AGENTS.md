@@ -1,12 +1,11 @@
 # AGENTS.md — 本仓库 AI 编码会话须知
 
-> 适用于在本仓库任何检出里工作的 agent 会话：hub 主检出（`v8/`）或 `../agents/<name>` 下的 worktree。
+> 适用于在本仓库任何检出里工作的 agent 会话：hub 主检出（`v8/`）或 `../agents/<项目名>/<name>` 下的 worktree（带项目命名空间）。
 > 多 agent 并行方案的设计、流程与排错见 [`tools/agents/README.md`](tools/agents/README.md)。
 
 ## 1. 先确认你在哪
 
-- `cat .agent-env` 存在 → 你在一个 **agent worktree** 里。文件里是你的名字、分支、独占端口段、tmp 目录、库名。
-- 不存在 → 你在 **hub**（人的集成检出）。hub 里不要起服务、不要开长任务；需要并行工作时请人用
+- `cat .agent-env` 存在 → 你在一个 **agent worktree** 里。文件里是你的名字、分支、独占端口段、tmp 目录、库名。- 不存在 → 你在 **hub**（人的集成检出）。hub 里不要起服务、不要开长任务；需要并行工作时请人用
   `tools/agents/new-worktree.sh <name>` 开一个 worktree 再做。
 
 ## 2. 边界
