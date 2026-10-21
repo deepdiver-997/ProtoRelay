@@ -689,7 +689,7 @@ if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
 else
     SERIAL_TARGETS_LIB=("mailServer")
 fi
-SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client" "webServer")
+SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "pop3Server" "webmailServer" "h2web" "smtp_client" "webServer")
 
 for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
     # ⚠ object-only 模式只跳过 exe target（CMake 只定义了 *_obj 对象库，
@@ -719,7 +719,7 @@ if [ "$BUILD_TESTS" = "ON" ]; then
     # 抓 CMake 已注册的所有 test target（名字以 _test 结尾），排除聚合 unit_tests
     SERIAL_TEST_TARGETS=$(cmake --build "$BUILD_DIR" --target help 2>/dev/null \
         | grep -E "^\.\.\. " | awk '{print $2}' \
-        | grep -E "_test$" | grep -vE "^unit_tests$" || true)
+        | grep -E "(_test$|^test_inbound_verifier$|^outbound_smoke$)" | grep -vE "^unit_tests$" || true)
     for target in $SERIAL_TEST_TARGETS; do
         print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
         cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"

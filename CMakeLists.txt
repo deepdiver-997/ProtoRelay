@@ -22,6 +22,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
+option(PROTORELAY_BUILD_MAIL "Build the mail application, database drivers and mail protocol servers" ON)
 option(USE_SSL "Enable SSL/TLS support" ON)
 option(ENABLE_DEBUG_LOGS "Enable debug logs for all modules" OFF)
 option(BUILD_OBJECT_ONLY "Compile object files only" OFF)
@@ -195,7 +196,7 @@ endif()
 find_package(nlohmann_json REQUIRED)
 
 # curl
-if(ENABLE_HDFS_WEB_STORAGE)
+if(PROTORELAY_BUILD_MAIL AND (ENABLE_HDFS_WEB_STORAGE OR ENABLE_S3_STORAGE))
     find_package(CURL REQUIRED)
 endif()
 
@@ -225,6 +226,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # ===== MySQL / c-ares =====
+if(PROTORELAY_BUILD_MAIL)
 find_package(PkgConfig)
 set(MYSQL_INCLUDE_DIRS "" MYSQL_LIBRARIES "")
 set(CARES_INCLUDE_DIRS "" CARES_LIBRARIES "" CARES_LIBRARY_DIRS "")
@@ -298,10 +300,12 @@ elseif(NOT BUILD_OBJECT_ONLY)
     message(STATUS "mariadb-connector-c headers not found — MariaDB 引擎不编译（achieve=mariadb 不可用）")
 endif()
 
+endif()
+
 # ===== 链接库列表 =====
 set(LINK_LIBRARIES Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} protorelay_logging)
 
-if(ENABLE_HDFS_WEB_STORAGE)
+if(PROTORELAY_BUILD_MAIL AND (ENABLE_HDFS_WEB_STORAGE OR ENABLE_S3_STORAGE))
     if(TARGET CURL::libcurl)
         list(APPEND LINK_LIBRARIES CURL::libcurl)
     elseif(CURL_LIBRARIES)
@@ -368,7 +372,7 @@ set(COMMON_SRCS
     src/mail_system/back/persist_storage/persist_submission.cpp
     src/mail_system/back/router/table_shard_router.cpp
     # 显式模板实例化（避免每个翻译单元重复编译 ~4300 行模板代码）
-    src/mail_system/back/mailServer/session/session_base_inst.cpp
+    src/framework/session_base_inst.cpp
     src/mail_system/back/mailServer/fsm/imaps/imap_utils.cpp
     src/mail_system/back/mailServer/session/smtps_session_inst.cpp
     src/mail_system/back/mailServer/session/imaps_session_inst.cpp
@@ -418,14 +422,14 @@ function(setup_mail_target NAME)
     if(SYSROOT_INCLUDE)
         target_include_directories(${NAME} BEFORE PRIVATE SYSTEM ${SYSROOT_INCLUDE})
     endif()
-    if(MYSQL_INCLUDE_DIRS)
+    if(BUILD_OBJECT_ONLY AND MYSQL_INCLUDE_DIRS)
         target_include_directories(${NAME} PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
     endif()
-    if(MARIADB_INCLUDE_DIR)
+    if(BUILD_OBJECT_ONLY AND MARIADB_INCLUDE_DIR)
         target_include_directories(${NAME} PRIVATE SYSTEM ${MARIADB_INCLUDE_DIR})
         target_compile_definitions(${NAME} PRIVATE HAVE_MARIADB=1)
     endif()
-    if(CARES_INCLUDE_DIRS)
+    if(BUILD_OBJECT_ONLY AND CARES_INCLUDE_DIRS)
         target_include_directories(${NAME} PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
     endif()
     if(CARES_LIBRARY_DIRS AND NOT BUILD_OBJECT_ONLY)
@@ -442,7 +446,17 @@ function(setup_mail_target NAME)
         target_include_directories(${NAME} PRIVATE SYSTEM ${CURL_INCLUDE_DIRS})
     endif()
     if(NOT BUILD_OBJECT_ONLY)
-        target_link_libraries(${NAME} PRIVATE ${LINK_LIBRARIES})
+        target_link_libraries(${NAME} PRIVATE protorelay_logging Threads::Threads nlohmann_json::nlohmann_json)
+        if(USE_SSL)
+            target_link_libraries(${NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+        endif()
+        if(NAME IN_LIST PROTORELAY_MAIL_TARGETS)
+            target_link_libraries(${NAME} PRIVATE protorelay_mail_protocols)
+        elseif(NAME STREQUAL "smtp_client_test" OR NAME STREQUAL "smtp_submitter_test")
+            target_link_libraries(${NAME} PRIVATE protorelay_smtp_client)
+        elseif(NAME STREQUAL "thread_pool_test")
+            target_link_libraries(${NAME} PRIVATE protorelay_runtime)
+        endif()
     endif()
     if(ENABLE_INBOUND_DEDUP_CHECK)
         target_compile_definitions(${NAME} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=1)
@@ -450,6 +464,30 @@ function(setup_mail_target NAME)
         target_compile_definitions(${NAME} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=0)
     endif()
 endfunction()
+
+include(cmake/ProtoRelayModules.cmake)
+if(NOT PROTORELAY_BUILD_MAIL)
+    if(BUILD_OBJECT_ONLY)
+        message(FATAL_ERROR "PROTORELAY_BUILD_MAIL=OFF requires a host library/executable build")
+    endif()
+    add_executable(webServer test/server/web_server_main.cpp)
+    target_link_libraries(webServer PRIVATE protorelay_http protorelay_runtime)
+    add_executable(h2web test/server/h2web_main.cpp)
+    target_link_libraries(h2web PRIVATE protorelay_h2 protorelay_runtime)
+    if(BUILD_TESTS)
+        enable_testing()
+        foreach(_test logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test)
+            add_executable(${_test} test/unit/${_test}.cpp)
+            target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_link_libraries(${_test} PRIVATE protorelay_framework protorelay_runtime)
+            add_test(NAME ${_test} COMMAND ${_test})
+            set_tests_properties(${_test} PROPERTIES TIMEOUT 20)
+        endforeach()
+        add_custom_target(unit_tests DEPENDS logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test)
+    endif()
+    add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
+    return()
+endif()
 
 # ================================================================
 # smtpsServer — SMTP + IMAP 合并入口
@@ -527,29 +565,10 @@ else()
     )
     setup_mail_target(pop3Server)
 
-    add_executable(webServer
-        ${COMMON_SRCS}
-        src/framework/http/message_processor.cpp
-        src/framework/http/http_parser.cpp
-        src/framework/http/http_fsm_inst.cpp
-        src/framework/http/http_session_inst.cpp
-        src/framework/http/http_server.cpp
-        test/server/web_server_main.cpp
-    )
-    setup_mail_target(webServer)
-
-    add_executable(h2web
-        ${COMMON_SRCS}
-        src/framework/http/message_processor.cpp
-        src/framework/http/http_parser.cpp        # resolve_safe_path / mime（静态路由复用）
-        src/framework/http/codec/h2_codec.cpp
-        src/framework/http/h2/h2_framer.cpp
-        src/framework/http/h2/h2_hpack.cpp
-        src/framework/http/h2/h2_session_inst.cpp
-        src/framework/http/h2/h2_server.cpp
-        test/server/h2web_main.cpp
-    )
-    setup_mail_target(h2web)
+    add_executable(webServer test/server/web_server_main.cpp)
+    target_link_libraries(webServer PRIVATE protorelay_http protorelay_runtime)
+    add_executable(h2web test/server/h2web_main.cpp)
+    target_link_libraries(h2web PRIVATE protorelay_h2 protorelay_runtime)
 
     # webmailServer — 第四协议前端（HTTP/JSON API + 静态 SPA），webmail MVP
     add_executable(webmailServer
@@ -747,11 +766,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(smtp_persist_ack_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(smtp_persist_ack_test)
 
-    add_executable(smtp_client_test src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_test.cpp)
+    add_executable(smtp_client_test test/unit/smtp_client_test.cpp)
     setup_mail_target(smtp_client_test)
 
     add_executable(smtp_submitter_test
-        src/mail_system/back/smtp_client/client_session.cpp
         src/mail_system/back/common/mime_composer.cpp
         src/mail_system/back/webmail/smtp_submitter.cpp
         test/unit/smtp_submitter_test.cpp
@@ -809,7 +827,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         add_executable(mariadb_async_test ${COMMON_SRCS} test/unit/mariadb_async_test.cpp)
         target_include_directories(mariadb_async_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
         setup_mail_target(mariadb_async_test)
+        target_include_directories(mariadb_async_test SYSTEM PRIVATE ${MARIADB_INCLUDE_DIR})
+        target_compile_definitions(mariadb_async_test PRIVATE HAVE_MARIADB=1)
         add_test(NAME mariadb_async_test COMMAND mariadb_async_test)
+        set_tests_properties(mariadb_async_test PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     # 会话/FSM/服务基座：TestSession::close() 引用 ServerBase 成员符号
@@ -927,7 +948,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME smtps_fsm_concurrency_test COMMAND smtps_fsm_concurrency_test)
     add_test(NAME imaps_fsm_test   COMMAND imaps_fsm_test)
     add_test(NAME pop3_fsm_test    COMMAND pop3_fsm_test)
-    add_test(NAME inbound_verifier COMMAND test_inbound_verifier)
+    add_test(NAME test_inbound_verifier COMMAND test_inbound_verifier)
     add_test(NAME outbound_smoke   COMMAND outbound_smoke)
     set_tests_properties(outbound_smoke PROPERTIES TIMEOUT 20)
     add_test(NAME sql_queries_test COMMAND sql_queries_test)
@@ -1039,6 +1060,25 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         target_link_options(protorelay_asio PUBLIC -fsanitize=address,undefined)
     endif()
 
+endif()
+
+# Register every unit-test executable, including those historically omitted from CTest.
+# Discovery and build aggregation share the actual CMake target inventory.
+if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
+    add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
+    get_property(_unit_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _unit_targets)
+        if(_target MATCHES "(_test$|^test_inbound_verifier$|^outbound_smoke$)" AND NOT _target STREQUAL "unit_tests")
+            get_target_property(_kind ${_target} TYPE)
+            if(_kind STREQUAL "EXECUTABLE")
+                if(NOT TEST ${_target})
+                    add_test(NAME ${_target} COMMAND ${_target})
+                    set_tests_properties(${_target} PROPERTIES TIMEOUT 120)
+                endif()
+                add_dependencies(unit_tests ${_target})
+            endif()
+        endif()
+    endforeach()
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
