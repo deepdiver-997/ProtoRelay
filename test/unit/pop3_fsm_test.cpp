@@ -618,8 +618,6 @@ public:
 class ThrowingPop3Storage final : public pr::storage::IStorageProvider {
 public:
     bool ensure_ready(pr::IoError&) override { return true; }
-    std::string build_mail_body_key(uint64_t id) override { return std::to_string(id); }
-    std::string build_attachment_key(uint64_t, const std::string& name) override { return name; }
     bool append_binary(const std::string&, const char*, size_t, pr::IoError&) override { return false; }
     bool remove_object(const std::string&, pr::IoError&) override { return false; }
     bool read_all(const std::string&, std::string&, pr::IoError&) override { return false; }

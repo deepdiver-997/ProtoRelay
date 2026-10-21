@@ -135,20 +135,6 @@ bool HdfsWebStorageProvider::ensure_ready(IoError& error) {
     return webhdfs_mkdirs("", error);
 }
 
-std::string HdfsWebStorageProvider::build_mail_body_key(std::uint64_t mail_id) {
-    std::ostringstream oss;
-    oss << "mail/" << mail_id;
-    return oss.str();
-}
-
-std::string HdfsWebStorageProvider::build_attachment_key(std::uint64_t mail_id,
-                                                         const std::string& original_filename) {
-    const auto seq = ++attachment_seq_;
-    std::ostringstream oss;
-    oss << "attachment/" << mail_id << "/" << seq << "_" << sanitize_filename(original_filename);
-    return oss.str();
-}
-
 bool HdfsWebStorageProvider::append_binary(const std::string& storage_key,
                                            const char* data,
                                            std::size_t size,
@@ -271,23 +257,6 @@ std::string HdfsWebStorageProvider::normalize_base_path(const std::string& base_
         out.pop_back();
     }
     return out;
-}
-
-std::string HdfsWebStorageProvider::sanitize_filename(const std::string& name) {
-    if (name.empty()) {
-        return "attachment";
-    }
-
-    std::string out;
-    out.reserve(name.size());
-    for (const auto c : name) {
-        if (c == '/' || c == '\\' || c == ' ' || c == ':' || c == '*') {
-            out.push_back('_');
-        } else {
-            out.push_back(c);
-        }
-    }
-    return out.empty() ? std::string("attachment") : out;
 }
 
 std::string HdfsWebStorageProvider::url_encode(const std::string& value) {

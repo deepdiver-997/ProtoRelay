@@ -1,6 +1,8 @@
 #ifndef TRADITIONAL_IMAPS_FSM_TPP
 #define TRADITIONAL_IMAPS_FSM_TPP
 
+#include <exception>
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/mailServer/imaps_server.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
 #include "mail_system/back/common/mime_parser.h"
@@ -2170,7 +2172,7 @@ bool mail_matches_header_keys(const std::shared_ptr<storage::IStorageProvider>& 
     // 旧版 GCC APPEND 把已移动的 body_path 写进 DB。只读兼容这些历史行，
     // 用与 APPEND 相同的 provider key 寻址；不在 SEARCH 中修写生产数据。
     const std::string body_path = !m.body_path.empty() ? m.body_path
-        : storage ? storage->build_mail_body_key(m.mail_id) : "mail/" + std::to_string(m.mail_id);
+        : storage ? mail_system::storage::build_mail_body_key(storage, m.mail_id) : "mail/" + std::to_string(m.mail_id);
     const std::string body = search_read_body(storage, body_path);
     size_t sep = body.find("\r\n\r\n");
     if (sep == std::string::npos) sep = body.find("\n\n");
@@ -2281,39 +2283,37 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
                 return match;
             };
 
-            // HEADER 判据要逐封读体文件（阻塞 I/O），整段丢 worker 跑；
-            // 纯 flag 判据维持原内联路径（Leger 的 UNSEEN 轮询不受影响）。
-            if (!header_keys.empty() && worker) {
-                worker->post([self, tag = std::move(tag), is_uid,
-                              mails = std::move(mails), matches]() mutable {
-                    std::string response = "* SEARCH";
+            auto search = [self, tag, is_uid, mails = std::move(mails), matches]() mutable {
+                std::string response;
+                try {
+                    response = "* SEARCH";
                     for (size_t i = 0; i < mails.size(); ++i) {
-                        if (matches(mails[i])) {
-                            // UID SEARCH 返回 mail_id，普通 SEARCH 返回 seq number
-                            response += " " + std::to_string(is_uid ? mails[i].mail_id : (i + 1));
-                        }
+                        if (matches(mails[i])) response += " " + std::to_string(is_uid ? mails[i].mail_id : (i + 1));
                     }
-                    response += "\r\n";
-                    response += tag + " OK SEARCH completed\r\n";
-                    self->do_async_write(response,
-                        [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
+                    response += "\r\n" + tag + " OK SEARCH completed\r\n";
+                } catch (const std::exception& error) {
+                    LOG_IMAP_ERROR("SEARCH object lookup failed: {}", error.what());
+                    response = tag + " NO Cannot read message object\r\n";
+                }
+                // Missing layout/provider errors must complete the paused
+                // command on its owner, including the blocking HEADER Worker.
+                self->get_connection().executor()->post([self, response = std::move(response)] {
+                    if (self->is_closed()) return;
+                    self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
                     self->drain_buffered_commands();
                 });
-                return;
-            }
-
-            std::string response = "* SEARCH";
-            for (size_t i = 0; i < mails.size(); ++i) {
-                if (matches(mails[i])) {
-                    // UID SEARCH 返回 mail_id，普通 SEARCH 返回 seq number
-                    response += " " + std::to_string(is_uid ? mails[i].mail_id : (i + 1));
+            };
+            if (!header_keys.empty() && worker) {
+                try { worker->post(std::move(search)); }
+                catch (const std::exception& error) {
+                    LOG_IMAP_ERROR("Cannot schedule SEARCH object lookup: {}", error.what());
+                    self->get_connection().executor()->post([self, tag] {
+                        if (self->is_closed()) return;
+                        send_tagged(self, tag, "NO", "Cannot read message object");
+                        self->drain_buffered_commands();
+                    });
                 }
-            }
-            response += "\r\n";
-            response += tag + " OK SEARCH completed\r\n";
-
-            self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
-            self->drain_buffered_commands();
+            } else search();
         });
 }
 

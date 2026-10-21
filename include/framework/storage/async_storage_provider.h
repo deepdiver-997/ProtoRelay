@@ -84,15 +84,6 @@ public:
     }
 
 
-    std::string build_mail_body_key(std::uint64_t mail_id) override {
-        return inner_->build_mail_body_key(mail_id);
-    }
-
-    std::string build_attachment_key(std::uint64_t mail_id,
-                                     const std::string& original_filename) override {
-        return inner_->build_attachment_key(mail_id, original_filename);
-    }
-
     bool append_binary(const std::string& storage_key, const char* data,
                        std::size_t size, IoError& error) override {
         return inner_->append_binary(storage_key, data, size, error);

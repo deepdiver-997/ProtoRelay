@@ -17,15 +17,6 @@ public:
         return true;
     }
 
-    std::string build_mail_body_key(std::uint64_t mail_id) override {
-        return "/dev/null/" + std::to_string(mail_id);
-    }
-
-    std::string build_attachment_key(std::uint64_t mail_id,
-                                     const std::string& original_filename) override {
-        return "/dev/null/" + std::to_string(mail_id) + "_" + original_filename;
-    }
-
     bool append_binary(const std::string&, const char*, std::size_t size,
                        IoError& error) override {
         // 假装写入成功

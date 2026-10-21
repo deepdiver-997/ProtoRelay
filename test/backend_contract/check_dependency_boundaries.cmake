@@ -43,25 +43,48 @@ foreach(path IN LISTS repository_headers)
         message(FATAL_ERROR "Repository API includes SQL builders: ${path}")
     endif()
 endforeach()
-foreach(service
-    include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h
-    include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp
-    src/mail_system/back/webmail/mail_actions.cpp
-    src/mail_system/back/webmail/session_store.cpp
-    include/mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h
-    include/mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.tpp
-    include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h
-    include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp
-    include/mail_system/back/common/password_rehash.h
-    src/mail_system/back/common/account_authentication.cpp
-    src/mail_system/back/common/account_policy.cpp
-    src/mail_system/back/submission/mail_submission_service.cpp)
-    file(READ "${PR_SOURCE_ROOT}/${service}" source)
+# SQL/result mapping is confined to explicit persistence and routing adapters.
+file(GLOB_RECURSE application_files
+    "${PR_SOURCE_ROOT}/include/mail_system/back/*.h"
+    "${PR_SOURCE_ROOT}/include/mail_system/back/*.hpp"
+    "${PR_SOURCE_ROOT}/include/mail_system/back/*.tpp"
+    "${PR_SOURCE_ROOT}/src/mail_system/back/*.cpp")
+foreach(path IN LISTS application_files)
+    if(path MATCHES "/back/db/" OR path MATCHES "/back/repository/"
+       OR path MATCHES "/back/mailServer/outbound/outbox_repository[.]cpp$"
+       OR path MATCHES "/back/router/table_shard_router[.]cpp$")
+        continue()
+    endif()
+    file(READ "${path}" source)
     if(source MATCHES "db::sql::|IDBResult|->(async_query|async_execute|query|execute)[ \t]*[(]")
-        message(FATAL_ERROR "Application service bypasses its repository: ${service}")
+        message(FATAL_ERROR "Application bypasses its persistence boundary: ${path}")
     endif()
     if(source MATCHES "#[ \t]*include[ \t]*[<\"][^>\"]*sql_queries")
-        message(FATAL_ERROR "Application service includes SQL builders: ${service}")
+        message(FATAL_ERROR "Application includes SQL builders: ${path}")
+    endif()
+endforeach()
+# Business APIs may use abstract driver/runtime contracts, never backend headers.
+file(GLOB_RECURSE mail_headers
+    "${PR_SOURCE_ROOT}/include/mail_system/back/*.h"
+    "${PR_SOURCE_ROOT}/include/mail_system/back/*.hpp"
+    "${PR_SOURCE_ROOT}/include/mail_system/back/*.tpp")
+foreach(path IN LISTS mail_headers)
+    # Explicit driver and DNS adapter APIs intentionally know their own SDK.
+    if(path MATCHES "/back/db/" OR path MATCHES "/cares_dns_resolver[.]h$")
+        continue()
+    endif()
+    file(READ "${path}" source)
+    if(source MATCHES "#[ \t]*include[ \t]*[<\"](boost/|mysql/|mariadb/|framework/net/asio_|framework/thread_pool/io_thread_pool|mail_system/back/db/(mysql_|mariadb_|distributed_mysql_))")
+        message(FATAL_ERROR "Business API includes a concrete backend: ${path}")
+    endif()
+endforeach()
+file(GLOB_RECURSE storage_files
+    "${PR_SOURCE_ROOT}/include/framework/storage/*.h"
+    "${PR_SOURCE_ROOT}/src/framework/storage/*.cpp")
+foreach(path IN LISTS storage_files)
+    file(READ "${path}" source)
+    if(source MATCHES "build_mail_body_key|build_attachment_key|mail_path|attachment_path|attachment_seq_|mail_root_|attachment_root_")
+        message(FATAL_ERROR "Generic storage contains mail layout policy: ${path}")
     endif()
 endforeach()
 message(STATUS "Framework, client and repository dependency boundaries hold")

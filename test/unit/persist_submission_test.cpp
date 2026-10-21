@@ -3,6 +3,7 @@
 // 持久化完成边界：订阅竞态、事务提交、取消/超时、关机与背压。
 // 2026-10-18 前科及负验证：docs/bugfixes/2026-10-18-persist-completion-callback.md。
 #undef NDEBUG
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include <cassert>
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "framework/thread_pool/worker_thread_pool.h"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <utility>
 #include <unistd.h>
 using namespace mail_system;
 using namespace mail_system::persist_storage;
@@ -62,12 +64,12 @@ public:
     }
     void complete_commit(bool ok = true) {
         pr::ExecuteCallback cb;
-        { std::lock_guard<std::mutex> lock(mutex_); cb = std::move(commit_); }
+        { std::lock_guard<std::mutex> lock(mutex_); cb = std::exchange(commit_, pr::ExecuteCallback{}); }
         assert(cb); committed = ok; cb(ok);
     }
     void complete_rollback() {
         pr::ExecuteCallback cb;
-        { std::lock_guard<std::mutex> lock(mutex_); cb = std::move(rollback_); }
+        { std::lock_guard<std::mutex> lock(mutex_); cb = std::exchange(rollback_, pr::ExecuteCallback{}); }
         assert(cb); ++rollbacks; cb(true);
     }
 private:
@@ -121,7 +123,7 @@ struct Fixture {
         auto mail = std::make_unique<::mail>();
         mail->id = id; mail->from = "sender@test.local"; mail->to = {"rcpt@test.local"};
         mail->ids = {id + 1000}; mail->subject = "test"; mail->send_time = std::time(nullptr);
-        mail->body_path = router->get_storage(0)->build_mail_body_key(id);
+        mail->body_path = mail_system::storage::build_mail_body_key(router->get_storage(0), id);
         std::ofstream file(mail->body_path); assert(file); file << "Subject: test\r\n\r\nbody\r\n"; file.close();
         return mail;
     }
@@ -157,8 +159,19 @@ void test_timeout_late_commit() {
     assert(result.get().timed_out && !submission.ticket.is_cancel_requested());
     submission.ticket.request_cancel();
     assert(!submission.ticket.completion->result());
+    // The timed-out waiter stays complete. Observe the independent, real
+    // terminal result while the queue defers post-commit work to its Worker.
+    std::promise<PersistResult> confirmation;
+    auto committed = confirmation.get_future();
+    submission.ticket.completion->observe(std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()),
+        [&confirmation](PersistResult r) { confirmation.set_value(std::move(r)); });
+    assert(committed.wait_for(20ms) == std::future_status::timeout);
     f.db->connection->complete_commit();
-    assert(submission.ticket.completion->result()->status == PersistStatus::SUCCESS);
+    assert(committed.wait_for(2s) == std::future_status::ready);
+    const auto confirmed = committed.get();
+    assert(confirmed.status == PersistStatus::SUCCESS && !confirmed.timed_out);
+    const auto terminal = submission.ticket.completion->result();
+    assert(terminal && terminal->status == PersistStatus::SUCCESS);
     assert(calls == 1 && f.db->connection->deletes == 0 && std::filesystem::exists(body));
 }
 void test_failed_rollback(bool commit_failure) {

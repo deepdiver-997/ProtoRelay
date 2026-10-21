@@ -1,14 +1,23 @@
-#ifndef MAIL_SYSTEM_STORAGE_S3_STORAGE_PROVIDER_H_SHIM_H
-#define MAIL_SYSTEM_STORAGE_S3_STORAGE_PROVIDER_H_SHIM_H
-// 向后兼容 shim（2026-10-18）：本组件已上移 framework/storage（namespace pr::storage）。
-// 应用代码的 include 路径与 mail_system::storage 限定名保持不变。
-#include "mail_system/back/storage/i_storage_provider.h"  // IoError/IReadStream 等流别名的历史来源
+#pragma once
+#include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include "framework/storage/s3_storage_provider.h"
+#include <cstdint>
+#include <string>
+#include <utility>
 
-namespace mail_system {
-namespace storage {
-using pr::storage::S3StorageProvider;
-} // namespace storage
-} // namespace mail_system
-
-#endif // MAIL_SYSTEM_STORAGE_S3_STORAGE_PROVIDER_H_SHIM_H
+namespace mail_system::storage {
+// Application layout policy layered over generic object IO.
+class S3StorageProvider : public pr::storage::S3StorageProvider, public IMailObjectKeyLayout {
+public:
+    using pr::storage::S3StorageProvider::S3StorageProvider;
+    std::string build_mail_body_key(std::uint64_t id) override {
+        return layout_.build_mail_body_key(id);
+    }
+    std::string build_attachment_key(std::uint64_t id, const std::string& filename) override {
+        return layout_.build_attachment_key(id, filename);
+    }
+private:
+    MailObjectKeyLayout layout_{MailObjectKeyLayout::Kind::s3};
+};
+} // namespace mail_system::storage

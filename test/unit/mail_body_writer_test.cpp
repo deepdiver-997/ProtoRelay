@@ -224,10 +224,6 @@ static void test_failure_propagates() {
 class CountingProvider : public IStorageProvider {
 public:
     bool ensure_ready(IoError&) override { return true; }
-    std::string build_mail_body_key(std::uint64_t id) override { return std::to_string(id); }
-    std::string build_attachment_key(std::uint64_t id, const std::string& n) override {
-        return std::to_string(id) + n;
-    }
     bool append_binary(const std::string&, const char* d, std::size_t n, IoError&) override {
         appended += std::string(d, n);
         return true;
@@ -305,10 +301,6 @@ static void test_local_file_round_trip() {
 class FakeRemoteProvider : public IStorageProvider {
 public:
     bool ensure_ready(IoError&) override { return true; }
-    std::string build_mail_body_key(std::uint64_t id) override { return "remote://" + std::to_string(id); }
-    std::string build_attachment_key(std::uint64_t id, const std::string& n) override {
-        return "remote://" + std::to_string(id) + "/" + n;
-    }
     bool append_binary(const std::string&, const char* d, std::size_t n, IoError&) override {
         object += std::string(d, n);
         return true;

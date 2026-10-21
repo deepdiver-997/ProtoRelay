@@ -1,4 +1,6 @@
 #undef NDEBUG
+#include "mail_system/back/storage/mail_object_key_layout.h"
+#include "no_mail_layout_storage.h"
 #include "mail_system/back/repository/imap_message_repository.h"
 #include "mail_system/back/repository/imap_folder_repository.h"
 #include "mail_system/back/common/imap_append_service.h"
@@ -44,7 +46,7 @@ public:
 protected:
     void post_impl(std::function<void()> task) override { tasks.push_back(std::move(task)); }
 };
-class RecordingStorage final : public pr::storage::IStorageProvider {
+class RecordingStorage final : public pr::storage::IStorageProvider, public mail_system::storage::IMailObjectKeyLayout {
 public:
     std::shared_ptr<ManualWorkers> worker;
     std::map<std::string, std::string> objects;
@@ -139,7 +141,7 @@ void append_success_and_stable_body_key() {
     worker->drain();
     const auto params = db->last_query_params();
     assert(params.size() == 4 && params[1] == "probe subject" && !params[2].empty());
-    assert(params[2] == storage->build_mail_body_key(std::stoull(params[0])));
+    assert(params[2] == mail_system::storage::build_mail_body_key(storage, std::stoull(params[0])));
     assert(storage->objects.at(params[2]) == append_request().body);
     db->fire_execute(true);
     assert((db->last_query_params() == std::vector<std::string>{"41"}));
@@ -187,6 +189,17 @@ void append_link_failure_attempts_every_compensation() {
         assert(calls == 1 && storage->objects.empty() && pool.returns == 1);
     }
 }
+void append_missing_layout_fails_before_any_io_or_metadata() {
+    auto worker = std::make_shared<ManualWorkers>();
+    auto storage = std::make_shared<test::NoMailLayoutStorage>();
+    auto service = make_imap_append_service(worker);
+    TrackingPool pool; int calls = 0;
+    service->append_async(pool.acquire_connection(), storage, append_request(), [&](ImapAppendResult result) {
+        assert(!result.ok && result.cleanup_complete && result.error.find("no mail object key layout") != std::string::npos); ++calls;
+    });
+    worker->drain();
+    assert(calls == 1 && !storage->io_calls && !pool.mock_conn()->has_pending_execute() && pool.returns == 1);
+}
 void append_partial_write_and_cleanup_failure() {
     for (bool fail_remove : {true, false}) {
         auto worker = std::make_shared<ManualWorkers>(); auto storage = std::make_shared<RecordingStorage>(worker);
@@ -206,5 +219,6 @@ int main() {
     metadata_read_mapping_and_lease(); folders_fail_closed_and_keep_scope();
     append_success_and_stable_body_key(); append_metadata_failure_cleans_on_worker();
     append_link_failure_attempts_every_compensation(); append_partial_write_and_cleanup_failure();
+    append_missing_layout_fails_before_any_io_or_metadata();
     std::cout << "IMAP metadata/folder/APPEND contracts passed\n";
 }

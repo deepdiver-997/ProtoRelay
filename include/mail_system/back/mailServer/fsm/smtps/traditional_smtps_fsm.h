@@ -3,6 +3,7 @@
 
 #include "framework/session_base.h"
 #include "framework/fsm_base.h"
+#include "framework/storage/i_read_stream.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
@@ -155,7 +156,7 @@ private:
 
     // 在只读视图上做 MIME 预解析并写 sidecar。static：回调里无 this 可用。
     static void parse_and_save_mime_tree(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
-                                         std::unique_ptr<storage::IReadStream> body_read);
+                                         std::unique_ptr<pr::IReadStream> body_read);
 
     // MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
     static void finish_data_end_after_read(std::shared_ptr<pr::SessionBase<ConnectionType>> session);

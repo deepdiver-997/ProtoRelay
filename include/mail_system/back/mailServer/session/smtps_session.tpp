@@ -1,5 +1,7 @@
 #pragma once
 
+#include <exception>
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/mailServer/smtps_server.h"
 
 namespace mail_system {
@@ -266,7 +268,15 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     auto storage_provider = this->get_server()->m_shardRouter->get_storage(
         static_cast<size_t>(this->context_.shard_index));
     if (storage_provider) {
-        this->get_mail()->body_path = storage_provider->build_mail_body_key(this->get_mail()->id);
+        try {
+            this->get_mail()->body_path = mail_system::storage::build_mail_body_key(storage_provider, this->get_mail()->id);
+        } catch (const std::exception& error) {
+            LOG_SESSION_ERROR("Cannot resolve mail body object key: {}", error.what());
+            // Match open_write failure: no stream, CANCELLED, and DATA_END
+            // rejects commit instead of accepting an empty body or local path.
+            handle_write_failure();
+            return;
+        }
     } else {
         auto cfg = std::atomic_load(&this->get_server()->m_config);
         std::string body_path = cfg->mail_storage_path;

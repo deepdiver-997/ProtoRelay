@@ -4,25 +4,21 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/persist_storage/persist_submission.h"
 #include <condition_variable>
-#include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/db/mysql_pool.h"
-#include "mail_system/back/mailServer/outbound/outbox_repository.h"
-#include "mail_system/back/mailServer/outbound_server.h"
-#include "mail_system/back/storage/i_storage_provider.h"
-#include "mail_system/back/router/i_shard_router.h"
-#include "framework/thread_pool/thread_pool_base.h"
-#include "mail_system/back/common/logger.h"
-#include <boost/lockfree/queue.hpp>
 #include <atomic>
-#include <chrono>
-#include <future>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
-namespace pr { class MetricsServer; }
+namespace pr { class MetricsServer; class ThreadPoolBase; }
+namespace mail_system::router { class IShardRouter; }
+namespace mail_system::outbound { class OutboundServer; }
+namespace mail_system::repository { class IPersistenceRepository; }
 namespace mail_system { using pr::MetricsServer; }
 
 namespace mail_system {
@@ -45,7 +41,8 @@ class PersistentQueue {
 public:
     PersistentQueue(
         std::shared_ptr<router::IShardRouter> shard_router,
-        std::shared_ptr<pr::ThreadPoolBase> worker_pool
+        std::shared_ptr<pr::ThreadPoolBase> worker_pool,
+        std::shared_ptr<repository::IPersistenceRepository> repository = {}
     );
 
     ~PersistentQueue();
@@ -67,6 +64,7 @@ public:
     void set_pressure_config(PersistentQueuePressureConfig config);
     // 出站投递最大尝试次数：写进 mail_outbox.max_attempts 行（供 claim/重试/DEAD 判断）
     void set_max_attempts(size_t max_attempts);
+    void set_persistence_repository(std::shared_ptr<repository::IPersistenceRepository> repository);
 
     // 停止接收，取消尚未开始的任务；析构在 worker/DB 运行时仍存活时排空在途回调。
     void shutdown();
@@ -84,32 +82,9 @@ private:
     void worker_loop();
     bool process_task();
 
-    // ---- 持久化内部方法（async 回调链，ScopedConnection 由顶层持有） ----
-    void persist_mail_transactional_async(mail* mail_data,
-                                          const std::string& reserve_owner,
-                                          int reserve_lease_seconds,
-                                          std::vector<outbound::OutboxRecord>* reserved_records,
-                                          PersistCallback cb);
-    void batch_insert_metadata_async(mail* mail_data, class IDBConnection* conn,
-                                     PersistCallback cb);
-    void batch_insert_attachments_async(mail* mail_data, class IDBConnection* conn,
-                                        PersistCallback cb);
-    void enqueue_outbox_tasks_async(mail* mail_data,
-                                    class IDBConnection* conn,
-                                    const std::string& reserve_owner,
-                                    int reserve_lease_seconds,
-                                    std::vector<outbound::OutboxRecord>* reserved_records,
-                                    PersistCallback cb);
-#if ENABLE_INBOUND_DEDUP_CHECK
-    void is_probable_duplicate_mail_async(mail* mail_data, class IDBConnection* conn,
-                                          std::function<void(bool)> cb);
-#endif
-    void is_duplicate_by_source_message_id_async(mail* mail_data, class IDBConnection* conn,
-                                                  std::function<void(bool)> cb);
-
     // ---- 清理 ----
     void cleanup_mail_files(mail* mail_data);
-    void cleanup_failed_mail(mail* mail_data);
+    void cleanup_failed_mail(mail* mail_data, const std::shared_ptr<repository::IPersistenceRepository>& repository);
 
     // ---- 背压检查 ----
     bool should_reject_submission(const mail& mail_data, std::string& reason);
@@ -119,26 +94,19 @@ private:
     // ---- 分片辅助 ----
     int shard_from_mail(const mail* m) const;
 
-    // ---- 跨分片本域投递 ----
-    // 将邮件元数据、收件人关系、mailbox 关联写入收件人所在分片（独立事务）
-    // 用于收件人与发件人在不同分片的情况，避免走 SMTP 投递
-    bool persist_to_recipient_shard(mail* mail_data, const std::string& recipient,
-                                    std::uint64_t recipient_id, int sender_shard);
-
     // ---- 成员变量 ----
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<pr::ThreadPoolBase> worker_pool_;
+    std::shared_ptr<repository::IPersistenceRepository> repository_;
     std::shared_ptr<mail_system::outbound::OutboundServer> outbound_server_;
     std::string local_domain_{"example.com"};
     size_t max_attempts_{8};               // outbox 行 max_attempts（默认对齐 kDefaultMaxAttempts）
     PersistentQueuePressureConfig pressure_config_{};
 
-    // 无锁队列：多生产者(session)单消费者(worker thread)
-    struct QueueItem {
-        std::unique_ptr<mail> mail_data;
-        PersistSubmissionTicket ticket;
-    };
-    boost::lockfree::queue<QueueItem*, boost::lockfree::capacity<16384>> task_queue_{};
+    // The fixed-capacity lockfree implementation is private to the .cpp.
+    struct QueueItem;
+    struct TaskQueue;
+    std::unique_ptr<TaskQueue> task_queue_;
     std::atomic<size_t> queued_task_count_{0};
     std::mutex submission_mutex_;
     std::condition_variable available_;

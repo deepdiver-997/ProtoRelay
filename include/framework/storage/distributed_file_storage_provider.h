@@ -4,8 +4,9 @@
 #include "framework/storage/i_storage_provider.h"
 #include "framework/storage/local_file_metadata_cache.h"
 
-#include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,10 +20,9 @@ public:
 
     bool ensure_ready(IoError& error) override;
 
-    std::string build_mail_body_key(std::uint64_t mail_id) override;
-
-    std::string build_attachment_key(std::uint64_t mail_id,
-                                     const std::string& original_filename) override;
+    // Resolve a caller-defined relative object key using the same placement
+    // rule as replicated IO. The full relative key is the hash input.
+    std::string resolve_object_key(const std::string& relative_key) const;
 
     bool append_binary(const std::string& storage_key,
                        const char* data,
@@ -41,7 +41,6 @@ public:
 
 private:
     static std::string ensure_trailing_slash(const std::string& path);
-    static std::string sanitize_filename(const std::string& name);
 
     std::string strip_root_prefix(const std::string& storage_key) const;
     std::size_t get_primary_index(const std::string& relative_key) const;
@@ -49,7 +48,6 @@ private:
 
     std::vector<std::string> roots_;
     std::size_t replica_count_;
-    std::atomic<std::uint64_t> attachment_seq_{0};
 };
 
 } // namespace storage

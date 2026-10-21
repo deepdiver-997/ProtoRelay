@@ -1144,8 +1144,6 @@ struct DeferredWebmailBody final : pr::storage::IStorageProvider {
     ReadAllCallback pending;
     std::string requested_key;
     bool ensure_ready(pr::IoError&) override { return true; }
-    std::string build_mail_body_key(uint64_t) override { return "opaque/message"; }
-    std::string build_attachment_key(uint64_t, const std::string&) override { return "opaque/attachment"; }
     bool append_binary(const std::string&, const char*, size_t, pr::IoError&) override { return false; }
     bool remove_object(const std::string&, pr::IoError&) override { return false; }
     bool read_all(const std::string&, std::string&, pr::IoError&) override { assert(false); return false; }
@@ -1308,8 +1306,6 @@ struct TinyAttachment final : pr::IDownloadStream {
 struct BoundedAttachmentProvider final : pr::storage::IStorageProvider {
     int downloads = 0;
     bool ensure_ready(pr::IoError&) override { return true; }
-    std::string build_mail_body_key(uint64_t) override { return {}; }
-    std::string build_attachment_key(uint64_t, const std::string&) override { return {}; }
     bool append_binary(const std::string&, const char*, size_t, pr::IoError&) override { return false; }
     bool remove_object(const std::string&, pr::IoError&) override { return false; }
     bool read_all(const std::string&, std::string&, pr::IoError&) override { assert(false); return false; }

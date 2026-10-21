@@ -1,4 +1,4 @@
-# 依赖边界与后续重构
+# 依赖边界与扩展范围
 
 当前实现通过接口划分框架、邮件应用与具体后端，保持 Asio、MySQL/MariaDB 和存储后端可用。
 
@@ -16,7 +16,9 @@
 - Webmail 操作和会话分别使用 `IWebmailActionRepository`、`IWebSessionRepository`；仓储保留授权校验、事务和 fresh 凭据验证，服务负责 Worker 调度、下载流和内存会话。事务回滚失败会断开连接，避免复用未结束事务。
 - Webmail 通过 `IWebmailReadRepository` 获取邮箱列表、分页和邮件元数据，`MailService` 保留分页防御、存储和 MIME 编排。SQL 查询链同时保活池与连接，元数据和正文回调不借用服务对象生命周期。
 - MariaDB 通过 `IReadinessWaiter` 注入 socket 就绪等待；Asio 与阻塞 poll 是独立适配器，驱动不再探测线程局部 IO context。同步驱动可显式选用 Worker/完成 executor 装饰器。
-- 存储对象操作不包含本地流实现；MIME 解析与元数据缓存分开。仅明确提供本地缓存能力的存储后端写本地 sidecar，其他对象 key 不作为文件路径解释。
+- 持久化队列通过 `IPersistenceRepository` 完成邮件元数据、附件、Sent、去重和 outbox 的数据库操作。队列保留所有权、背压、ticket、取消和关闭；事务结果与跨分片结果分开，主提交成功后不被后续错误降级。具体 Boost lockfree 队列留在私有实现，公共头不包含 Boost 或 MySQL SDK。
+- 通用存储只处理对象 IO 与通用 key 定位；邮件正文/附件布局、文件名处理、序号和存储 JSON 配置由应用层拥有。各应用存储适配器保留旧 key，异步适配器共享内层布局及计数。
+- MIME 解析与元数据缓存分开。仅明确提供本地缓存能力的存储后端写本地 sidecar，其他对象 key 不作为文件路径解释。
 
 ## 构建模块
 
@@ -30,7 +32,8 @@
 | `protorelay_runtime` | IO 与所选 Worker 实现 |
 | `protorelay_readiness` | POSIX poll 就绪等待适配 |
 | `protorelay_http` / `protorelay_h2` | HTTP/1、HTTP/2 协议 |
-| `protorelay_storage` | 存储实现 |
+| `protorelay_storage` | 通用存储实现 |
+| `protorelay_mail_storage` | 邮件对象布局与存储应用适配，不依赖数据库或网络运行时 |
 | `protorelay_db_mysql` / `protorelay_db_mariadb` | 数据库驱动 |
 | `protorelay_smtp_client` | 可注入传输的 SMTP 客户端 |
 | `protorelay_mail_core` / `protorelay_mail_protocols` | 邮件应用与协议 |
@@ -49,12 +52,15 @@
 
 依赖方向由 `dependency_boundaries` 检查：框架不得包含邮件应用头，客户端及仓储公共 API 不得暴露具体后端类型，已迁移的业务服务和协议不得直接执行 SQL。独立后端契约测试同时验证替代实现和行为。
 
-## 后续范围
+## 保留的实现与事务边界
 
-- 隔离持久化队列的数据库操作及具体队列实现，保留压力控制、持久化确认、事务和关闭语义。
-- 邮件正文/附件 key 生成接口当前保留兼容方法，后续可在所有提供者迁移后移到邮件对象布局策略。
-- 原生网络运行时、SQLite、持久化队列中 Boost lockfree 的替换仍是独立工作；移除 Asio 不代表已经移除全部 Boost，也不保证 SQL 方言可移植。
+现有协议、认证、Webmail、submission 和持久化队列通过接口访问领域仓储；具体 SQL、列映射、数据库 SDK、网络运行时和对象后端留在各自适配器或装配根。
 
+- 默认邮件服务继续使用 Asio、MySQL/MariaDB、c-ares；队列私有实现继续使用 Boost lockfree。隔离公共依赖不要求替换这些实现。
+- 业务仓储保留当前 MySQL SQL 方言。SQLite、原生 socket runtime 或新的对象布局属于新增能力，需要另外定义和验证。
+- 正文对象和数据库保持既有跨系统非原子关系；APPEND 的失败补偿尽力执行，并报告清理是否完整。文件夹及 POP3 多步写入不新增事务或锁 fencing。
+- 持久化主事务与收件人分片事务独立。主提交后的跨分片失败记录为后续处理结果，不撤销主提交，也不能删除已提交邮件正文。
+- 回滚失败的连接断开后再归池；延迟回调的连接租约独立保活所属池，避免依赖服务或协议对象的销毁顺序。
 
 ## 独立构建配置
 
@@ -71,16 +77,8 @@ BUILD_DIR=build/contracts ARTIFACT_DIR=artifacts/contracts \
 BUILD_DIR=build/contracts bash test/run_all_tests.sh --no-build
 ```
 
-## 多 agent 拆分建议
+## 并发工作原则
 
-先约定共享接口，再按文件归属拆分，避免多个 agent 同改协议模板或 CMake 主文件：
+先约定接口与不变量，再按文件归属拆分。共享 CMake、依赖守卫和架构说明由集成者维护；协议或存储接口迁移需要指定唯一文件负责人。子任务可并行编辑和提交，统一集成后构建并执行全套回归。
 
-| 方向 | 可并发性与前置条件 |
-|---|---|
-| 持久化事务仓储/队列实现 | 可与对象布局策略并发；持久化确认、去重、出站记录和关闭顺序由统一回归约束 |
-| 对象 key 布局策略 | 可与上述两项并发；保持旧 key 可读，集中由一个 agent 修改提供者公共接口 |
-| 原生网络后端 | 可基于现有连接/执行器/定时器/传输契约独立开发，复用相同契约测试 |
-| SQLite 等数据库后端 | 驱动可并发验证；业务 SQL 方言适配需等仓储接口和事务语义稳定 |
-| 持久化队列去 Boost lockfree | 可独立评估，需保持压力控制、持久化确认和关闭语义 |
-
-构建仍通过全局锁串行执行，集成测试仍按仓库规定一次一个工作区；日常重构由集成分支统一跑 macOS 本地构建和全量测试；Docker/Linux 构建通常用于部署准备阶段，按需检查平台差异和头文件依赖。
+构建通过全局锁串行执行，集成测试按仓库规定一次一个工作区。日常重构使用 macOS 本地构建；Docker/Linux 构建通常用于部署准备阶段，按需检查平台差异和头文件依赖。

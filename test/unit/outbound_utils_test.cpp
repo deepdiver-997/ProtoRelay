@@ -1,3 +1,4 @@
+#include "mail_system/back/mailServer/outbound_server.h"
 #include "test_temp_dir.h"
 // outbound 子模块剧情测试 — 覆盖产品真正在跑的 3 个纯组件：
 //   - has_external_recipient         (pure logic, persistent_queue.cpp:390 调)
