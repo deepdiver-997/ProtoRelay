@@ -434,17 +434,6 @@ bool S3StorageProvider::ensure_ready(IoError& error) {
     return false;
 }
 
-std::string S3StorageProvider::build_mail_body_key(std::uint64_t mail_id) {
-    return "mail/" + std::to_string(mail_id);
-}
-
-std::string S3StorageProvider::build_attachment_key(std::uint64_t mail_id,
-                                                     const std::string& filename) {
-    auto seq = attachment_seq_.fetch_add(1, std::memory_order_relaxed);
-    return "attachments/" + std::to_string(mail_id) + "/"
-           + std::to_string(seq) + "_" + filename;
-}
-
 bool S3StorageProvider::append_binary(const std::string& key,
                                        const char* data,
                                        std::size_t size,

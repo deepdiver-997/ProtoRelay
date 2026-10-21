@@ -5,23 +5,20 @@
 #include "framework/storage/local_file_download_stream.h"
 #include "framework/storage/local_file_metadata_cache.h"
 
-#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace pr {
 namespace storage {
 
 class LocalFileStorageProvider : public IStorageProvider, public LocalFileMetadataCache {
 public:
-    LocalFileStorageProvider(std::string mail_root, std::string attachment_root);
+    explicit LocalFileStorageProvider(std::vector<std::string> directories = {});
 
     bool ensure_ready(IoError& error) override;
-
-    std::string build_mail_body_key(std::uint64_t mail_id) override;
-
-    std::string build_attachment_key(std::uint64_t mail_id,
-                                     const std::string& original_filename) override;
 
     bool append_binary(const std::string& storage_key,
                        const char* data,
@@ -54,12 +51,7 @@ public:
     }
 
 private:
-    static std::string ensure_trailing_slash(const std::string& path);
-    static std::string sanitize_filename(const std::string& name);
-
-    std::string mail_root_;
-    std::string attachment_root_;
-    std::atomic<std::uint64_t> attachment_seq_{0};
+    std::vector<std::string> directories_;
 };
 
 } // namespace storage

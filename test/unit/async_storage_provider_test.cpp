@@ -7,6 +7,7 @@
 //   3. open_write 包装出的流：write_at 透传，commit_async 投递；
 //   4. executor 为空时退化为内联。
 #undef NDEBUG
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -36,7 +37,7 @@ static void expect_str(const std::string& got, const std::string& want, const ch
 
 // ========== 记录型假后端 ==========
 
-class RecordingProvider : public IStorageProvider {
+class RecordingProvider : public IStorageProvider, public mail_system::storage::IMailObjectKeyLayout {
 public:
     bool ensure_ready(IoError&) override { return true; }
     std::string build_mail_body_key(std::uint64_t id) override { return "k/" + std::to_string(id); }

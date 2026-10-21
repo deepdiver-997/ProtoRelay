@@ -1,11 +1,19 @@
 #include "framework/storage/local_file_download_stream.h"
 #include "framework/storage/distributed_file_storage_provider.h"
 
+#include <vector>
+#include <string>
+#include <memory>
+#include <iterator>
+#include <exception>
+#include <cstdint>
+#include <cstddef>
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <sstream>
+#include <stdexcept>
 
 namespace pr {
 namespace storage {
@@ -40,22 +48,9 @@ bool DistributedFileStorageProvider::ensure_ready(IoError& error) {
     }
 }
 
-std::string DistributedFileStorageProvider::build_mail_body_key(std::uint64_t mail_id) {
-    std::ostringstream rel;
-    rel << "mail/" << mail_id;
-    const auto relative_key = rel.str();
-    const auto primary = get_primary_index(relative_key);
-    return roots_[primary] + relative_key;
-}
-
-std::string DistributedFileStorageProvider::build_attachment_key(std::uint64_t mail_id,
-                                                                 const std::string& original_filename) {
-    const auto seq = ++attachment_seq_;
-    std::ostringstream rel;
-    rel << "attachment/" << mail_id << "/" << seq << "_" << sanitize_filename(original_filename);
-    const auto relative_key = rel.str();
-    const auto primary = get_primary_index(relative_key);
-    return roots_[primary] + relative_key;
+std::string DistributedFileStorageProvider::resolve_object_key(const std::string& relative_key) const {
+    if (roots_.empty()) throw std::logic_error("distributed storage roots are empty");
+    return roots_[get_primary_index(relative_key)] + relative_key;
 }
 
 bool DistributedFileStorageProvider::append_binary(const std::string& storage_key,
@@ -168,23 +163,6 @@ std::string DistributedFileStorageProvider::ensure_trailing_slash(const std::str
         return path;
     }
     return path + "/";
-}
-
-std::string DistributedFileStorageProvider::sanitize_filename(const std::string& name) {
-    if (name.empty()) {
-        return "attachment";
-    }
-
-    std::string out;
-    out.reserve(name.size());
-    for (const auto c : name) {
-        if (c == '/' || c == '\\' || c == ' ' || c == ':' || c == '*') {
-            out.push_back('_');
-        } else {
-            out.push_back(c);
-        }
-    }
-    return out.empty() ? std::string("attachment") : out;
 }
 
 std::string DistributedFileStorageProvider::strip_root_prefix(const std::string& storage_key) const {

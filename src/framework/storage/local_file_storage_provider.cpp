@@ -3,45 +3,35 @@
 #include "framework/storage/local_file_read_stream.h"
 #include "framework/storage/local_file_write_stream.h"
 
+#include <string>
+#include <memory>
+#include <iterator>
+#include <exception>
+#include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
+#include <utility>
+#include <vector>
 
 namespace pr {
 namespace storage {
 
-LocalFileStorageProvider::LocalFileStorageProvider(std::string mail_root, std::string attachment_root)
-    : mail_root_(ensure_trailing_slash(mail_root)),
-      attachment_root_(ensure_trailing_slash(attachment_root)) {}
+LocalFileStorageProvider::LocalFileStorageProvider(std::vector<std::string> directories)
+    : directories_(std::move(directories)) {}
 
 bool LocalFileStorageProvider::ensure_ready(IoError& error) {
     try {
-        if (!mail_root_.empty() && !std::filesystem::exists(mail_root_)) {
-            std::filesystem::create_directories(mail_root_);
-        }
-        if (!attachment_root_.empty() && !std::filesystem::exists(attachment_root_)) {
-            std::filesystem::create_directories(attachment_root_);
+        for (const auto& directory : directories_) {
+            if (!directory.empty() && !std::filesystem::exists(directory))
+                std::filesystem::create_directories(directory);
         }
         return true;
     } catch (const std::exception& e) {
         error = IoError::retryable(e.what());
         return false;
     }
-}
-
-std::string LocalFileStorageProvider::build_mail_body_key(std::uint64_t mail_id) {
-    std::ostringstream oss;
-    oss << mail_root_ << mail_id;
-    return oss.str();
-}
-
-std::string LocalFileStorageProvider::build_attachment_key(std::uint64_t mail_id,
-                                                           const std::string& original_filename) {
-    const auto seq = ++attachment_seq_;
-    std::ostringstream oss;
-    oss << attachment_root_ << mail_id << "_" << seq << "_" << sanitize_filename(original_filename);
-    return oss.str();
 }
 
 bool LocalFileStorageProvider::append_binary(const std::string& storage_key,
@@ -139,33 +129,6 @@ bool LocalFileStorageProvider::remove_object(const std::string& storage_key,
         return false;
     }
     return true;
-}
-
-std::string LocalFileStorageProvider::ensure_trailing_slash(const std::string& path) {
-    if (path.empty()) {
-        return path;
-    }
-    if (path.back() == '/' || path.back() == '\\') {
-        return path;
-    }
-    return path + "/";
-}
-
-std::string LocalFileStorageProvider::sanitize_filename(const std::string& name) {
-    if (name.empty()) {
-        return "attachment";
-    }
-
-    std::string out;
-    out.reserve(name.size());
-    for (const auto c : name) {
-        if (c == '/' || c == '\\' || c == ' ' || c == ':' || c == '*') {
-            out.push_back('_');
-        } else {
-            out.push_back(c);
-        }
-    }
-    return out.empty() ? std::string("attachment") : out;
 }
 
 } // namespace storage

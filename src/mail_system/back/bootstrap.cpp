@@ -192,11 +192,11 @@ static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config
 
 static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config) {
     const auto& sc = config.storage;
-    switch (pr::storage::provider_type_from_string(sc.provider)) {
-    case pr::storage::StorageProviderType::Distributed:
+    switch (storage::provider_type_from_string(sc.provider)) {
+    case storage::StorageProviderType::Distributed:
         return std::make_shared<storage::DistributedFileStorageProvider>(
             sc.distributed.roots, sc.distributed.replica_count);
-    case pr::storage::StorageProviderType::HdfsWeb:
+    case storage::StorageProviderType::HdfsWeb:
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
         return std::make_shared<storage::HdfsWebStorageProvider>(
             sc.hdfs.endpoint, sc.hdfs.base_path, sc.hdfs.user,
@@ -205,9 +205,9 @@ static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const S
 #else
         throw std::runtime_error("hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON");
 #endif
-    case pr::storage::StorageProviderType::Null:
+    case storage::StorageProviderType::Null:
         return std::make_shared<storage::NullStorageProvider>();
-    case pr::storage::StorageProviderType::S3:
+    case storage::StorageProviderType::S3:
 #ifdef ENABLE_S3_STORAGE
         return std::make_shared<storage::S3StorageProvider>(
             sc.s3.endpoint, sc.s3.bucket,
@@ -217,7 +217,7 @@ static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const S
 #else
         throw std::runtime_error("s3 requires ENABLE_S3_STORAGE=ON");
 #endif
-    case pr::storage::StorageProviderType::Local:
+    case storage::StorageProviderType::Local:
     default:
         if (!std::filesystem::exists(sc.local.mail_path))
             std::filesystem::create_directories(sc.local.mail_path);

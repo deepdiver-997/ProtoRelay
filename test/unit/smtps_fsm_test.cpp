@@ -1,6 +1,7 @@
 #include "test_temp_dir.h"
 // 入站 SMTP FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应码
 #undef NDEBUG
+#include "no_mail_layout_storage.h"
 #include <cassert>  // 在 #undef NDEBUG 后重新包含，确保 assert 生效
 #include "mail_system/back/mailServer/smtps_server.h"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp"
@@ -1453,6 +1454,25 @@ TEST(auth_from_alias_db_unavailable_fails_closed_at_data_end) {
     std::cout << "  [PASS] auth_from_alias_db_unavailable_fails_closed_at_data_end (空目标 → 550)" << std::endl;
 }
 
+TEST(data_missing_layout_fails_commit_without_storage_io) {
+    auto original = fx.server->m_shardRouter;
+    auto generic = std::make_shared<test::NoMailLayoutStorage>();
+    fx.server->m_shardRouter = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string,int>>{}, 0, std::vector<std::shared_ptr<pr::DBPool>>{},
+        std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{generic});
+    auto h = fx.make_session();
+    h.session->create_mail_on_data_command();
+    assert(h.session->get_mail() && h.session->get_mail()->body_path.empty() &&
+           h.session->get_mail()->persist_status == pq::PersistStatus::CANCELLED && !generic->io_calls);
+    h.session->set_current_state(static_cast<int>(SmtpsState::IN_MESSAGE));
+    fx.fsm->process_event(h.session, SmtpsEvent::DATA_END);
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "550 5.3.0 Failed to store message") && !HAS(h.conn->written(), "250"));
+    assert(!h.session->is_paused() && !generic->io_calls && !h.session->get_mail());
+    fx.server->m_shardRouter = original;
+    std::cout << "  [PASS] missing mail layout rejects DATA commit without guessing a path" << std::endl;
+}
+
 int main() {
     std::cout << "Inbound SMTP FSM Test Suite\n===========================\n";
 
@@ -1467,6 +1487,7 @@ int main() {
         test_mail_from_ok(fx);
         test_rcpt_to_ok(fx);
         test_data_354(fx);
+        test_data_missing_layout_fails_commit_without_storage_io(fx);
         test_full_delivery_pipeline(fx);
         test_multiple_rcpt(fx);
         test_quit_221(fx);

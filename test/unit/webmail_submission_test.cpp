@@ -4,6 +4,8 @@
 // Exercise provider completion and rejection as consumers; no SMTP session or socket.
 // Negative auth callback evidence: docs/bugfixes/2026-10-18-webmail-shared-sessions.md.
 #undef NDEBUG
+#include "mail_system/back/storage/mail_object_key_layout.h"
+#include "no_mail_layout_storage.h"
 #include "mail_system/back/submission/mail_submission_service.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/static_shard_router.h"
@@ -42,7 +44,7 @@ class ManualWorkers final : public pr::ThreadPoolBase {
     std::deque<std::function<void()>> tasks;
 };
 
-class DelayedStorage final : public storage::IStorageProvider {
+class DelayedStorage final : public storage::IStorageProvider, public mail_system::storage::IMailObjectKeyLayout {
     class Stream final : public storage::IWriteStream {
       public:
         explicit Stream(DelayedStorage &owner) : owner(owner) {}
@@ -142,6 +144,20 @@ struct Fixture {
 } // namespace
 
 void run_webmail_submission_tests() {
+    {
+        auto accounts = std::make_shared<test::FakeAccountRepository>(); accounts->route = 0;
+        Fixture f(accounts);
+        auto generic = std::make_shared<test::NoMailLayoutStorage>();
+        auto shards = std::make_shared<router::StaticShardRouter>(std::vector<std::pair<std::string,int>>{}, 0,
+            std::vector<std::shared_ptr<pr::DBPool>>{}, std::vector<std::shared_ptr<pr::storage::IStorageProvider>>{generic});
+        ServerConfig config; config.system_domain = "test.local"; config.smtp_daily_send_limit = 0;
+        config.external_delivery_enabled = false;
+        f.service = std::make_shared<submission::MailSubmissionService>(shards, f.workers, f.policy, f.queue,
+            [&] { return std::make_shared<pr::net::AsioExecutor>(f.io.get_executor()); }, config, 3, accounts);
+        f.submit();
+        assert(f.calls == 1 && f.result->status == submission::Status::Unavailable && !generic->io_calls);
+        assert(f.queue->queue_size() == 0); // No guessed local path or false admission.
+    }
     // The trusted boundary uses the same account repository as authentication,
     // without exposing credential rows or requiring a database in service tests.
     for (auto status : {repository::ActorStatus::denied, repository::ActorStatus::unavailable,

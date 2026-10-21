@@ -3,6 +3,8 @@
 // 2026-10-18：手机同时 FETCH 多个 BODY section 仅收到第一段；见
 // docs/bugfixes/2026-10-18-imap-multiple-body-sections.md。
 #undef NDEBUG
+#include "mail_system/back/storage/mail_object_key_layout.h"
+#include "no_mail_layout_storage.h"
 #include <cassert>
 #include <chrono>
 #include <fstream>
@@ -1260,11 +1262,11 @@ struct MutationProtocolFixture {
     std::shared_ptr<TestServer> server;
     std::shared_ptr<Fsm::MailboxListCache> lists = std::make_shared<Fsm::MailboxListCache>(8, std::chrono::seconds(60));
     std::shared_ptr<Fsm::MailboxStatsCache> stats = std::make_shared<Fsm::MailboxStatsCache>(8, std::chrono::seconds(60));
-    explicit MutationProtocolFixture(FsmTestFixture& fx) {
+    explicit MutationProtocolFixture(FsmTestFixture& fx, std::shared_ptr<storage::IStorageProvider> provider = nullptr) {
         auto shards = std::make_shared<router::StaticShardRouter>(
             std::vector<std::pair<std::string, int>>{}, 0,
             std::vector<std::shared_ptr<DBPool>>{pool},
-            std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+            std::vector<std::shared_ptr<storage::IStorageProvider>>{std::move(provider)});
         server = std::make_shared<TestServer>(fx.cfg, fx.io_pool, fx.worker_pool, shards);
         fsm = std::make_shared<Fsm>(fx.io_pool, fx.worker_pool, shards);
         fsm->set_mailbox_repository(reads);
@@ -1297,6 +1299,21 @@ struct MutationProtocolFixture {
         return stats->get(mbox_cache_key(41, mailbox), entry, stale);
     }
 };
+TEST(search_missing_layout_returns_no_and_resumes) {
+    auto generic = std::make_shared<test::NoMailLayoutStorage>();
+    MutationProtocolFixture fixture(fx, generic);
+    fixture.fsm->invalidate_mailbox_list(41, 7);
+    auto h = fixture.make_session();
+    h.session->handle_read("K1 SEARCH HEADER Subject probe\r\nK2 NOOP\r\n");
+    h.session->process_read();
+    for (int waited = 0; waited < 2000 && !HAS(h.conn->written(), "K2 OK"); waited += 5) {
+        h.conn->pump_executor(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "K1 NO Cannot read message object") && HAS(h.conn->written(), "K2 OK"));
+    assert(!HAS(h.conn->written(), "* SEARCH") && !h.session->is_paused() && !generic->io_calls);
+    std::cout << "  [PASS] SEARCH missing layout completes on owner and resumes buffered commands" << std::endl;
+}
 TEST(mutation_repository_store_and_expunge_injection) {
     {
         MutationProtocolFixture fixture(fx);
@@ -1946,7 +1963,7 @@ TEST(search_header_criteria) {
     assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
 
     // Linux APPEND 的旧数据：文件存在，mails.body_path 却为空（参数求值时被移动）。
-    const std::string legacy_key = storage->build_mail_body_key(2002);
+    const std::string legacy_key = mail_system::storage::build_mail_body_key(storage, 2002);
     std::filesystem::copy_file(rows[1]["body_path"], legacy_key,
                                std::filesystem::copy_options::overwrite_existing);
     rows[1]["body_path"].clear();
@@ -1986,7 +2003,7 @@ TEST(append_metadata_body_path) {
     assert(db->mock_conn()->has_pending_execute());
     const auto params = db->mock_conn()->last_query_params();
     assert(params.size() == 4);
-    const std::string key = storage->build_mail_body_key(std::stoull(params[0]));
+    const std::string key = mail_system::storage::build_mail_body_key(storage, std::stoull(params[0]));
     assert(params[2] == key && std::filesystem::exists(key));
     db->mock_conn()->fire_execute(true);
     db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>());
@@ -2376,6 +2393,7 @@ int main() {
         // ── 2026-10-21 四缺陷回归 ──
         test_fetch_rfc822_sections(fx);
         test_search_header_criteria(fx);
+        test_search_missing_layout_returns_no_and_resumes(fx);
         test_append_metadata_body_path(fx);
         test_append_db_fail_no_orphan(fx);
         test_append_fail_then_select_responds(fx);

@@ -1,3 +1,4 @@
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/common/imap_append_service.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/common/logger.h"
@@ -59,7 +60,7 @@ struct AppendOperation : std::enable_shared_from_this<AppendOperation> {
         std::string failure;
         try {
             if (storage) {
-                body_key = storage->build_mail_body_key(mail_id);
+                body_key = mail_system::storage::build_mail_body_key(storage, mail_id);
                 pr::IoError error;
                 if (!storage->append_binary(body_key, request.body.data(), request.body.size(), error))
                     failure = "Storage error: " + error.message;

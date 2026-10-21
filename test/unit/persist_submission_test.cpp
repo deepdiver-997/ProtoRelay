@@ -3,6 +3,7 @@
 // 持久化完成边界：订阅竞态、事务提交、取消/超时、关机与背压。
 // 2026-10-18 前科及负验证：docs/bugfixes/2026-10-18-persist-completion-callback.md。
 #undef NDEBUG
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include <cassert>
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "framework/thread_pool/worker_thread_pool.h"
@@ -121,7 +122,7 @@ struct Fixture {
         auto mail = std::make_unique<::mail>();
         mail->id = id; mail->from = "sender@test.local"; mail->to = {"rcpt@test.local"};
         mail->ids = {id + 1000}; mail->subject = "test"; mail->send_time = std::time(nullptr);
-        mail->body_path = router->get_storage(0)->build_mail_body_key(id);
+        mail->body_path = mail_system::storage::build_mail_body_key(router->get_storage(0), id);
         std::ofstream file(mail->body_path); assert(file); file << "Subject: test\r\n\r\nbody\r\n"; file.close();
         return mail;
     }

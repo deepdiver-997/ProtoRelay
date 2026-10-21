@@ -10,13 +10,13 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace pr {
 namespace storage {
 
-// 本文件已整体位于 framework/storage（2026-10-18 从 mail_system/back/storage
-// 上移，与流原语同层）。方法名里的 mail/attachment 是历史命名（首个消费方是
-// 邮件正文/附件），语义上就是通用的对象键构造。应用旧路径经 shim 兼容。
+// Storage operations accept opaque object keys. Domain-specific naming and
+// object layout policies belong to applications, outside the IO interface.
 using pr::IReadStream;
 using pr::IWriteStream;
 using pr::BufferedReadStream;
@@ -28,11 +28,6 @@ public:
     virtual ~IStorageProvider() = default;
 
     virtual bool ensure_ready(IoError& error) = 0;
-
-    virtual std::string build_mail_body_key(std::uint64_t mail_id) = 0;
-
-    virtual std::string build_attachment_key(std::uint64_t mail_id,
-                                             const std::string& original_filename) = 0;
 
     // 一次性写入整个对象（IMAP APPEND 等已持有完整内容的场景）。
     // 流式接收请改用 open_write()：append_binary 的位置由后端当前末尾决定，
@@ -60,7 +55,7 @@ public:
 
     // ── 读侧 ────────────────────────────────────────────────────────────
     // 读侧此前完全没有抽象：FSM 直接对 body_path 做 std::ifstream。
-    // 而 body_path 对 S3/HDFS 来说是 build_mail_body_key() 返回的远程 key，
+    // 而 S3/HDFS 的对象 key 由调用方提供，
     // 不是本地路径 —— 远程后端的读路径因此一直是坏的。这三个方法补上这个缺口。
 
     // 读进调用方自己的缓冲区，内容可随意修改。

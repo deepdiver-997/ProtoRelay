@@ -3,7 +3,6 @@
 
 #include "framework/storage/i_storage_provider.h"
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -30,11 +29,6 @@ public:
     static constexpr std::size_t kDefaultWriteBufferBytes = 64ull * 1024 * 1024;
 
     bool ensure_ready(IoError& error) override;
-
-    std::string build_mail_body_key(std::uint64_t mail_id) override;
-
-    std::string build_attachment_key(std::uint64_t mail_id,
-                                     const std::string& original_filename) override;
 
     bool append_binary(const std::string& storage_key,
                        const char* data,
@@ -89,7 +83,6 @@ private:
     bool use_path_style_;
     std::size_t max_write_buffer_bytes_;
 
-    std::atomic<std::uint64_t> attachment_seq_{0};
 };
 
 } // namespace storage

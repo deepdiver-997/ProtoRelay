@@ -1,3 +1,4 @@
+#include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/submission/mail_submission_service.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/i_shard_router.h"
@@ -113,7 +114,7 @@ struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation
                     self->fail(Status::Unavailable, 451, "storage");
                     return;
                 }
-                m.body_path = self->storage->build_mail_body_key(m.id);
+                m.body_path = mail_system::storage::build_mail_body_key(self->storage, m.id);
                 storage::IoError error;
                 auto stream = self->storage->open_write(m.body_path, error);
                 if (!stream) {
