@@ -158,7 +158,15 @@ public:
             LOG_DATABASE_ERROR("No DB pool for shard {}", shard);
             return ScopedConnection::invalid();
         }
-        return pool->acquire_connection();
+        // A ScopedConnection borrows its DBPool. The lease itself must keep the
+        // pool alive even if the session/FSM/router dies before a DB callback.
+        struct OwnedLease {
+            std::shared_ptr<DBPool> pool;
+            std::shared_ptr<ScopedConnection> connection;
+        };
+        auto connection = pool->acquire_connection();
+        auto owner = std::make_shared<OwnedLease>(OwnedLease{std::move(pool), std::move(connection)});
+        return std::shared_ptr<ScopedConnection>(owner, owner->connection.get());
     }
 
     std::shared_ptr<storage::IStorageProvider> get_storage(int shard) {

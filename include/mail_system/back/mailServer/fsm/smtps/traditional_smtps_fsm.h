@@ -3,15 +3,11 @@
 
 #include "framework/session_base.h"
 #include "framework/fsm_base.h"
-#include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/db/db_service.h"
-#include "mail_system/back/db/sql_queries.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/common/account_policy.h"
-#include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 #include "mail_system/back/router/i_shard_router.h"
@@ -31,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace mail_system {
@@ -82,15 +79,6 @@ public:
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
 
-    std::shared_ptr<ScopedConnection> acquire_connection(int shard) {
-        auto pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
-        if (!pool) {
-            LOG_DATABASE_ERROR("No DB pool for shard {}", shard);
-            return ScopedConnection::invalid();
-        }
-        return pool->acquire_connection();
-    }
-
     // 处理事件
     void process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session, SmtpsEvent event);
     void auto_process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
@@ -132,22 +120,6 @@ public:
                                 const std::string& mail_address,
                                 std::function<void(bool allowed)> cb);
 
-    // 保存邮件元数据到数据库（异步），返回future用于跟踪操作结果
-    std::future<bool> save_mail_metadata_async(mail* data, const std::string& file_path_prefix);
-
-    // 保存附件元数据到数据库（异步），返回 future
-    std::future<bool> save_attachment_metadata_async(const attachment& att, size_t mail_id);
-
-    // 根据文件路径删除邮件元数据 假定数据库操作一定成功
-    void remove_metadata_by_file_path(const std::vector<std::string>& file_paths);
-
-    // 保存邮件正文到本地文件
-    bool save_mail_body_to_file(mail* data, const std::string& file_path);
-
-    bool save_attachment_to_file(attachment& att, const std::string& file_path);
-
-    // 检查异步操作结果，失败则删除对应文件
-    void cleanup_failed_saves(std::vector<std::future<bool>>& futures, const std::vector<std::string>& file_paths);
 
 private:
     static void cleanup_streamed_attachments(SmtpsContext* ctx);

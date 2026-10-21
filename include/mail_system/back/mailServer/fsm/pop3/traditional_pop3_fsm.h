@@ -8,9 +8,17 @@
 #include "mail_system/back/router/i_shard_router.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/pop3/pop3_types.hpp"
+#include "mail_system/back/repository/pop3_mailbox_repository.h"
+#include "mail_system/back/repository/pop3_lock_repository.h"
 #include <chrono>
+#include <cstdint>
+#include <functional>
+#include <set>
+#include <stdexcept>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace mail_system {
 
@@ -26,6 +34,8 @@ protected:
     std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<IAccountAuthenticator> authenticator_;
+    std::shared_ptr<repository::IPop3MailboxRepository> mailbox_repository_ = repository::make_sql_pop3_mailbox_repository();
+    std::shared_ptr<repository::IPop3LockRepository> lock_repository_ = repository::make_sql_pop3_lock_repository();
     // 每会话上下文。Pop3Context 是 per-session 状态，由 session 拥有；
     // FSM 通过 session->get_context() 获取裸指针。
     // 这里不存，避免所有权歧义。
@@ -49,6 +59,14 @@ public:
         if (authenticator) authenticator_ = std::move(authenticator);
     }
 
+    void set_mailbox_repository(std::shared_ptr<repository::IPop3MailboxRepository> value) {
+        if (!value) throw std::invalid_argument("POP3 mailbox repository is required");
+        mailbox_repository_ = std::move(value);
+    }
+    void set_lock_repository(std::shared_ptr<repository::IPop3LockRepository> value) {
+        if (!value) throw std::invalid_argument("POP3 lock repository is required");
+        lock_repository_ = std::move(value);
+    }
 
     // ========== 事件派发入口（session 调） ==========
     void process_event(
@@ -59,11 +77,9 @@ public:
     void auto_process_event(
         std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
-    // ── DB 访问（CPS：async_query/async_execute 链，结果经 cb 返回） ──
-    // 仿 SMTP auth 的异步链写法。底层 MySQL async_* 目前是默认同步包装
-    // （回调同步触发），但调用方结构已异步就绪；将来接真异步 DB 时这些
-    // 调用方无需改动。conn 由调用方持有的 shared ScopedConnection 保活，
-    // 链中每个回调都捕获它避免悬垂。
+    // Compatibility facades delegate to default repositories. Helpers accepting
+    // a bare lease borrow its pool: the caller must keep that pool alive until
+    // completion. Production chains pass an owning Pop3DbContext instead.
     static void auth_user_async(const std::shared_ptr<IAccountAuthenticator>& authenticator,
                                 const std::string& mail_address,
                                 const std::string& password,
@@ -73,9 +89,8 @@ public:
     static void get_inbox_id_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                    std::function<void(uint64_t)> cb);
 
-    // 取 INBOX 全部未删邮件的 (mail_id, body_path) 列表。
-    // 排除 mm.is_deleted = 1（POP3 视角是"已 DELE 但未 QUIT"的仍可见，
-    // 真正的"已 DELE 后 QUIT 提交"由 DELE 走 UPDATE 时直接 SQL 删除）。
+    // Return the established mailbox snapshot (including pre-existing deleted
+    // flags). POP3 DELE/RSET flags remain local until successful QUIT.
     static void get_inbox_mails_async(std::shared_ptr<ScopedConnection> conn,
                                       uint64_t mailbox_id, uint64_t user_id,
                                       std::function<void(std::vector<Pop3Message>)> cb);
@@ -85,27 +100,25 @@ public:
         return m_shardRouter ? m_shardRouter->get_storage(static_cast<size_t>(shard)) : nullptr;
     }
 
-    // 申请 mailbox 锁。cb(true) = 成功；cb(false) = 已被他人持有。
+    // 申请 mailbox 锁。cb(false) 表示所有权未确认（冲突或数据库错误）。
     static void acquire_lock_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                    const std::string& session_id,
                                    std::function<void(bool)> cb);
 
-    // 释放 mailbox 锁。幂等。cb() 在完成后触发。
+    // Legacy release facade: completion-only. Production uses the typed result.
     static void release_lock_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                    const std::string& session_id, std::function<void()> cb);
 
     // 续约锁心跳（v2）：条件 UPDATE last_heartbeat + verify 所有权。
-    // cb(false) = 锁已被回收/转交（行不存在），调用方应关闭会话。
+    // cb(false) = 无法确认所有权（失锁或数据库错误），调用方应关闭会话。
     static void renew_lock_heartbeat_async(const std::shared_ptr<router::IShardRouter>& router,
                                            uint64_t user_id, const std::string& session_id,
                                            int shard, std::function<void(bool)> cb);
 
-    // 清扫过期锁（v2 sweeper 周期调用）：删除心跳超过 5min 的锁。
-    // fire-and-forget 无续作，直接同步 execute。
+    // 清扫过期锁（v2 sweeper Worker 周期调用），每分片委托仓储。
     static bool sweep_expired_locks(const std::shared_ptr<router::IShardRouter>& router);
 
-    // 提交 DELE 标记：把 deleted 里所有 mail_id 对应行 is_deleted=1
-    // 然后 expunge（DELETE FROM mail_mailbox）。
+    // Commit local DELE flags, then remove marked links. Failures stop the chain.
     static void apply_deletions_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                       uint64_t mailbox_id,
                                       const std::set<uint64_t>& deleted_mail_ids,
@@ -126,6 +139,8 @@ public:
     static std::string get_event_name(Pop3Event e);
 
 private:
+    struct LoginOperation;
+    struct QuitOperation;
     void init_transition_table();
     void init_state_handlers();
 
@@ -144,7 +159,8 @@ private:
     static void start_heartbeat(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                 std::shared_ptr<router::IShardRouter> router,
                                 std::shared_ptr<pr::ThreadPoolBase> worker,
-                                std::chrono::milliseconds interval);
+                                std::chrono::milliseconds interval,
+                                std::shared_ptr<repository::IPop3LockRepository> locks);
 
     // ========== 状态处理器 ==========
     void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);

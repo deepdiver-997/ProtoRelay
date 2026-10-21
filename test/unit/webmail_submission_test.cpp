@@ -8,6 +8,7 @@
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mock_db_pool.h"
+#include "fake_account_repository.h"
 #include <boost/asio/io_context.hpp>
 #include <cassert>
 #include <deque>
@@ -108,13 +109,13 @@ struct Fixture {
     std::shared_ptr<submission::MailSubmissionService> service;
     std::optional<submission::Result> result;
     int calls = 0;
-    Fixture() {
+    explicit Fixture(std::shared_ptr<repository::IAccountRepository> accounts = nullptr) {
         ServerConfig config;
         config.system_domain = "test.local";
         config.external_delivery_enabled = false;
         config.smtp_daily_send_limit = 0;
         service = std::make_shared<submission::MailSubmissionService>(
-            router, workers, policy, queue, [this] { return std::make_shared<pr::net::AsioExecutor>(io.get_executor()); }, config, 3);
+            router, workers, policy, queue, [this] { return std::make_shared<pr::net::AsioExecutor>(io.get_executor()); }, config, 3, std::move(accounts));
         auto aliases = std::make_shared<AccountPolicy::AliasCache>(10, std::chrono::seconds(60));
         aliases->put("to@test.local", {});
         policy->set_recipient_caches(std::make_shared<AuthCache>(), aliases);
@@ -141,6 +142,40 @@ struct Fixture {
 } // namespace
 
 void run_webmail_submission_tests() {
+    // The trusted boundary uses the same account repository as authentication,
+    // without exposing credential rows or requiring a database in service tests.
+    for (auto status : {repository::ActorStatus::denied, repository::ActorStatus::unavailable,
+                        repository::ActorStatus::valid}) {
+        auto accounts = std::make_shared<test::FakeAccountRepository>();
+        accounts->actor_result = status;
+        Fixture f(accounts);
+        f.storage->fail_open = true;
+        f.submit();
+        assert(accounts->actor_calls == 1 && accounts->actor_user == 42 && accounts->actor_shard == 3 &&
+               accounts->actor_address == "sender@test.local");
+        assert(!f.db->mock_conn()->has_pending_query());
+        assert(f.calls == 1 && f.result->status == (status == repository::ActorStatus::denied ?
+            submission::Status::AuthFailed : submission::Status::Unavailable));
+        assert(f.result->stage == (status == repository::ActorStatus::valid ? "storage" : "auth"));
+    }
+    {
+        auto accounts = std::make_shared<test::FakeAccountRepository>(); accounts->route = -1;
+        Fixture f(accounts); f.submit();
+        assert(!accounts->actor_calls && f.calls == 1 && f.result->status == submission::Status::AuthFailed);
+    }
+    {
+        auto accounts = std::make_shared<test::FakeAccountRepository>();
+        std::weak_ptr<test::FakeAccountRepository> weak = accounts;
+        Fixture f(accounts);
+        submission::Request request;
+        request.user_id = 42; request.sender = "sender@test.local"; request.recipients = {"outside@external.test"};
+        f.service->submit_async(std::move(request), [&](submission::Result result) {
+            assert(result.status == submission::Status::Rejected && !weak.expired()); ++f.calls;
+        });
+        f.service.reset(); accounts.reset();
+        assert(!weak.expired()); f.workers->drain();
+        assert(f.calls == 1 && weak.expired());
+    }
     {
         Fixture f;
         f.actor("0");

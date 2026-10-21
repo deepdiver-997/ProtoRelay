@@ -4,8 +4,7 @@
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/common/logger.h"
-#include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/db/sql_queries.h"
+#include "mail_system/back/repository/account_repository.h"
 #include <functional>
 #include <memory>
 #include <string>
@@ -31,12 +30,12 @@ namespace mail_system {
 //     历史行保持原样，下次登录再试。
 //   - 成功后把缓存条目刷成新 bcrypt：否则明文/MD5 会在 AuthCache 里再躺一个 TTL。
 //     缓存命中路径不升级 —— TTL 过期回源走 DB 路径时自然补上。
-//   - done 恰好被调用一次；回调线程与 conn->async_execute 的回调线程一致（真实池默认
+//   - done 恰好被调用一次；回调线程与仓储完成回调一致（真实池默认
 //     内联即调用线程）。bcrypt_hash 是几十~几百 ms 纯 CPU，本函数须在 worker 线程发起
 //     —— 三条认证链本来就满足（见各自 auth_user_async 注释）。
-//   - 11.3 纪律：conn 以拷贝捕获，不在同一调用表达式里 move。
+//   - 11.3 纪律：access 以拷贝捕获，不在同一调用表达式里 move。
 inline void rehash_password_if_needed_async(
-    std::shared_ptr<ScopedConnection> conn,
+    std::shared_ptr<repository::IAccountCredentialAccess> access,
     std::shared_ptr<AuthCache> cache,
     const std::string& mail_address,
     const std::string& password,
@@ -53,15 +52,14 @@ inline void rehash_password_if_needed_async(
         done();
         return;
     }
-    if (!conn || !conn->is_valid()) {
+    if (!access) {
         LOG_AUTH_WARN("rehash-on-login: no DB connection for {}, keeping legacy hash", mail_address);
         done();
         return;
     }
 
-    (*conn)->async_execute(db::sql::build_update_password_hash(),
-        {new_hash, mail_address, stored},
-        [conn, cache, mail_address, new_hash, entry = std::move(entry),
+    access->upgrade_legacy_hash_async(stored, new_hash,
+        [access, cache, mail_address, new_hash, entry = std::move(entry),
          done = std::move(done)](bool ok) mutable {
             if (ok) {
                 if (cache) {

@@ -1570,7 +1570,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
-                self->get_connection().executor()->post([this, self, tag = std::move(tag)]() mutable {
+                self->get_connection().executor()->post([self, tag = std::move(tag)]() mutable {
                     if (self->is_closed()) return;
                     send_tagged(self, tag, "NO", "Server error");
                     self->drain_buffered_commands();

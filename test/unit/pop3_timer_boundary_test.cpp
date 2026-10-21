@@ -175,7 +175,8 @@ void test_heartbeat_affinity() {
         database->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>());
         fsm->process_event(session, Pop3Event::PASS);
         worker->drain();
-        assert(session->get_current_state() == static_cast<int>(Pop3State::TRANSACTION));
+        // Worker/DB completion must not mutate protocol state before the owner.
+        assert(session->get_current_state() == static_cast<int>(Pop3State::AUTHORIZATION));
         return session;
     };
     auto session = login();

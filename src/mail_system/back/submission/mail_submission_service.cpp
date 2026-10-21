@@ -1,11 +1,21 @@
 #include "mail_system/back/submission/mail_submission_service.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
-#include "mail_system/back/db/sql_queries.h"
-#include "mail_system/back/common/safe_parse.h"
+#include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace mail_system::submission {
 struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation> {
@@ -173,8 +183,11 @@ MailSubmissionService::MailSubmissionService(std::shared_ptr<router::IShardRoute
                                              std::shared_ptr<AccountPolicy> policy,
                                              std::shared_ptr<persist_storage::PersistentQueue> queue,
                                              ExecutorProvider executors, ServerConfig config,
-                                             uint16_t node_id)
-    : router_(std::move(router)), workers_(std::move(workers)), policy_(std::move(policy)),
+                                             uint16_t node_id,
+                                             std::shared_ptr<repository::IAccountRepository> accounts)
+    : router_(std::move(router)), workers_(std::move(workers)),
+      accounts_(accounts ? std::move(accounts) : repository::make_account_repository(router_)),
+      policy_(std::move(policy)),
       queue_(std::move(queue)), executors_(std::move(executors)), config_(std::move(config)),
       ids_(node_id % 32, node_id / 32) {
     if (!router_ || !workers_ || !policy_ || !queue_ || !executors_ || node_id > 1023)
@@ -191,25 +204,17 @@ void MailSubmissionService::submit_async(Request request, Complete cb) {
         op->guard([&] {
             auto &s = *op->service;
             // Defend the trusted boundary against stale/disabled/deleted actors too.
-            op->shard = s.router_->route(op->request.sender);
+            op->shard = s.accounts_->route_address(op->request.sender);
             if (op->shard < 0 || !op->request.user_id) {
                 op->fail(Status::AuthFailed, 535, "auth");
                 return;
             }
-            auto pool = s.router_->get_db_pool(static_cast<size_t>(op->shard));
-            auto conn = pool ? pool->acquire_connection() : ScopedConnection::invalid();
-            if (!conn->is_valid()) {
+            auto actor = s.accounts_->verify_actor(op->request.sender, op->request.user_id, op->shard);
+            if (actor == repository::ActorStatus::unavailable) {
                 op->fail(Status::Unavailable, 451, "auth");
                 return;
             }
-            auto user = (*conn)->query(db::sql::build_auth_user_query(), {op->request.sender});
-            conn.reset();
-            if (!user) {
-                op->fail(Status::Unavailable, 451, "auth");
-                return;
-            }
-            if (!user->get_row_count() || safe_stoull(user->get_value(0, "id")) != op->request.user_id ||
-                safe_stoull(user->get_value(0, "status")) != 1) {
+            if (actor != repository::ActorStatus::valid) {
                 op->fail(Status::AuthFailed, 535, "auth");
                 return;
             }

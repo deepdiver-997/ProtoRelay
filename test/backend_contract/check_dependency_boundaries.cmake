@@ -47,7 +47,15 @@ foreach(service
     include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h
     include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp
     src/mail_system/back/webmail/mail_actions.cpp
-    src/mail_system/back/webmail/session_store.cpp)
+    src/mail_system/back/webmail/session_store.cpp
+    include/mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h
+    include/mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.tpp
+    include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h
+    include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp
+    include/mail_system/back/common/password_rehash.h
+    src/mail_system/back/common/account_authentication.cpp
+    src/mail_system/back/common/account_policy.cpp
+    src/mail_system/back/submission/mail_submission_service.cpp)
     file(READ "${PR_SOURCE_ROOT}/${service}" source)
     if(source MATCHES "db::sql::|IDBResult|->(async_query|async_execute|query|execute)[ \t]*[(]")
         message(FATAL_ERROR "Application service bypasses its repository: ${service}")
