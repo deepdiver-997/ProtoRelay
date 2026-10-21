@@ -10,7 +10,8 @@
 # 本机微调（环境变量）：
 #   CODEX_PROXY_PORTS="12002 7897"   端口表
 #   CODEX_PROXY_HOST=127.0.0.1       代理地址
-#   CODEX_BIN=/path/to/real/codex    真实二进制（默认从 PATH 找）
+# 真实二进制按固定顺序解析（/opt/homebrew/bin → /usr/local/bin → PATH），
+# 并自动跳过门卫/shim，防止套娃。
 #
 # 想全局生效：alias codex='~/code/c++/project/mail-system/v8/tools/agents/codex'
 
@@ -19,9 +20,20 @@ set -e
 PROXY_PORTS="${CODEX_PROXY_PORTS:-12002 7897}"
 PROXY_HOST="${CODEX_PROXY_HOST:-127.0.0.1}"
 
-REAL_CODEX="${CODEX_BIN:-codex}"
-if [ "${REAL_CODEX}" = "codex" ]; then
-    REAL_CODEX="$(command -v codex)" || { echo "[codex-proxy] 找不到真实 codex 二进制" >&2; exit 1; }
+REAL_CODEX=""
+# 真实二进制解析：先看常见绝对路径，再退回 PATH；跳过任何门卫（含机器级 shim），
+# 防止 包装→shim→包装 的套娃。
+for cand in "/opt/homebrew/bin/codex" "/usr/local/bin/codex" "$(command -v codex 2>/dev/null || true)"; do
+    [ -n "${cand}" ] && [ -x "${cand}" ] || continue
+    if head -c 2048 "${cand}" 2>/dev/null | grep -q "codex-proxy"; then
+        continue   # 是门卫/shim，不是真实二进制
+    fi
+    REAL_CODEX="${cand}"
+    break
+done
+if [ -z "${REAL_CODEX}" ]; then
+    echo "[codex-proxy] 找不到真实 codex 二进制（只找到了门卫/shim）" >&2
+    exit 1
 fi
 
 chosen=""

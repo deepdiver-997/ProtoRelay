@@ -29,15 +29,18 @@ mail-system/
 │       ├── alloc/<name>.env          资源分配记录
 │       ├── runs/<name>/<ts>/         spawn 的无头会话记录
 │       └── STOP                      存在时 worktree 内新构建一律拒绝（紧急刹车）
-├── ~/.agent-workspaces/              ← 设备级磁盘账本（全机所有项目共享一份，不属于任何仓库）
+├── ~/.agent-workspaces/              ← 设备级共享目录（账本 + 所有项目的 worktree，不属于任何仓库）
 │   ├── budget.conf                   人工设定、经 df 实测校验的总预算
-│   └── ledger.tsv                    各项目各 worktree 的占用登记
-└── agents/<项目名>/                   ← AGENTS_DIR（默认 hub 父目录/agents/<项目名>/，项目命名空间防串名）
-    └── <name>/                       worktree，分支 feat/<name>
-        ├── build/                    自己的构建目录
-        ├── config/                   从 hub 播种的 gitignored 配置（已改成独占端口/库名）
-        ├── test/config/              用独占端口/目录生成的测试配置
-        └── .agent-env                身份 + 资源（gitignored）
+│   ├── ledger.tsv                    各项目各 worktree 的占用登记
+│   └── workspaces/<项目名>/<name>/    ← AGENTS_DIR（固定绝对路径，不提供选项更改）
+│       ├── build/                    自己的构建目录
+│       ├── config/                   从 hub 播种的 gitignored 配置（已改成独占端口/库名）
+│       ├── test/config/              用独占端口/目录生成的测试配置
+│       └── .agent-env                身份 + 资源（gitignored）
+└── ~/.agent-parallel/                ← 骨架母本（家目录分发点：工具 + 指示文档，新项目从这里拉副本）
+```
+
+注：sbs 等旧项目若仍把 worktree 放在仓库旁的 `agents/`，属于其自有工具链的历史布局，不影响本骨架。
 ```
 
 ## 生命周期

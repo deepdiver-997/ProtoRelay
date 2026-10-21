@@ -1,10 +1,9 @@
 # tools/agents/agents.conf —— 本机参数。拷一份：cp agents.conf.example agents.conf（agents.conf 已 gitignore）
 # 全部可省略，省略即默认值。被 lib.sh 以 bash 语法 source，只写 KEY=VALUE。
 
-# worktree 存放目录（默认 <hub 父目录>/agents/<项目名>/——带项目命名空间，多项目不串名；
-# 项目名默认取 hub 父目录名，也可单独改）
-#AGENTS_NAMESPACE=mail-system
-#AGENTS_DIR=/Users/me/code/c++/project/mail-system/agents/mail-system
+# worktree 存放位置：固定在 ~/.agent-workspaces/workspaces/<项目名>/，与磁盘账本同家，
+# 全机器一份，不提供选项更改。项目命名空间自动取 hub 父目录名。
+# （新机器要调的参数见 ~/.agent-parallel/README.md 的「新机器初始化」）
 
 # 新 worktree 的基准分支
 #BASE_BRANCH=main

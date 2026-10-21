@@ -48,10 +48,9 @@ agents_init() {
         # shellcheck disable=SC1090
         . "${conf}"
     fi
-    # 命名空间：worktree 挂在 agents/<项目名>/ 下，多项目共用 agents/ 时互不串名。
-    # 项目名默认取 hub 父目录名（本项目 = mail-system）；agents.conf 里可用
-    # AGENTS_NAMESPACE 改名，或用 AGENTS_DIR 整个挪走。
-    AGENTS_DIR="${AGENTS_DIR:-$(dirname "${HUB}")/agents/${AGENTS_NAMESPACE:-$(basename "$(dirname "${HUB}")")}}"
+    # 工作区根：固定绝对路径，全机器只有这一处，不提供更改选项（与磁盘账本同家）。
+    # 项目命名空间自动取 hub 父目录名（本项目 = mail-system）。
+    AGENTS_DIR="${HOME}/.agent-workspaces/workspaces/$(basename "$(dirname "${HUB}")")"
     BASE_BRANCH="${BASE_BRANCH:-main}"
     PORT_BLOCK_START="${PORT_BLOCK_START:-20000}"
     PORT_BLOCK_SIZE="${PORT_BLOCK_SIZE:-100}"

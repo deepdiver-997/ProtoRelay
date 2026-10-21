@@ -1,6 +1,7 @@
 # AGENTS.md — 本仓库 AI 编码会话须知
 
-> 适用于在本仓库任何检出里工作的 agent 会话：hub 主检出（`v8/`）或 `../agents/<项目名>/<name>` 下的 worktree（带项目命名空间）。
+> 适用于在本仓库任何检出里工作的 agent 会话：hub 主检出（`v8/`）或
+> `~/.agent-workspaces/workspaces/mail-system/<name>` 下的 worktree（全机器统一位置，带项目命名空间）。
 > 多 agent 并行方案的设计、流程与排错见 [`tools/agents/README.md`](tools/agents/README.md)。
 
 ## 1. 先确认你在哪
