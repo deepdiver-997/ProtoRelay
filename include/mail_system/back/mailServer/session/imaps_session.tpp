@@ -142,7 +142,16 @@ void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
         size_t& expected = session->expected_literal_size_;
         if (session->literal_data_buffer_.size() >= expected) {
             session->awaiting_literal_ = false;
-            session->last_command_args_ = std::move(session->literal_data_buffer_);
+            // literal 到量即截断：只取前 expected 字节作命令参数。
+            // 之前整块吞进 args —— literal 后的 CRLF 与同段到达的下一条命令
+            // （如 APPEND 失败后客户端立即补发的 SELECT）被永久吞进邮件体，
+            // 会话再也不派发任何命令，客户端侧表现为 SELECT 无响应挂死
+            // （2026-10-21 生产实测）。越界部分推回命令缓冲，走正常解析。
+            std::string excess = session->literal_data_buffer_.substr(expected);
+            session->last_command_args_ = session->literal_data_buffer_.substr(0, expected);
+            session->literal_data_buffer_.clear();
+            auto& buf = session->command_read_buffer_;
+            buf.insert(0, excess);
             session->context_.current_tag = session->current_tag_;
             session->command_parsed_ = true;
             session->next_event_ = ImapEvent::APPEND;

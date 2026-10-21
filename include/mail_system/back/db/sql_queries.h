@@ -193,7 +193,14 @@ std::string build_imap_update_mail_flag_deleted();
 std::string build_imap_update_mail_flag_starred();
 std::string build_imap_append_mail_metadata();
 std::string build_imap_append_mail_recipient();
+// mail_mailbox 关联（APPEND/COPY）。生产表无 add_time 列（2026-10-21 生产
+// 实测 Unknown column 'add_time'），列清单以生产为准，与 SMTP 入站路径同款。
+// 参数 {mail_id, mailbox_id, user_id}。
 std::string build_imap_append_mailbox();
+// APPEND 失败回滚：逐表显式删，不赌生产 FK 级联。参数 {mail_id}。
+std::string build_delete_mail_by_id();
+std::string build_delete_mail_recipients_by_mail();
+std::string build_delete_mailbox_links_by_mail();
 std::string build_imap_select_status_total();
 std::string build_imap_select_status_recent();
 std::string build_imap_expunge_delete_mailbox();

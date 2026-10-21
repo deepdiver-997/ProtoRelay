@@ -3,6 +3,7 @@
 
 #include "mail_system/back/db/db_pool.h"
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -70,11 +71,35 @@ public:
 
     // 清空 pending 回调与最近参数（测试隔离：排除持久化 worker 等其它查询来源）
     void clear_pending() {
-        std::lock_guard<std::mutex> lk(mu_);
-        pending_query_ = nullptr;
-        pending_execute_ = nullptr;
-        last_sql_.clear();
-        last_params_.clear();
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            pending_query_ = nullptr;
+            pending_execute_ = nullptr;
+            last_sql_.clear();
+            last_params_.clear();
+        }
+        // execute 剧本走 script_mu_（锁序恒为 mu_ → script_mu_，无反向）
+        std::lock_guard<std::mutex> lk(script_mu_);
+        fail_execute_once_ = false;
+        execute_script_.clear();
+    }
+
+    // 一次性 execute 失败注入：下一次 execute()/async_execute()（同步路径）
+    // 返回 false，随后恢复 true。APPEND 半写回滚等失败路径测试用。
+    // ⚠ 用独立的 script_mu_（非 mu_）：take_execute_result 会在
+    // async_execute_impl 持有 mu_ 的路径上被调用（同步模式），再进 mu_ 就是
+    // 非递归重锁死锁（与 query/pop_sync_result 分 q_mu_ 同理）。
+    void fail_next_execute(bool fail = true) {
+        std::lock_guard<std::mutex> lk(script_mu_);
+        fail_execute_once_ = fail;
+    }
+
+    // execute 结果脚本：FIFO，逐个消费；空脚本默认成功。
+    // APPEND 链 mails→recipients→mailbox_link 三连执行，需要"前两个成功、
+    // 第三个失败"这类剧本。
+    void push_execute_result(bool ok) {
+        std::lock_guard<std::mutex> lk(script_mu_);
+        execute_script_.push_back(ok);
     }
 
     // ---- 查询 pending / 手动触发 ----
@@ -148,10 +173,10 @@ public:
         std::lock_guard<std::mutex> lk(q_mu_);
         sync_results_.push(std::move(r));
     }
-    bool execute(const std::string& sql) override { (void)sql; return true; }
+    bool execute(const std::string& sql) override { (void)sql; return take_execute_result(); }
     bool execute(const std::string& sql,
                  const std::vector<std::string>& params) override {
-        (void)sql; (void)params; return true;
+        (void)sql; (void)params; return take_execute_result();
     }
     bool begin_transaction() override { return true; }
     bool commit() override { return true; }
@@ -178,6 +203,22 @@ public:
     void async_rollback(pr::ExecuteCallback cb) override { if (cb) cb(true); }
 
 private:
+    bool take_execute_result() {
+        // 只碰 script_mu_：本函数在 async_execute_impl 持有 mu_ 期间被调用，
+        // 绝不能再进 mu_（非递归重锁死锁，2026-10-21 实测卡死 uidnext 用例）。
+        std::lock_guard<std::mutex> lk(script_mu_);
+        if (!execute_script_.empty()) {
+            bool ok = execute_script_.front();
+            execute_script_.pop_front();
+            return ok;
+        }
+        if (fail_execute_once_) {
+            fail_execute_once_ = false;
+            return false;
+        }
+        return true;
+    }
+
     void async_query_impl(const std::string& sql, const std::vector<std::string>& params,
                           pr::QueryCallback cb) {
         bool sync_call = false;
@@ -215,8 +256,11 @@ private:
     }
 
     mutable std::mutex mu_;
+    mutable std::mutex script_mu_;   // 只护 execute_script_/fail_execute_once_（见上）
     bool connected_ = true;
     bool deferred_ = true;
+    bool fail_execute_once_ = false;
+    std::deque<bool> execute_script_;
     std::string last_sql_;
     std::vector<std::string> last_params_;
     pr::QueryCallback pending_query_;

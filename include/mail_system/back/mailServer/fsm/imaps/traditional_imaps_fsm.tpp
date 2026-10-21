@@ -101,6 +101,10 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     this->add_transition(ImapState::SELECTED, ImapEvent::MOVE, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::UID, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::EXPUNGE, ImapState::SELECTED);
+    // RFC 3501 §6.3.1/§6.3.2：SELECT/EXAMINE 在 selected 态同样合法（切换邮箱）。
+    // 缺失导致 APPEND 等命令之后同会话 SELECT 直接落 BAD（2026-10-21 生产实测挂死链一环）。
+    this->add_transition(ImapState::SELECTED, ImapEvent::SELECT, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::EXAMINE, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
     this->add_transition(ImapState::SELECTED, ImapEvent::CHECK, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::CAPABILITY, ImapState::SELECTED);
@@ -162,6 +166,8 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     this->add_handler(ImapState::SELECTED, ImapEvent::MOVE, [this](auto session) { handle_move(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::UID, [this](auto session) { handle_uid(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::EXPUNGE, [this](auto session) { handle_expunge(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::SELECT, [this](auto session) { handle_select(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::EXAMINE, [this](auto session) { handle_examine(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::CLOSE, [this](auto session) { handle_close(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::CHECK, [this](auto session) { handle_check(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::APPEND, [this](auto session) { handle_append(session); });
@@ -991,20 +997,28 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
                 header_fields_filter = attrs.substr(lp + 1, rp - lp - 1);
         }
     }
-    // 一条 FETCH 可同时索取多个 section，保留请求顺序。0 专指 BODY[]。
-    std::vector<uint64_t> body_parts;
-    static const std::regex section_pattern(R"(BODY(?:\.PEEK)?\[([0-9]*)\])");
-    for (std::sregex_iterator it(attrs.begin(), attrs.end(), section_pattern), end; it != end; ++it) {
-        const auto number = (*it)[1].str();
-        uint64_t part = 0;
-        if (!number.empty() && (!parse_uint(number, part) || part == 0)) {
-            send_tagged(self, tag, "BAD", "Invalid BODY section number");
-            self->drain_buffered_commands();
-            return;
+    // 一条 FETCH 可同时索取多个 section，按请求顺序输出。两类：
+    //   BODY[]                          → 整封（path 空，kind=full，inside=""）
+    //   BODY[n]/BODY[n.m…]/后缀（.MIME/.HEADER/.HEADER.FIELDS(.NOT)/.TEXT）
+    //                                   → parse_body_section（message/rfc822 取址）
+    // 顶层 BODY[HEADER…]/HEADER.FIELDS 不以数字开头，不进此循环，
+    // 仍走下方 want_body_header 既有路径（行为不变）。
+    std::vector<imap_utils::ImapBodySection> body_sections;
+    {
+        // 捕获组可有可无：BODY[] 组不参与（整封），BODY[2…] 组捕获括号内原文
+        static const std::regex section_pattern(R"(BODY(?:\.PEEK)?\[(\d[^\]]*)?\])");
+        for (std::sregex_iterator it(attrs.begin(), attrs.end(), section_pattern), end; it != end; ++it) {
+            imap_utils::ImapBodySection sec;
+            const bool numbered = (*it)[1].matched;
+            if (numbered && !imap_utils::parse_body_section((*it)[1].str(), sec)) {
+                send_tagged(self, tag, "BAD", "Invalid BODY section");
+                self->drain_buffered_commands();
+                return;
+            }
+            body_sections.push_back(std::move(sec));
         }
-        body_parts.push_back(part);
     }
-    const bool want_body = !body_parts.empty();
+    const bool want_body = !body_sections.empty();
     bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
@@ -1030,7 +1044,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
     state->has_header_fields = has_header_fields;
     state->header_fields_not = header_fields_not;
     state->header_fields_filter = std::move(header_fields_filter);
-    state->body_parts = std::move(body_parts);
+    state->body_sections = std::move(body_sections);
     auto* srv = self->get_server();
     state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
 
@@ -1072,7 +1086,7 @@ struct TraditionalImapsFsm<ConnectionType>::FetchContext {
     bool want_body = false, want_body_header = false, want_body_struct = false;
     bool has_header_fields = false, header_fields_not = false;
     std::string header_fields_filter;
-    std::vector<uint64_t> body_parts;
+    std::vector<imap_utils::ImapBodySection> body_sections;
 
     // 推进游标到下一封待处理的邮件；false = 全部完成
     bool advance() {
@@ -1151,33 +1165,33 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
     }
     if (c.want_body) {
         MimePart mime_tree;
-        const bool need_parts = std::any_of(c.body_parts.begin(), c.body_parts.end(),
-                                           [](uint64_t n) { return n != 0; });
+        const bool need_parts = std::any_of(c.body_sections.begin(), c.body_sections.end(),
+                                            [](const imap_utils::ImapBodySection& s) {
+                                                return !s.path.empty();
+                                            });
         const bool have_tree = need_parts && ensure_mime_tree(mail_info.body_path, body_content, mime_tree);
-        for (const auto part_number : c.body_parts) {
+        for (const auto& section : c.body_sections) {
             std::string part_content;
             const std::string* content = &body_content;
-            if (part_number > 0) {
-                const MimePart* part = nullptr;
+            if (!section.path.empty()) {
+                // BODY[]（path 空）→ 整封；编号 section → RFC 3501 §6.4.5 取址
+                // （multipart 子部件 / rfc822 内嵌消息、.MIME/.HEADER/.TEXT 等）
                 if (have_tree) {
-                    if (mime_tree.is_multipart() && part_number <= mime_tree.subs.size())
-                        part = &mime_tree.subs[static_cast<size_t>(part_number - 1)];
-                    else if (!mime_tree.is_multipart() && part_number == 1)
-                        part = &mime_tree;
+                    part_content = imap_utils::extract_body_section(body_content, mime_tree, section);
+                    content = &part_content;
+                } else {
+                    content = &part_content;   // 树不可用 → 空 literal（与旧行为一致）
                 }
-                if (part)
-                    part_content = extract_part_content(body_content, *part);
-                content = &part_content;
             }
-            const std::string label = part_number > 0 ? "BODY[" + std::to_string(part_number) + "]" : "BODY[]";
+            const std::string label = "BODY[" + section.inside + "]";
             c.cur += label + " " + build_fetch_body_response(*content, content->size()) + " ";
         }
     }
     if (c.want_body_struct) {
         if (c.struct_sidecar_hit) {
-            c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree) + " ";
+            c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree, body_content) + " ";
         } else if (ensure_mime_tree(mail_info.body_path, body_content, c.struct_tree)) {
-            c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree) + " ";
+            c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree, body_content) + " ";
         } else {
             c.cur += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
         }
@@ -1234,9 +1248,13 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
         ctx->struct_sidecar_hit = load_mime_tree(mail_info.body_path, ctx->struct_tree) &&
                                   ctx->struct_tree.metadata_version >= kMimeMetadataVersion;
     }
+    // rfc822 部件的 BODYSTRUCTURE 需要内嵌消息头（ENVELOPE），sidecar 只存结构
+    // 不存头文本 → 树里含 rfc822 时必须读正文（否则 ENVELOPE 只能全 NIL）。
     const bool need_body = !mail_info.body_path.empty() &&
         (ctx->want_body_header || ctx->want_body ||
-         (ctx->want_body_struct && !ctx->struct_sidecar_hit));
+         (ctx->want_body_struct && !ctx->struct_sidecar_hit) ||
+         (ctx->want_body_struct && ctx->struct_sidecar_hit &&
+          imap_utils::mime_tree_has_rfc822(ctx->struct_tree)));
 
     if (need_body && ctx->provider) {
         session->set_paused(true);
@@ -1939,6 +1957,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
 
     // 解析 preamble: mailbox (flags) "InternalDate"
     std::string preamble = ctx->pending_append_preamble;
+    ctx->pending_append_preamble.clear();   // 消费即清：防串到下一条 APPEND
     std::string mailbox_name;
     std::string flags_str;
 
@@ -2043,18 +2062,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
                           user_id, target_mbox_id]() mutable {
                 TraditionalImapsFsm<ConnectionType>::create_mail_async(
                     storage, conn, subject, body_content,
-                    [this, self, conn, tag = std::move(tag), user_id, target_mbox_id,
+                    [this, self, conn, storage, tag = std::move(tag), user_id, target_mbox_id,
                      init_status, mailbox_name = std::move(mailbox_name)](
                         uint64_t mail_id, std::string, std::string error) mutable {
                         if (!self || self->is_closed()) return;
                         if (mail_id == 0) {
-                            send_tagged(self, tag, "NO", "APPEND failed: " + error);
+                            send_tagged(self, tag, "NO", "[SERVERBUG] APPEND failed: " + error);
                             self->drain_buffered_commands();
                             return;
                         }
                         TraditionalImapsFsm<ConnectionType>::get_user_email_async(
                             conn, user_id,
-                            [this, self, conn, tag = std::move(tag), mail_id, user_id,
+                            [this, self, conn, storage, tag = std::move(tag), mail_id, user_id,
                              target_mbox_id, init_status, mailbox_name = std::move(mailbox_name)](
                                 std::string user_email) mutable {
                                 if (!self || self->is_closed()) return;
@@ -2065,9 +2084,32 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
                                 TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox_async(
                                     conn, mail_id, user_id, target_mbox_id,
                                     user_email, user_email, init_status,
-                                    [this, self, tag = std::move(tag), mail_id, target_mbox_id,
-                                     user_id, mailbox_name = std::move(mailbox_name), user_email](bool) {
+                                    [this, self, conn, storage, tag = std::move(tag), mail_id,
+                                     target_mbox_id, user_id, mailbox_name = std::move(mailbox_name),
+                                     user_email](bool ok) mutable {
                                         if (!self || self->is_closed()) return;
+                                        if (!ok) {
+                                            // 关联写失败 → 回 tagged NO，并清掉半写状态：
+                                            // mails/mail_recipients/mail_mailbox 三表显式删
+                                            // （生产 FK 不明，不赌级联），体文件一并删除。
+                                            // 之前忽略失败仍回 OK，且孤儿体文件永留盘上
+                                            // （2026-10-21 生产实测 /opt/smtpServer/mail/<id>）。
+                                            LOG_IMAP_ERROR(
+                                                "APPEND: link failed for mail_id={}, rolling back",
+                                                mail_id);
+                                            TraditionalImapsFsm<ConnectionType>::delete_mail_cascade_async(
+                                                conn, storage, mail_id,
+                                                [self, tag = std::move(tag)](bool removed) {
+                                                    if (!self || self->is_closed()) return;
+                                                    if (!removed)
+                                                        LOG_IMAP_ERROR(
+                                                            "APPEND: rollback incomplete, orphan may remain");
+                                                    send_tagged(self, tag, "NO",
+                                                                "[SERVERBUG] APPEND failed");
+                                                    self->drain_buffered_commands();
+                                                });
+                                            return;
+                                        }
                                         this->invalidate_mailbox_list(user_id, target_mbox_id);
                                         // 返回 APPENDUID
                                         uint64_t uidvalidity = target_mbox_id;
@@ -2086,6 +2128,136 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
 }
 
 // ---------- SEARCH ----------
+
+namespace {
+// SEARCH 判据用的轻量分词：按空白切，双引号串为一个 token（\" 转义）。
+std::vector<std::string> imap_search_tokens(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+        if (i >= s.size()) break;
+        std::string tok;
+        if (s[i] == '"') {
+            ++i;
+            while (i < s.size() && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < s.size()) ++i;
+                tok += s[i++];
+            }
+            if (i < s.size()) ++i;   // 收尾引号
+        } else {
+            while (i < s.size() && s[i] != ' ' && s[i] != '\t') tok += s[i++];
+        }
+        if (!tok.empty()) out.push_back(std::move(tok));
+    }
+    return out;
+}
+
+struct ImapSearchHeaderKey {
+    std::string field;   // 头字段名（原始大小写，匹配时忽略大小写）
+    std::string value;   // 子串（匹配时忽略大小写）
+};
+
+// 提取 HEADER <field> <value> 判据（可多条，隐式 AND）。
+// 之前 SEARCH 完全忽略 HEADER 判据：无 flag 命中时 match 恒 true，
+// UID SEARCH HEADER Message-ID <x> 返回全箱 UID（2026-10-21 生产实测）。
+std::vector<ImapSearchHeaderKey> parse_search_header_keys(const std::string& args) {
+    std::vector<ImapSearchHeaderKey> keys;
+    auto tokens = imap_search_tokens(args);
+    auto ieq = [](const std::string& a, const char* b) {
+        if (a.size() != std::char_traits<char>::length(b)) return false;
+        for (size_t k = 0; k < a.size(); ++k)
+            if (std::toupper(static_cast<unsigned char>(a[k])) !=
+                static_cast<unsigned char>(b[k])) return false;
+        return true;
+    };
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (!ieq(tokens[i], "HEADER")) continue;
+        if (i + 2 >= tokens.size()) break;   // 缺 field/value，判据不完整 → 忽略
+        ImapSearchHeaderKey key;
+        key.field = tokens[i + 1];
+        key.value = tokens[i + 2];
+        keys.push_back(std::move(key));
+        i += 2;
+    }
+    return keys;
+}
+
+// 头字段抽取：header 块内所有同名行（含 folded 续行）合并为一个字符串。
+// 找不到字段返回 false。字段名与内容的大小写都不参与（匹配在调用方做不敏感化）。
+bool collect_header_field(const std::string& header_block,
+                          const std::string& field_name, std::string& out) {
+    auto lower = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v;
+    };
+    const std::string want = lower(field_name);
+    bool found = false;
+    bool selected = false;
+    size_t pos = 0;
+    while (pos < header_block.size()) {
+        size_t eol = header_block.find('\n', pos);
+        if (eol == std::string::npos) eol = header_block.size();
+        std::string line = header_block.substr(pos, eol - pos);
+        pos = eol == header_block.size() ? header_block.size() : eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) break;   // 头块结束
+        if (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+            if (selected) { out += " "; out += mime_params_detail::trim(line); }
+            continue;
+        }
+        selected = false;
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        if (lower(mime_params_detail::trim(line.substr(0, colon))) == want) {
+            selected = true;
+            found = true;
+            out += mime_params_detail::trim(line.substr(colon + 1));
+        }
+    }
+    return found;
+}
+
+// 邮件体正文文件读取（SEARCH HEADER 用；storage 缺席时退回本地 ifstream）
+std::string search_read_body(const std::shared_ptr<storage::IStorageProvider>& storage,
+                             const std::string& body_path) {
+    if (body_path.empty()) return {};
+    if (storage) {
+        storage::IoError err;
+        std::string data;
+        if (storage->read_all(body_path, data, err)) return data;
+    }
+    std::ifstream in(body_path, std::ios::binary);
+    if (!in.is_open()) return {};
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// HEADER 判据匹配：仅在该头字段内做大小写不敏感子串匹配；
+// 字段不存在 → 不命中；value 为空 → 有该字段即命中（RFC 3501 §6.4.4）。
+bool mail_matches_header_keys(const std::shared_ptr<storage::IStorageProvider>& storage,
+                              const MailboxMailInfo& m,
+                              const std::vector<ImapSearchHeaderKey>& keys) {
+    const std::string body = search_read_body(storage, m.body_path);
+    size_t sep = body.find("\r\n\r\n");
+    if (sep == std::string::npos) sep = body.find("\n\n");
+    const std::string header_block =
+        (sep == std::string::npos) ? body : body.substr(0, sep);
+    auto lower = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return v;
+    };
+    for (const auto& key : keys) {
+        std::string field_text;
+        if (!collect_header_field(header_block, key.field, field_text)) return false;
+        if (key.value.empty()) continue;
+        if (lower(field_text).find(lower(key.value)) == std::string::npos) return false;
+    }
+    return true;
+}
+} // namespace
+
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_search(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, bool is_uid)
@@ -2098,17 +2270,23 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         return;
     }
 
-    // 解析搜索关键词（简单实现常用关键词）——不依赖 DB，先算
-    std::string upper_args = session->get_last_command_args();
-    std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
+    const std::string raw_args = session->get_last_command_args();
 
-    bool search_unseen = (upper_args.find("UNSEEN") != std::string::npos
-                         || upper_args.find("NEW") != std::string::npos);
-    bool search_seen = (upper_args.find("SEEN") != std::string::npos
-                       && upper_args.find("UNSEEN") == std::string::npos
-                       && upper_args.find("UNSEEN") == std::string::npos);
-    bool search_deleted = (upper_args.find("DELETED") != std::string::npos
-                          && upper_args.find("UNDELETED") == std::string::npos);
+    // 判据解析（不依赖 DB，先算）。flag 判据沿用既有语义；HEADER 判据从
+    // 原始参数分词提取（upper_args 的子串扫描会被含 "SEEN"/"UNSEEN" 字样的
+    // 头值污染，HEADER 命中率也因此错乱）。
+    const auto header_keys = parse_search_header_keys(raw_args);
+    std::string upper_args = raw_args;
+    std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
+    auto tokens = imap_search_tokens(upper_args);
+    auto has_token = [&](const char* t) {
+        for (const auto& tok : tokens)
+            if (tok == t) return true;
+        return false;
+    };
+    const bool search_unseen = has_token("UNSEEN") || has_token("NEW");
+    const bool search_seen = has_token("SEEN") && !has_token("UNSEEN");
+    const bool search_deleted = has_token("DELETED") && !has_token("UNDELETED");
 
     auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
@@ -2119,11 +2297,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
     auto self = session->shared_from_this();
     uint64_t mailbox_id = ctx->selected_mailbox_id;
     uint64_t user_id = ctx->user_id;
+    auto storage = this->get_storage(0);
+    auto worker = this->m_workerThreadPool;
 
     TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
         conn, mailbox_id, user_id,
         [self, tag = std::move(tag), is_uid,
          search_unseen, search_seen, search_deleted,
+         header_keys, storage, worker,
          upper_args = std::move(upper_args)](
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
@@ -2170,19 +2351,48 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
                 }
             }
 
-            std::string response = "* SEARCH";
-            for (size_t i = 0; i < mails.size(); ++i) {
-                const auto& m = mails[i];
+            // 匹配谓词：flag/UID 判据与旧实现完全一致，HEADER 判据在末尾 AND。
+            // 显式按值捕获：worker 路径要把它整体搬进 post 的 lambda，
+            // 引用捕获会在回调返回后悬空。
+            auto matches = [search_unseen, search_seen, search_deleted, has_uid_range,
+                            uid_lo, uid_hi, header_keys, storage](const MailboxMailInfo& m) {
                 bool match = true;
                 if (search_unseen) match = (m.status == 1);
                 else if (search_seen) match = (m.status == 0);
                 if (search_deleted) match = m.is_deleted;
                 if (has_uid_range)
                     match = match && (m.mail_id >= uid_lo && m.mail_id <= uid_hi);
+                if (match && !header_keys.empty())
+                    match = match && mail_matches_header_keys(storage, m, header_keys);
+                return match;
+            };
 
-                if (match) {
+            // HEADER 判据要逐封读体文件（阻塞 I/O），整段丢 worker 跑；
+            // 纯 flag 判据维持原内联路径（Leger 的 UNSEEN 轮询不受影响）。
+            if (!header_keys.empty() && worker) {
+                worker->post([self, tag = std::move(tag), is_uid,
+                              mails = std::move(mails), matches]() mutable {
+                    std::string response = "* SEARCH";
+                    for (size_t i = 0; i < mails.size(); ++i) {
+                        if (matches(mails[i])) {
+                            // UID SEARCH 返回 mail_id，普通 SEARCH 返回 seq number
+                            response += " " + std::to_string(is_uid ? mails[i].mail_id : (i + 1));
+                        }
+                    }
+                    response += "\r\n";
+                    response += tag + " OK SEARCH completed\r\n";
+                    self->do_async_write(response,
+                        [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
+                    self->drain_buffered_commands();
+                });
+                return;
+            }
+
+            std::string response = "* SEARCH";
+            for (size_t i = 0; i < mails.size(); ++i) {
+                if (matches(mails[i])) {
                     // UID SEARCH 返回 mail_id，普通 SEARCH 返回 seq number
-                    response += " " + std::to_string(is_uid ? m.mail_id : (i + 1));
+                    response += " " + std::to_string(is_uid ? mails[i].mail_id : (i + 1));
                 }
             }
             response += "\r\n";
@@ -2813,10 +3023,60 @@ void TraditionalImapsFsm<ConnectionType>::create_mail_async(
         {std::to_string(mail_id),
          db::sql::clip_subject_for_db(subject.empty() ? "(无主题)" : subject),
          body_path, std::to_string(ts)},
-        [conn, mail_id = static_cast<uint64_t>(mail_id), body_path = std::move(body_path),
+        [conn, storage, mail_id = static_cast<uint64_t>(mail_id), body_path = std::move(body_path),
          cb = std::move(cb)](bool ok) mutable {
-            if (ok) cb(mail_id, std::move(body_path), "");
-            else cb(0, "", "Insert mail record failed");
+            if (ok) { cb(mail_id, std::move(body_path), ""); return; }
+            // mails 行写失败：体文件已先落，必须删掉，不留孤儿
+            // （2026-10-21 生产实测失败路径残留 /opt/smtpServer/mail/<id>）。
+            if (storage) {
+                storage::IoError rm_err;
+                if (!storage->remove_object(body_path, rm_err))
+                    LOG_IMAP_ERROR("APPEND: failed to remove orphan body {}: {}",
+                                   body_path, rm_err.message);
+            } else {
+                std::error_code rm_ec;
+                std::filesystem::remove(body_path, rm_ec);
+            }
+            cb(0, "", "Insert mail record failed");
+        });
+}
+
+// APPEND 半写回滚：三表显式删（不赌生产 FK 级联）+ 体文件删除。
+// 任一 DB 删除失败都继续其余清理，最终以 removed=false 提示调用方留痕。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::delete_mail_cascade_async(
+    std::shared_ptr<ScopedConnection> conn,
+    const std::shared_ptr<storage::IStorageProvider>& storage,
+    uint64_t mail_id, std::function<void(bool)> cb)
+{
+    if (!conn || !conn->is_valid()) { if (cb) cb(false); return; }
+    auto step = [conn, storage, mail_id, cb = std::move(cb)](
+                    bool ok1, bool ok2, bool ok3) mutable {
+        bool removed = ok1 && ok2 && ok3;
+        if (storage) {
+            storage::IoError err;
+            const std::string key = storage->build_mail_body_key(mail_id);
+            if (storage->remove_object(key, err)) {
+                // removed 语义只反映 DB 侧；文件删除失败仅记日志
+            } else {
+                LOG_IMAP_ERROR("APPEND rollback: failed to remove body {}: {}",
+                               key, err.message);
+            }
+        }
+        if (cb) cb(removed);
+    };
+    (*conn)->async_execute(db::sql::build_delete_mailbox_links_by_mail(),
+        {std::to_string(mail_id)},
+        [conn, mail_id, step = std::move(step)](bool ok1) mutable {
+            (*conn)->async_execute(db::sql::build_delete_mail_recipients_by_mail(),
+                {std::to_string(mail_id)},
+                [conn, mail_id, step = std::move(step), ok1](bool ok2) mutable {
+                    (*conn)->async_execute(db::sql::build_delete_mail_by_id(),
+                        {std::to_string(mail_id)},
+                        [step = std::move(step), ok1, ok2](bool ok3) mutable {
+                            step(ok1, ok2, ok3);
+                        });
+                });
         });
 }
 
@@ -2834,10 +3094,10 @@ void TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox_async(
         [conn, mail_id, mailbox_id, user_id, cb = std::move(cb)](bool ok) mutable {
             if (!ok) { cb(false); return; }
             // mail_mailbox.id 是 AUTO_INCREMENT，省略由 DB 生成；
-            // UNIQUE KEY uk_mail_box_user 防重复关联
-            (*conn)->async_execute(
-                "INSERT INTO mail_mailbox (mail_id, mailbox_id, user_id, is_starred, "
-                "is_important, is_deleted, add_time) VALUES (?, ?, ?, 0, 0, 0, NOW())",
+            // UNIQUE KEY uk_mail_box_user 防重复关联。
+            // SQL 走 builder：生产 mail_mailbox 无 add_time 列（2026-10-21 生产
+            // 实测 Unknown column），与 SMTP 入站路径（persistent_queue）同款三列写法。
+            (*conn)->async_execute(db::sql::build_imap_append_mailbox(),
                 {std::to_string(mail_id), std::to_string(mailbox_id), std::to_string(user_id)},
                 [conn, cb = std::move(cb)](bool ok2) mutable { cb(ok2); });
         });
@@ -3051,16 +3311,18 @@ void TraditionalImapsFsm<ConnectionType>::batch_insert_mailbox_async(
     // INSERT IGNORE：uk_mail_box_user 自动去重（无需逐封查重），id 由
     // AUTO_INCREMENT 生成。实际插入数用 SELECT ROW_COUNT() 读（dup 被
     // IGNORE 的不计入）。
+    // 列清单与生产 schema 对齐（无 add_time，2026-10-21 生产实测 Unknown column）；
+    // is_starred/is_important/is_deleted 显式给 0 与旧行为一致。
     std::string values;
     bool first = true;
     for (uint64_t mid : mail_ids) {
         if (!first) values += ",";
         values += "(" + std::to_string(mid) + "," + std::to_string(target_id) + ","
-               + std::to_string(user_id) + ",0,0,0,NOW())";
+               + std::to_string(user_id) + ",0,0,0)";
         first = false;
     }
     std::string sql = "INSERT IGNORE INTO mail_mailbox "
-        "(mail_id, mailbox_id, user_id, is_starred, is_important, is_deleted, add_time) "
+        "(mail_id, mailbox_id, user_id, is_starred, is_important, is_deleted) "
         "VALUES " + values;
     (*conn)->async_execute(sql,
         [conn, cb = std::move(cb)](bool ok) mutable {

@@ -427,7 +427,7 @@ static void test_attachment_structure_consumer() {
     MimePart upgraded;expect_true(ensure_mime_tree(path, raw, upgraded), "legacy cache upgraded");
     expect_num(upgraded.subs.size(), 3, "legacy cache does not hide attachments");
     std::ifstream f(path + ".mime");const std::string cache((std::istreambuf_iterator<char>(f)), {});
-    expect_contains(cache, "\"v\":2", "upgraded MIME metadata version persisted");
+    expect_contains(cache, "\"v\":3", "upgraded MIME metadata version persisted");
     std::filesystem::remove(path);std::filesystem::remove(path + ".mime");
 }
 
@@ -440,6 +440,323 @@ static void test_repeated_boundary_is_bounded() {
     expect_num(root.subs.size(), 24, "reused boundary has 24 siblings");
     for (const auto& child : root.subs)
         expect_true(child.subs.empty(), "sibling is not recursively treated as descendant");
+}
+
+// ========== message/rfc822（2026-10-21 缺陷1：BODYSTRUCTURE/section 取址） ==========
+
+// 生产探针 fixture：multipart/mixed，part 1 = text/plain，part 2 = message/rfc822
+// 附件 draft.eml（内嵌单叶子 text/plain）。
+static const std::string kRfc822ProbeRaw =
+    "From: probe@scut.email\r\n"
+    "To: leger@scut.email\r\n"
+    "Subject: rfc822 probe\r\n"
+    "Message-ID: <probe-rfc822-2@scut.email>\r\n"
+    "Date: Mon, 20 Oct 2026 18:00:00 +0000\r\n"
+    "MIME-Version: 1.0\r\n"
+    "Content-Type: multipart/mixed; boundary=\"OUTER\"\r\n"
+    "\r\n"
+    "--OUTER\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n"
+    "\r\n"
+    "part-one\r\n"
+    "--OUTER\r\n"
+    "Content-Type: message/rfc822; name=\"draft.eml\"\r\n"
+    "Content-Disposition: attachment; filename=\"draft.eml\"\r\n"
+    "Content-Transfer-Encoding: 8bit\r\n"
+    "\r\n"
+    "Message-ID: <draft-inner@scut.email>\r\n"
+    "From: drafter@scut.email\r\n"
+    "To: leger@scut.email\r\n"
+    "Subject: inner draft\r\n"
+    "Date: Mon, 20 Oct 2026 17:00:00 +0000\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n"
+    "\r\n"
+    "inner body line\r\n"
+    "--OUTER--\r\n";
+
+static void test_rfc822_tree_shape() {
+    MimePart root;
+    parse_mime_tree(kRfc822ProbeRaw, root);
+    expect_num(root.subs.size(), 2, "probe: two top-level parts");
+    if (root.subs.size() != 2) return;
+    const auto& att = root.subs[1];
+    expect_str(att.type, "message", "part2 type");
+    expect_str(att.subtype, "rfc822", "part2 subtype");
+    expect_str(att.name, "draft.eml", "part2 filename");
+    expect_num(att.subs.size(), 1, "rfc822 part has exactly one embedded root");
+    if (att.subs.size() != 1) return;
+    const auto& embedded = att.subs[0];
+    expect_str(embedded.type, "text", "embedded type");
+    expect_str(embedded.subtype, "plain", "embedded subtype");
+    expect_str(embedded.charset, "utf-8", "embedded charset");
+    expect_true(embedded.subs.empty(), "embedded leaf has no subs");
+    // 内嵌正文提取 = BODY[2.1]（内嵌单叶子，n.1 即该叶子）
+    expect_str(extract_part_content(kRfc822ProbeRaw, embedded), "inner body line",
+               "BODY[2.1] embedded leaf content");
+    // BODY[2] 仍是整段内嵌消息（含内嵌头，既有行为不变）
+    const std::string whole = extract_part_content(kRfc822ProbeRaw, att);
+    expect_contains(whole, "Message-ID: <draft-inner@scut.email>", "BODY[2] keeps embedded header");
+    expect_contains(whole, "inner body line", "BODY[2] keeps embedded body");
+}
+
+// BODYSTRUCTURE：rfc822 部件在基础字段后必须附 ENVELOPE + 内嵌结构 + 行数
+// （RFC 3501 §7.4.2）。修复前输出（生产实测）：
+//   ("message" "rfc822" ("NAME" "draft.eml") NIL NIL "8bit" 168 NIL ("attachment" ...) NIL NIL)
+// —— envelope/body/lines 三个字段缺失，客户端按位置解析错位。
+static void test_rfc822_bodystructure() {
+    MimePart root;
+    parse_mime_tree(kRfc822ProbeRaw, root);
+    const std::string bs = imap_utils::build_bodystructure_tree(root, kRfc822ProbeRaw);
+    expect_contains(bs, "(\"message\" \"rfc822\" (\"NAME\" \"draft.eml\") NIL NIL \"8bit\"",
+                    "rfc822 base fields");
+    // 内嵌 ENVELOPE（内嵌消息的 Date/Subject/From/To/Message-ID）
+    expect_contains(bs, "\"<draft-inner@scut.email>\"", "rfc822 envelope message-id");
+    expect_contains(bs, "\"inner draft\"", "rfc822 envelope subject");
+    expect_contains(bs, "\"drafter\" \"scut.email\"", "rfc822 envelope address");
+    // 内嵌 BODYSTRUCTURE 紧随其后，然后是行数字段（= 内嵌消息总行数，含内嵌头）
+    expect_contains(bs, ") (\"text\" \"plain\" (\"CHARSET\" \"utf-8\") NIL NIL \"7bit\" 15 1",
+                    "rfc822 embedded body structure");
+    // 扩展字段仍收尾：NIL md5 + disposition + NIL NIL
+    expect_contains(bs, "NIL (\"attachment\" (\"FILENAME\" \"draft.eml\")) NIL NIL)",
+                    "rfc822 extension fields last");
+    // 用消费者语法读回，校验 rfc822 部件的字段位置：7 基础 + envelope + body
+    // + lines + 4 扩展 = 14
+    size_t pos = 0;
+    const auto body = read_structure(bs, pos);
+    expect_true(pos == bs.size(), "bodystructure fully consumed");
+    const auto& att = body[1];
+    expect_num(att.size(), 14, "rfc822 field count");
+    expect_str(att[0].get<std::string>(), "message", "rfc822 [0] type");
+    expect_str(att[1].get<std::string>(), "rfc822", "rfc822 [1] subtype");
+    expect_true(att[7].is_array(), "rfc822 [7] envelope is structure");
+    if (att[7].is_array()) {
+        expect_str(att[7][1].get<std::string>(), "inner draft", "envelope subject position");
+        expect_str(att[7][9].get<std::string>(), "<draft-inner@scut.email>",
+                   "envelope message-id position");
+    }
+    expect_true(att[8].is_array(), "rfc822 [8] embedded bodystructure");
+    if (att[8].is_array()) {
+        expect_str(att[8][0].get<std::string>(), "text", "embedded bodystructure type");
+        expect_num(att[8][6].get<uint64_t>(), 15, "embedded body size");
+        expect_num(att[8][7].get<uint64_t>(), 1, "embedded body lines");
+    }
+    expect_num(att[9].get<uint64_t>(), 8, "rfc822 [9] encapsulated message line count");
+    expect_true(att[10].is_null(), "rfc822 [10] md5 NIL");
+    if (att[11].is_array()) {
+        expect_str(att[11][0].get<std::string>(), "attachment", "rfc822 [11] disposition");
+    }
+    expect_true(att[12].is_null() && att[13].is_null(), "rfc822 [12][13] language/location NIL");
+}
+
+// 内嵌消息自身是 multipart：编号语义 —— n.1/n.2 落在内嵌子部件（内嵌 multipart
+// 根不占编号），BODYSTRUCTURE 展开内嵌 multipart 结构。
+static void test_rfc822_embedded_multipart() {
+    const std::string raw =
+        "Content-Type: multipart/mixed; boundary=M\r\n"
+        "\r\n"
+        "--M\r\n"
+        "Content-Type: message/rfc822\r\n"
+        "\r\n"
+        "Subject: fwd\r\n"
+        "Message-ID: <fwd@x.test>\r\n"
+        "Content-Type: multipart/alternative; boundary=IN\r\n"
+        "\r\n"
+        "--IN\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "alt-plain\r\n"
+        "--IN\r\n"
+        "Content-Type: text/html\r\n"
+        "\r\n"
+        "<b>alt-html</b>\r\n"
+        "--IN--\r\n"
+        "--M--\r\n";
+    MimePart root;
+    parse_mime_tree(raw, root);
+    expect_num(root.subs.size(), 1, "one rfc822 part");
+    if (root.subs.size() != 1) return;
+    const auto& att = root.subs[0];
+    expect_str(att.type, "message", "outer type");
+    expect_num(att.subs.size(), 1, "one embedded root");
+    if (att.subs.size() != 1) return;
+    expect_str(att.subs[0].subtype, "alternative", "embedded multipart root");
+    expect_num(att.subs[0].subs.size(), 2, "embedded has two subparts");
+    if (att.subs[0].subs.size() == 2) {
+        // section 编号：1.1 = 内嵌 plain，1.2 = 内嵌 html（内嵌 multipart 根不占编号）
+        const MimePart* p11 = imap_utils::resolve_mime_part(root, {1, 1});
+        const MimePart* p12 = imap_utils::resolve_mime_part(root, {1, 2});
+        expect_true(p11 && p11->subtype == "plain", "1.1 resolves to embedded plain");
+        expect_true(p12 && p12->subtype == "html", "1.2 resolves to embedded html");
+        if (p11)
+            expect_str(extract_part_content(raw, *p11), "alt-plain", "BODY[1.1] content");
+    }
+    const std::string bs = imap_utils::build_bodystructure_tree(root, raw);
+    expect_contains(bs, "\"alternative\" (\"BOUNDARY\" \"IN\")", "embedded multipart in BS");
+    expect_contains(bs, "(\"text\" \"html\" NIL NIL NIL \"7bit\" 15 1 ",
+                    "embedded html leaf in BS");
+}
+
+// 修复红线：普通邮件（text 叶子 / multipart）的 BODYSTRUCTURE 输出与旧实现逐字符一致。
+static void test_bodystructure_plain_mails_unchanged() {
+    const std::string single_raw =
+        "Content-Type: text/plain; charset=utf-8\r\n\r\nHello world\r\n";
+    MimePart single;
+    parse_mime_tree(single_raw, single);
+    expect_str(imap_utils::build_bodystructure_tree(single, single_raw),
+               "(\"text\" \"plain\" (\"CHARSET\" \"utf-8\") NIL NIL \"7bit\" 13 1 NIL NIL NIL NIL)",
+               "single text BS byte-exact");
+
+    const std::string att_raw =
+        "Content-Type: image/png\r\n"
+        "Content-Disposition: attachment; filename=\"p.png\"\r\n"
+        "Content-Transfer-Encoding: base64\r\n"
+        "Content-ID: <pic@x>\r\n"
+        "\r\n"
+        "iVBORw0KGgo=\r\n";
+    MimePart att;
+    parse_mime_tree(att_raw, att);
+    expect_str(imap_utils::build_bodystructure_tree(att, att_raw),
+               "(\"image\" \"png\" (\"NAME\" \"p.png\") \"<pic@x>\" NIL \"base64\" 14 "
+               "NIL (\"attachment\" (\"FILENAME\" \"p.png\")) NIL NIL)",
+               "binary attachment BS byte-exact");
+}
+
+// ========== BODY[...] section 解析与取址 ==========
+
+static void test_parse_body_section() {
+    using K = imap_utils::ImapBodySection::Kind;
+    imap_utils::ImapBodySection s;
+
+    expect_true(imap_utils::parse_body_section("", s), "BODY[] parses");
+    expect_true(s.path.empty() && s.kind == K::full, "BODY[] = whole");
+
+    expect_true(imap_utils::parse_body_section("2", s), "BODY[2] parses");
+    expect_true(s.path.size() == 1 && s.path[0] == 2, "BODY[2] path");
+
+    expect_true(imap_utils::parse_body_section("2.1.MIME", s), "2.1.MIME parses");
+    expect_true(s.path.size() == 2 && s.kind == K::mime, "2.1.MIME path+kind");
+
+    expect_true(imap_utils::parse_body_section("2.HEADER.FIELDS (Subject From)", s),
+                "HEADER.FIELDS parses");
+    expect_true(s.kind == K::header_fields && s.fields == "Subject From",
+                "HEADER.FIELDS fields raw");
+
+    expect_true(imap_utils::parse_body_section("2.HEADER.FIELDS.NOT (X-Debug)", s),
+                "HEADER.FIELDS.NOT parses");
+    expect_true(s.kind == K::header_fields_not, "HEADER.FIELDS.NOT kind");
+
+    expect_true(imap_utils::parse_body_section("3.2.1.TEXT", s), "deep TEXT parses");
+    expect_true(s.path.size() == 3 && s.kind == K::text, "deep TEXT path+kind");
+
+    expect_true(!imap_utils::parse_body_section("2.FOO", s), "unknown suffix rejected");
+    expect_true(!imap_utils::parse_body_section("0", s), "zero section rejected");
+    expect_true(!imap_utils::parse_body_section("2..1", s), "empty path step rejected");
+    expect_true(!imap_utils::parse_body_section("2.HEADER.FIELDS Subject", s),
+                "HEADER.FIELDS without parens rejected");
+}
+
+static void test_extract_body_section_rfc822() {
+    MimePart root;
+    parse_mime_tree(kRfc822ProbeRaw, root);
+
+    auto fetch = [&](const char* inside) {
+        imap_utils::ImapBodySection s;
+        if (!imap_utils::parse_body_section(inside, s)) return std::string("__PARSE_FAIL__");
+        return imap_utils::extract_body_section(kRfc822ProbeRaw, root, s);
+    };
+
+    // 支持矩阵（message/rfc822 部件 n=2，内嵌单叶子）
+    expect_contains(fetch("2.MIME"), "Content-Type: message/rfc822", "BODY[2.MIME]");
+    expect_contains(fetch("2.MIME"), "filename=\"draft.eml\"", "BODY[2.MIME] has disposition");
+    expect_contains(fetch("2.HEADER"),
+                    "Message-ID: <draft-inner@scut.email>", "BODY[2.HEADER] embedded headers");
+    expect_true(fetch("2.HEADER").find("inner body line") == std::string::npos,
+                "BODY[2.HEADER] excludes body");
+    expect_str(fetch("2.TEXT"), "inner body line", "BODY[2.TEXT] embedded body");
+    expect_contains(fetch("2.HEADER.FIELDS (Subject Date)"), "Subject: inner draft",
+                    "BODY[2.HEADER.FIELDS] keeps wanted");
+    expect_true(fetch("2.HEADER.FIELDS (Subject Date)").find("Message-ID") == std::string::npos,
+                "BODY[2.HEADER.FIELDS] drops unwanted");
+    expect_str(fetch("2.1"), "inner body line", "BODY[2.1] embedded leaf");
+    expect_contains(fetch("2"), "Message-ID: <draft-inner@scut.email>", "BODY[2] whole embedded");
+
+    // 顶层既有行为不变
+    expect_str(fetch("1"), "part-one", "BODY[1] unchanged");
+    expect_contains(fetch(""), "Content-Type: multipart/mixed", "BODY[] whole message");
+
+    // 单 part 根：BODY[1] = 整封正文；更深层（1.1）无处可去 → 空
+    MimePart single;
+    parse_mime_tree("Subject: s\r\nContent-Type: text/plain\r\n\r\nonly body", single);
+    imap_utils::ImapBodySection sp;
+    expect_true(imap_utils::parse_body_section("1", sp), "single root: BODY[1] parses");
+    expect_str(imap_utils::extract_body_section("Subject: s\r\nContent-Type: text/plain\r\n\r\nonly body", single, sp),
+               "only body", "single root BODY[1]");
+    imap_utils::ImapBodySection sp2;
+    expect_true(imap_utils::parse_body_section("1.1", sp2), "single root: BODY[1.1] parses");
+    expect_true(imap_utils::extract_body_section("Subject: s\r\nContent-Type: text/plain\r\n\r\nonly body", single, sp2).empty(),
+               "single root BODY[1.1] is empty (no such part)");
+
+    // 越界/不可解析路径 → 空数据（不崩溃）
+    expect_true(fetch("3").empty(), "BODY[3] out of range");
+    expect_true(fetch("1.1").empty(), "BODY[1.1] under leaf");
+    expect_true(fetch("2.2").empty(), "BODY[2.2] embedded has single leaf");
+
+    // 内嵌为 multipart 时 HEADER/TEXT 指内嵌消息
+    const std::string fwd_raw =
+        "Content-Type: multipart/mixed; boundary=M\r\n\r\n"
+        "--M\r\nContent-Type: message/rfc822\r\n\r\n"
+        "Subject: fwd\r\nX-Tag: keepme\r\n"
+        "Content-Type: multipart/alternative; boundary=IN\r\n\r\n"
+        "--IN\r\nContent-Type: text/plain\r\n\r\nalt-plain\r\n"
+        "--IN\r\nContent-Type: text/html\r\n\r\n<b>h</b>\r\n--IN--\r\n"
+        "--M--\r\n";
+    MimePart fwd;
+    parse_mime_tree(fwd_raw, fwd);
+    auto fetch2 = [&](const char* inside) {
+        imap_utils::ImapBodySection s;
+        if (!imap_utils::parse_body_section(inside, s)) return std::string("__PARSE_FAIL__");
+        return imap_utils::extract_body_section(fwd_raw, fwd, s);
+    };
+    expect_contains(fetch2("1.HEADER"), "X-Tag: keepme", "BODY[1.HEADER] (embedded multipart)");
+    expect_contains(fetch2("1.1"), "alt-plain", "BODY[1.1] embedded part 1");
+    expect_contains(fetch2("1.2"), "<b>h</b>", "BODY[1.2] embedded part 2");
+    expect_contains(fetch2("1.2.MIME"), "Content-Type: text/html", "BODY[1.2.MIME]");
+    // TEXT = 内嵌消息去掉头后的整个正文（内嵌为 multipart 时含边界，RFC 3501 §6.4.5）
+    const std::string text1 = fetch2("1.TEXT");
+    expect_contains(text1, "alt-plain", "BODY[1.TEXT] embedded body content");
+    expect_contains(text1, "--IN--", "BODY[1.TEXT] keeps embedded multipart boundaries");
+    expect_true(text1.find("Subject: fwd") == std::string::npos,
+                "BODY[1.TEXT] excludes embedded header");
+    expect_true(fetch2("1.HEADER.FIELDS.NOT (Subject)").find("X-Tag") != std::string::npos,
+                "HEADER.FIELDS.NOT keeps others");
+}
+
+static void test_filter_header_block() {
+    const std::string headers =
+        "Subject: hello\r\n"
+        "X-Long: first\r\n"
+        "\tsecond\r\n"
+        "From: a@t.local\r\n"
+        "\r\n";
+    const std::string kept = imap_utils::filter_header_block(headers, "subject, from", false);
+    expect_contains(kept, "Subject: hello", "filter keeps subject");
+    expect_contains(kept, "From: a@t.local", "filter keeps from");
+    expect_true(kept.find("X-Long") == std::string::npos, "filter drops others");
+    const std::string kept2 = imap_utils::filter_header_block(headers, "X-LONG", false);
+    expect_contains(kept2, "first", "folded continuation kept");
+    expect_contains(kept2, "second", "folded continuation line 2");
+    const std::string excluded = imap_utils::filter_header_block(headers, "X-Long", true);
+    expect_true(excluded.find("X-Long") == std::string::npos, "NOT drops named field");
+    expect_contains(excluded, "Subject: hello", "NOT keeps others");
+}
+
+static void test_mime_tree_has_rfc822() {
+    MimePart plain;
+    parse_mime_tree("Content-Type: text/plain\r\n\r\nx", plain);
+    expect_true(!imap_utils::mime_tree_has_rfc822(plain), "plain mail has no rfc822");
+    MimePart probe;
+    parse_mime_tree(kRfc822ProbeRaw, probe);
+    expect_true(imap_utils::mime_tree_has_rfc822(probe), "probe has rfc822");
 }
 
 // ========== sidecar 往返 / 回写 ==========
@@ -674,6 +991,14 @@ int main() {
     test_repeated_boundary_is_bounded();
     test_encoded_word_name_case_preserved();
     test_unquoted_boundary_with_quoted_to();
+    test_rfc822_tree_shape();
+    test_rfc822_bodystructure();
+    test_rfc822_embedded_multipart();
+    test_bodystructure_plain_mails_unchanged();
+    test_parse_body_section();
+    test_extract_body_section_rfc822();
+    test_filter_header_block();
+    test_mime_tree_has_rfc822();
     test_sidecar_round_trip();
     test_ensure_writes_back_sidecar();
     test_sidecar_escapes_filename();

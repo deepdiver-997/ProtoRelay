@@ -454,8 +454,26 @@ std::string build_imap_append_mail_recipient() {
 }
 
 std::string build_imap_append_mailbox() {
-    return "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
-           "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())";
+    // 生产 mail_mailbox 无 add_time 列（2026-10-21 生产实测
+    // "Unknown column 'add_time' in 'field list'"，APPEND 必败）；仓库
+    // config/sql/create_tables.sql 与生产有漂移，以生产为准。
+    // id 由 AUTO_INCREMENT 生成，flag 列走表默认值——与 SMTP 入站路径
+    // （persistent_queue 的三列 INSERT INTO mail_mailbox）保持同款。
+    // 参数 {mail_id, mailbox_id, user_id}。
+    return "INSERT INTO mail_mailbox (mail_id, mailbox_id, user_id) VALUES (?, ?, ?)";
+}
+
+// APPEND 失败回滚：三表逐个删，不赌生产 FK 级联。参数 {mail_id}。
+std::string build_delete_mail_by_id() {
+    return "DELETE FROM mails WHERE id = ?";
+}
+
+std::string build_delete_mail_recipients_by_mail() {
+    return "DELETE FROM mail_recipients WHERE mail_id = ?";
+}
+
+std::string build_delete_mailbox_links_by_mail() {
+    return "DELETE FROM mail_mailbox WHERE mail_id = ?";
 }
 
 std::string build_imap_select_status_total() {

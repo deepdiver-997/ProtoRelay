@@ -130,6 +130,34 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
             search_from = nxt_nl + (raw[nxt_nl] == '\r' ? 2 : 1);
         }
     }
+
+    // message/rfc822：深入解析内嵌消息（RFC 3501 §6.4.5 / §7.4.2）。
+    // 树设计：rfc822 part 的 subs 恒为 1 个元素 = 内嵌消息根。
+    //   - 内嵌为 multipart：其子部件在 embedded.subs，section 编号 n.1..n.k
+    //     落在 embedded.subs（内嵌 multipart 根本身不占编号，取址解析时跳过）；
+    //   - 内嵌为单叶子：n.1 即 embedded 根。
+    // raw 已被父层（multipart 边界）截断到本 part 的末端，embedded 的可见
+    // 区间天然受限，不会越过本 part 读到兄弟 part。
+    if (root.type == "message" && root.subtype == "rfc822" && depth < 64 &&
+        body_start < raw.size()) {
+        MimePart embedded;
+        parse_mime_tree(raw, embedded, body_start, depth + 1);
+        if (!embedded.type.empty()) {
+            // 与 multipart 子 part 同款：定界符的 CRLF 属于 boundary，
+            // 不属于本 part —— 从 embedded 的区间/大小里去掉尾部 CRLF。
+            const size_t embedded_body_abs_start = raw.size() - embedded.body_size;
+            while (embedded.length > 0 &&
+                   (raw[body_start + embedded.length - 1] == '\r' ||
+                    raw[body_start + embedded.length - 1] == '\n'))
+                embedded.length--;
+            while (embedded.body_size > 0) {
+                const size_t last = embedded_body_abs_start + embedded.body_size - 1;
+                if (raw[last] == '\r' || raw[last] == '\n') --embedded.body_size;
+                else break;
+            }
+            root.subs.push_back(std::move(embedded));
+        }
+    }
 }
 
 // sidecar JSON 里的字符串字段转义。boundary/charset 基本是 token，

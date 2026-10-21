@@ -364,6 +364,16 @@ void SessionBase<ConnectionType>::drain_buffered_commands() {
     }
     // 注意: drain 只负责消费已缓冲的命令，不启动新的异步读。
     // 调用方必须在 drain 返回后自行判断是否需要 do_async_read()。
+    //
+    // 2026-10-21（IMAP APPEND 后会话挂死，缺陷3 根因之二）：响应写入时若命令
+    // 缓冲非空，do_async_write 会把响应暂存 pending_write_buf_，等"下一次写入"
+    // 合并冲刷。若缓冲随后被排空（典型：APPEND literal 之后的孤立 CRLF）且再无
+    // 命令触发写入，暂存响应被永久扣住 —— 客户端等 tagged 响应，服务器读循环
+    // 又未被武装，双向死等（生产 30s 无响应、journal 无 SELECT 日志的时序）。
+    // 排空后缓冲已空且仍有暂存 → 立即冲刷；写完成回调顺带重新武装读。
+    if (!paused_ && !closed_ && !has_buffered_input() && !pending_write_buf_.empty()) {
+        do_async_write("", nullptr);
+    }
 }
 
 template <typename ConnectionType>

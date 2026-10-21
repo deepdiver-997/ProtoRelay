@@ -232,6 +232,13 @@ public:
                                            const std::string& recipient,
                                            int status, std::function<void(bool)> cb);
 
+    // APPEND 半写回滚（2026-10-21）：mails/mail_recipients/mail_mailbox 三表
+    // 显式删（不赌生产 FK 级联）+ 体文件删除。removed=false 表示有 DB 删除未成功
+    // （留痕排查）。调用方应在 worker 线程发起（体文件删除是阻塞 I/O）。
+    static void delete_mail_cascade_async(std::shared_ptr<ScopedConnection> conn,
+                                          const std::shared_ptr<storage::IStorageProvider>& storage,
+                                          uint64_t mail_id, std::function<void(bool)> cb);
+
     // 缓存感知的邮箱统计（CPS）。缓存命中且未过期时 cb 同步触发。
     // 本函数在 miss/stale 时自行回源并写回缓存，无需调用方再刷。
     void get_mailbox_stats_cached_async(std::shared_ptr<ScopedConnection> conn,

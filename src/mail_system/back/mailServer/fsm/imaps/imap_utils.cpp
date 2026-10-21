@@ -2,7 +2,10 @@
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"   // safe_stoull
 #include "mail_system/back/common/mime_parser.h"   // MimePart / parse_mime_tree
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <cstring>
+#include <set>
 #include <sstream>
 
 namespace mail_system {
@@ -329,10 +332,251 @@ std::string build_bodystructure(const std::string& raw) {
     // 而非硬编码 text/plain（否则 HTML 邮件会被按纯文本渲染）。
     MimePart root;
     parse_mime_tree(raw, root);
-    return build_bodystructure_tree(root);
+    return build_bodystructure_tree(root, raw);
+}
+
+// 取 part 自己的 MIME 头块（含于 [offset, offset+length) 区间，不含空行分隔符）。
+// 兼容裸 LF 邮件（\n\n 分隔）。
+std::string mime_part_header_block(const std::string& raw, const MimePart& part) {
+    size_t start = part.offset;
+    size_t end = part.offset + part.length;
+    if (start >= raw.size()) return {};
+    if (end > raw.size()) end = raw.size();
+    if (end <= start) return {};
+
+    size_t sep = raw.find("\r\n\r\n", start);
+    if (sep == std::string::npos || sep + 4 > end) {
+        sep = raw.find("\n\n", start);
+        if (sep == std::string::npos || sep + 2 > end) return {};
+        return raw.substr(start, sep + 1 - start);   // 保留最后一个头行自身的 \n
+    }
+    return raw.substr(start, sep + 2 - start);       // 保留最后一个头行自身的 \r\n
+}
+
+// 头块按字段名过滤（大小写不敏感，支持 folded 续行随主行去留）。
+std::string filter_header_block(const std::string& headers,
+                                const std::string& fields_csv, bool exclude) {
+    std::set<std::string> wanted;
+    {
+        std::istringstream fs(fields_csv);
+        std::string f;
+        while (std::getline(fs, f, ',')) {
+            f = mime_params_detail::trim(f);
+            if (f.empty()) continue;
+            f = mime_params_detail::lower(f);
+            // 兼容 "Subject From"（空格分隔）与 "Subject, From"（逗号分隔）两种写法
+            std::istringstream ws(f);
+            std::string w;
+            while (ws >> w) wanted.insert(mime_params_detail::lower(w));
+        }
+    }
+    std::string filtered;
+    size_t pos = 0;
+    bool keep_current = false;
+    std::string current_line;
+    while (pos < headers.size()) {
+        size_t eol = headers.find('\n', pos);
+        if (eol == std::string::npos) eol = headers.size();
+        std::string line = headers.substr(pos, eol - pos);
+        pos = eol == headers.size() ? headers.size() : eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        const bool folded = !line.empty() && (line.front() == ' ' || line.front() == '\t');
+        if (!folded) {
+            if (keep_current && !current_line.empty()) {
+                filtered += current_line + "\r\n";
+            }
+            current_line = line;
+            if (line.empty()) { keep_current = false; continue; }   // 头块结束（空行）
+            size_t colon = line.find(':');
+            if (colon == std::string::npos) { keep_current = exclude; continue; }
+            const bool hit = wanted.count(mime_params_detail::lower(line.substr(0, colon))) > 0;
+            keep_current = exclude ? !hit : hit;
+        } else if (keep_current) {
+            current_line += "\r\n" + line;   // 续行保持原样（含前导空白）
+        }
+    }
+    if (keep_current && !current_line.empty()) filtered += current_line + "\r\n";
+    // 去掉末尾最后一个 CRLF（与既有 BODY[HEADER.FIELDS] 行为一致）
+    if (!filtered.empty() && filtered.size() >= 2)
+        filtered.resize(filtered.size() - 2);
+    return filtered;
+}
+
+namespace {
+// 内嵌消息的 ENVELOPE：从其头块抽 RFC 3501 §7.4.2 的十个字段。
+std::string build_envelope_from_headers(const std::string& header_block) {
+    auto hv = [&](const char* name) {
+        return mime_header_value(header_block, name);
+    };
+    return build_envelope_string(
+        hv("date"), hv("subject"), hv("from"), hv("sender"), hv("reply-to"),
+        hv("to"), hv("cc"), hv("bcc"), hv("in-reply-to"), hv("message-id"));
+}
+} // namespace
+
+bool mime_tree_has_rfc822(const MimePart& mp) {
+    if (mp.type == "message" && mp.subtype == "rfc822") return true;
+    for (const auto& sub : mp.subs)
+        if (mime_tree_has_rfc822(sub)) return true;
+    return false;
+}
+
+const MimePart* resolve_mime_part(const MimePart& root,
+                                  const std::vector<uint64_t>& path) {
+    const MimePart* cur = &root;
+    for (size_t depth = 0; depth < path.size(); ++depth) {
+        const uint64_t idx = path[depth];
+        if (cur->is_multipart()) {
+            if (idx == 0 || idx > cur->subs.size()) return nullptr;
+            cur = &cur->subs[static_cast<size_t>(idx - 1)];
+            continue;
+        }
+        if (cur->type == "message" && cur->subtype == "rfc822" && !cur->subs.empty()) {
+            // 下一级编号落在内嵌消息上：内嵌为 multipart 时不占编号，
+            // 直接落其子部件；内嵌为叶子时 1 即该叶子。
+            const MimePart& embedded = cur->subs[0];
+            if (embedded.is_multipart()) {
+                if (idx == 0 || idx > embedded.subs.size()) return nullptr;
+                cur = &embedded.subs[static_cast<size_t>(idx - 1)];
+            } else {
+                if (idx != 1) return nullptr;
+                cur = &embedded;
+            }
+            continue;
+        }
+        // 非 multipart 根（单 part 邮件）：仅顶层第一级编号 1 指向整封（既有行为）；
+        // 更深层路径（如 1.1）无处可去 → nullptr
+        if (depth == 0 && cur == &root && idx == 1) continue;
+        return nullptr;
+    }
+    return cur;
+}
+
+bool parse_body_section(const std::string& inside, ImapBodySection& out) {
+    out = ImapBodySection{};
+    out.inside = inside;
+    if (inside.empty()) return true;   // BODY[]：整封
+
+    // 路径：数字 + '.' 分隔（≥1）
+    size_t i = 0;
+    while (i < inside.size()) {
+        size_t digits = i;
+        while (digits < inside.size() &&
+               std::isdigit(static_cast<unsigned char>(inside[digits]))) ++digits;
+        if (digits == i) return false;   // 不是数字开头（如 HEADER —— 顶层头走旧路径）
+        uint64_t n = 0;
+        for (size_t k = i; k < digits; ++k) {
+            n = n * 10 + static_cast<uint64_t>(inside[k] - '0');
+            if (n > 1000000000ull) return false;   // 防御荒谬编号
+        }
+        if (n == 0) return false;   // section 编号从 1 起
+        out.path.push_back(n);
+        i = digits;
+        if (i < inside.size() && inside[i] == '.') {
+            size_t digits2 = i + 1;
+            if (digits2 >= inside.size() ||
+                !std::isdigit(static_cast<unsigned char>(inside[digits2]))) break;
+            ++i;   // 消费 '.'，继续路径
+        } else {
+            break;
+        }
+    }
+    if (i >= inside.size()) return true;   // 纯路径，kind=full
+
+    // 后缀：.MIME / .HEADER / .TEXT / .HEADER.FIELDS (.NOT) (…)
+    std::string rest = mime_params_detail::trim(inside.substr(i));
+    std::transform(rest.begin(), rest.end(), rest.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    if (rest == ".MIME") { out.kind = ImapBodySection::Kind::mime; return true; }
+    if (rest == ".HEADER") { out.kind = ImapBodySection::Kind::header; return true; }
+    if (rest == ".TEXT") { out.kind = ImapBodySection::Kind::text; return true; }
+    constexpr const char* kHF = ".HEADER.FIELDS";
+    constexpr const char* kHFN = ".HEADER.FIELDS.NOT";
+    std::string fields;
+    if (rest.rfind(kHFN, 0) == 0) {
+        out.kind = ImapBodySection::Kind::header_fields_not;
+        fields = inside.substr(i + std::char_traits<char>::length(kHFN));
+    } else if (rest.rfind(kHF, 0) == 0) {
+        out.kind = ImapBodySection::Kind::header_fields;
+        fields = inside.substr(i + std::char_traits<char>::length(kHF));
+    } else {
+        return false;
+    }
+    // 字段列表：(…) 括号内原文；容忍括号前空白
+    fields = mime_params_detail::trim(fields);
+    if (fields.size() < 2 || fields.front() != '(' || fields.back() != ')') return false;
+    out.fields = mime_params_detail::trim(fields.substr(1, fields.size() - 2));
+    return true;
+}
+
+std::string extract_body_section(const std::string& raw, const MimePart& root,
+                                 const ImapBodySection& section) {
+    if (section.path.empty()) {
+        // 整封 / 顶层 header / text（BODY[]、BODY[HEADER]、BODY[TEXT]）
+        switch (section.kind) {
+            case ImapBodySection::Kind::full:
+                return raw;
+            case ImapBodySection::Kind::header:
+            case ImapBodySection::Kind::header_fields:
+            case ImapBodySection::Kind::header_fields_not: {
+                MimePart whole;
+                whole.offset = 0;
+                whole.length = static_cast<std::uint32_t>(raw.size());
+                std::string block = mime_part_header_block(raw, whole);
+                if (section.kind != ImapBodySection::Kind::header)
+                    block = filter_header_block(block, section.fields,
+                                                section.kind == ImapBodySection::Kind::header_fields_not);
+                return block;
+            }
+            case ImapBodySection::Kind::text: {
+                MimePart whole;
+                whole.offset = 0;
+                whole.length = static_cast<std::uint32_t>(raw.size());
+                return extract_part_content(raw, whole);
+            }
+            case ImapBodySection::Kind::mime:
+                return {};
+        }
+        return {};
+    }
+
+    const MimePart* part = resolve_mime_part(root, section.path);
+    if (!part) return {};
+
+    switch (section.kind) {
+        case ImapBodySection::Kind::full:
+            return extract_part_content(raw, *part);
+        case ImapBodySection::Kind::mime:
+            return mime_part_header_block(raw, *part);
+        case ImapBodySection::Kind::header:
+        case ImapBodySection::Kind::header_fields:
+        case ImapBodySection::Kind::header_fields_not:
+        case ImapBodySection::Kind::text: {
+            // HEADER/TEXT 指内嵌消息的头/正文（RFC 3501 §6.4.5：part n 为
+            // message/rfc822 时，HEADER/HEADER.FIELDS/TEXT 作用于内嵌消息）
+            if (part->type != "message" || part->subtype != "rfc822" ||
+                part->subs.empty()) {
+                return {};
+            }
+            const MimePart& embedded = part->subs[0];
+            if (section.kind == ImapBodySection::Kind::text)
+                return extract_part_content(raw, embedded);
+            std::string block = mime_part_header_block(raw, embedded);
+            if (section.kind != ImapBodySection::Kind::header)
+                block = filter_header_block(block, section.fields,
+                                            section.kind == ImapBodySection::Kind::header_fields_not);
+            return block;
+        }
+    }
+    return {};
 }
 
 std::string build_bodystructure_tree(const MimePart& mp) {
+    return build_bodystructure_tree(mp, std::string());
+}
+
+std::string build_bodystructure_tree(const MimePart& mp, const std::string& raw) {
     // RFC 3501 string：非 ASCII/换行使用 literal，引用串转义引号与反斜杠。
     const auto string = [](const std::string& value) {
         if (std::any_of(value.begin(), value.end(), [](unsigned char c) {
@@ -347,12 +591,18 @@ std::string build_bodystructure_tree(const MimePart& mp) {
         return "(" + string(mp.disposition) + " " +
             (mp.name.empty() ? "NIL" : "(\"FILENAME\" " + string(mp.name) + ")") + ")";
     };
+    const auto params_of = [&]() {
+        std::string params;
+        if (!mp.charset.empty()) params += "\"CHARSET\" " + string(mp.charset);
+        if (!mp.name.empty()) { if (!params.empty()) params += " ";params += "\"NAME\" " + string(mp.name); }
+        return params.empty() ? std::string(" NIL") : " (" + params + ")";
+    };
     if (mp.is_multipart()) {
         // RFC 3501 §7.4.2: multipart 子 part 在最前，subtype 在最后
         //   ((sub1)(sub2) "alternative" ("BOUNDARY" "...") NIL NIL NIL)
         std::string result = "(";
         for (const auto& sub : mp.subs)
-            result += build_bodystructure_tree(sub);
+            result += build_bodystructure_tree(sub, raw);
         result += " " + string(mp.subtype);
         if (!mp.boundary.empty())
             result += " (\"BOUNDARY\" " + string(mp.boundary) + ")";
@@ -361,11 +611,28 @@ std::string build_bodystructure_tree(const MimePart& mp) {
         result += " " + disposition() + " NIL NIL)";
         return result;
     }
+    // message/rfc822：基础字段之后必须附加 内嵌消息 ENVELOPE + 内嵌 BODYSTRUCTURE
+    // + 内嵌正文行数，然后才是扩展字段（md5/disposition/language/location）。
+    // 之前被当普通叶子输出，客户端按位置解析字段错位、rfc822 附件渲染失败。
+    if (mp.type == "message" && mp.subtype == "rfc822") {
+        std::string result = "(" + string(mp.type) + " " + string(mp.subtype);
+        result += params_of();
+        result += mp.content_id.empty() ? " NIL" : " " + string(mp.content_id);
+        result += " NIL " + string(mp.encoding) + " " + std::to_string(mp.body_size);
+        if (!mp.subs.empty()) {
+            const MimePart& embedded = mp.subs[0];
+            result += " " + build_envelope_from_headers(mime_part_header_block(raw, embedded));
+            result += " " + build_bodystructure_tree(embedded, raw);
+            result += " " + std::to_string(mp.lines);
+        } else {
+            // 截断/无正文：输出空 text/plain 占位，字段数保持 RFC 形状
+            result += " NIL (\"text\" \"plain\" NIL NIL NIL \"7bit\" 0 0) 0";
+        }
+        result += " NIL " + disposition() + " NIL NIL)";
+        return result;
+    }
     std::string result = "(" + string(mp.type) + " " + string(mp.subtype);
-    std::string params;
-    if (!mp.charset.empty()) params += "\"CHARSET\" " + string(mp.charset);
-    if (!mp.name.empty()) { if (!params.empty()) params += " ";params += "\"NAME\" " + string(mp.name); }
-    result += params.empty() ? " NIL" : " (" + params + ")";
+    result += params_of();
     result += mp.content_id.empty() ? " NIL" : " " + string(mp.content_id);
     result += " NIL " + string(mp.encoding) + " " + std::to_string(mp.body_size);
     if (mp.type == "text") result += " " + std::to_string(mp.lines);

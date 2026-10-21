@@ -315,6 +315,20 @@ void test_build_imap_append_queries() {
 
     std::string mbox = mail_system::db::sql::build_imap_append_mailbox();
     check_contains("imap_append_mbox", mbox, "INSERT INTO mail_mailbox");
+    // 生产 mail_mailbox 无 add_time 列（2026-10-21 生产实测 Unknown column，
+    // APPEND 必败）。schema 以生产为准，builder 不得再引用 add_time/id。
+    check("imap_append_mbox_no_add_time", mbox.find("add_time") == std::string::npos,
+          "mail_mailbox INSERT must not reference add_time (production schema)");
+
+    // APPEND 失败回滚三件套（逐表显式删，不赌生产 FK 级联）
+    check_contains("delete_mail_by_id", mail_system::db::sql::build_delete_mail_by_id(),
+                   "DELETE FROM mails WHERE id = ?");
+    check_contains("delete_mail_recipients_by_mail",
+                   mail_system::db::sql::build_delete_mail_recipients_by_mail(),
+                   "DELETE FROM mail_recipients WHERE mail_id = ?");
+    check_contains("delete_mailbox_links_by_mail",
+                   mail_system::db::sql::build_delete_mailbox_links_by_mail(),
+                   "DELETE FROM mail_mailbox WHERE mail_id = ?");
 }
 
 void test_build_imap_expunge() {
