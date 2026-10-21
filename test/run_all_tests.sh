@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一键全套单测：构建（可跳过）+ 逐个运行 build/*_test + 汇总结果。
+# 一键全套单测：构建（可跳过）+ 逐个运行 CMake 注册的单测 + 汇总结果。
 #
 # 用法：
 #   bash test/run_all_tests.sh                # 增量构建 Release + 全套运行
@@ -18,6 +18,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 BUILD_TYPE=Release
+BUILD_DIR="${BUILD_DIR:-build}"
 NO_BUILD=0
 for a in "$@"; do
     case "$a" in
@@ -31,30 +32,39 @@ if [ "$NO_BUILD" -eq 0 ]; then
     bash build.sh "$BUILD_TYPE" || { echo "BUILD FAILED"; exit 1; }
 fi
 
-if [ ! -d build ]; then
-    echo "build/ 不存在，先去掉 --no-build 跑一次构建"; exit 1
+if [ ! -d "$BUILD_DIR" ]; then
+    echo "$BUILD_DIR 不存在，先去掉 --no-build 跑一次构建"; exit 1
 fi
 
 RUN_DB_TESTS="${RUN_DB_TESTS:-1}"
 SKIP_DB_RE='^(mariadb_async_test)$'
-LOG_DIR="${TEST_LOG_DIR:-build/test-logs}"
+LOG_DIR="${TEST_LOG_DIR:-$BUILD_DIR/test-logs}"
 mkdir -p "$LOG_DIR"
 
 pass=0; fail=0; skip=0
 failed_tests=()
 
-shopt -s nullglob
-for t in build/*_test; do
-    [ -x "$t" ] || continue
-    name=$(basename "$t")
+# CTest is the authoritative test inventory: stale binaries never enter the run,
+# and an unbuilt registered target is a failure rather than a silent omission.
+registered_tests=$(ctest --test-dir "$BUILD_DIR" -N 2>/dev/null | sed -nE 's/^[[:space:]]*Test[[:space:]]*#[0-9]+:[[:space:]]*([^[:space:]]+).*$/\1/p')
+if [ -z "$registered_tests" ]; then
+    echo "未发现 CTest 注册的单测，请先运行 ./build.sh Release"
+    exit 1
+fi
+for name in $registered_tests; do
     if [ "$RUN_DB_TESTS" = "0" ] && [[ "$name" =~ $SKIP_DB_RE ]]; then
         echo "SKIP  $name（依赖真实 MySQL，RUN_DB_TESTS=1 开启）"
         skip=$((skip+1))
         continue
     fi
-    if "$t" > "$LOG_DIR/${name}.log" 2>&1; then
-        echo "PASS  $name"
-        pass=$((pass+1))
+    if ctest --test-dir "$BUILD_DIR" --output-on-failure -R "^${name}$" > "$LOG_DIR/${name}.log" 2>&1; then
+        if grep -q '\*\*\*Skipped' "$LOG_DIR/${name}.log"; then
+            echo "SKIP  $name（见 $LOG_DIR/${name}.log）"
+            skip=$((skip+1))
+        else
+            echo "PASS  $name"
+            pass=$((pass+1))
+        fi
     else
         rc=$?
         echo "FAIL  $name (exit $rc; log: $LOG_DIR/${name}.log)"

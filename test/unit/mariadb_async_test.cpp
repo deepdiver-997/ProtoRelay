@@ -12,7 +12,7 @@
 // （NO Server error），客户端表现即"账号连不上"。修复后必须完整取回长列。
 //
 // 依赖真实 DB（config/db_config.json 指向的 MySQL/MariaDB 服务 + mail 库）：
-// 文件不存在或连不上 → 静默 SKIP（返回 0），不影响 CI。
+// 文件不存在或连不上 → 明确 SKIP（返回 77），不影响 CI。
 // 本测试跑在主线程（无 io_context 注册）→ async 走阻塞 poll 路径，回调同步触发。
 
 #include "mail_system/back/db/mariadb_pool.h"
@@ -41,12 +41,12 @@ int main() {
     }
     if (!loaded) {
         std::cout << "SKIP: db_config.json not found\n";
-        return 0;
+        return 77;
     }
 
     auto pool = MariaDBPoolFactory::get_instance().create_pool(
         cfg, std::make_shared<MariaDBService>());
-    if (!pool) { std::cout << "SKIP: pool creation failed\n"; return 0; }
+    if (!pool) { std::cout << "SKIP: pool creation failed\n"; return 77; }
 
     // 探活：连不上真实 DB 就 skip（本地 CI 无 DB 也能过）
     {
@@ -54,7 +54,7 @@ int main() {
         if (!probe->is_valid()) {
             std::cout << "SKIP: database unavailable (" << pool->get_available_connections()
                       << " avail)\n";
-            return 0;
+            return 77;
         }
     }
 

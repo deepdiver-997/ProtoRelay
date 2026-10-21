@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // pr::IntrusionDetector 单元测试：会话记录、私网过滤、封禁阈值、LRU 上限、持久化。
 //
 // 生产里它跑在 server_base 的会话结束路径上，此前无直接测试。
@@ -25,7 +26,7 @@ void expect_true(bool c, const char* what) {
 }
 
 std::filesystem::path tmp_dir() {
-    return std::filesystem::temp_directory_path() / "protorelay_intrusion_test";
+    return test_support::temp_root() / "protorelay_intrusion_test";
 }
 
 } // namespace

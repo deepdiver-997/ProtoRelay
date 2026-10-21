@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // outbound 子模块剧情测试 — 覆盖产品真正在跑的 3 个纯组件：
 //   - has_external_recipient         (pure logic, persistent_queue.cpp:390 调)
 //   - ensure_mail_raw_payload_loaded  (file IO,     outbox_repository.cpp:150 调)
@@ -43,7 +44,7 @@ void expect_true(bool c, const char* what) {
 }
 
 std::filesystem::path tmp_dir() {
-    return std::filesystem::temp_directory_path() / "protorelay_outbound_test";
+    return test_support::temp_root() / "protorelay_outbound_test";
 }
 
 // 用 openssl 生成 1024-bit RSA 私钥（DKIM 测试需要）。已存在则复用。

@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // MappedFile / MappedReadStream 测试：mmap 只读映射的打开路径与错误路径。
 //
 // MappedFile 是本地邮件正文读取的核心（MIME 解析直接映射，零拷贝）。
@@ -27,7 +28,7 @@ void expect_true(bool c, const char* what) {
 }
 
 std::filesystem::path tmp_dir() {
-    return std::filesystem::temp_directory_path() / "protorelay_mapped_test";
+    return test_support::temp_root() / "protorelay_mapped_test";
 }
 
 void write_file(const std::filesystem::path& p, const std::string& content) {

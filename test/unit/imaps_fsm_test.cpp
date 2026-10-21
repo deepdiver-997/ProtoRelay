@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // IMAP FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应码
 // 2026-10-18：手机同时 FETCH 多个 BODY section 仅收到第一段；见
 // docs/bugfixes/2026-10-18-imap-multiple-body-sections.md。
@@ -70,9 +71,9 @@ struct FsmTestFixture {
         cfg.apply_perf_mode();
         cfg.use_database   = false;
         cfg.system_domain  = "test.local";
-        cfg.storage.local.mail_path       = "/tmp/imaps_fsm_test_mail";
-        cfg.storage.local.attachment_path = "/tmp/imaps_fsm_test_att";
-        system("mkdir -p /tmp/imaps_fsm_test_mail /tmp/imaps_fsm_test_att");
+        cfg.storage.local.mail_path       = test_support::temp_path("imaps_fsm_test_mail");
+        cfg.storage.local.attachment_path = test_support::temp_path("imaps_fsm_test_att");
+        std::filesystem::create_directories(test_support::temp_path("imaps_fsm_test_mail")); std::filesystem::create_directories(test_support::temp_path("imaps_fsm_test_att"));
 
         server = std::shared_ptr<TestServer>(new TestServer(cfg, io_pool, worker_pool, router));
 
@@ -92,7 +93,7 @@ struct FsmTestFixture {
     ~FsmTestFixture() {
         worker_pool->stop();
         io_pool->stop();
-        system("rm -rf /tmp/imaps_fsm_test_mail /tmp/imaps_fsm_test_att");
+        std::filesystem::remove_all(test_support::temp_path("imaps_fsm_test_mail")); std::filesystem::remove_all(test_support::temp_path("imaps_fsm_test_att"));
     }
 
     struct Handle {
@@ -224,7 +225,7 @@ static std::string poll_written_for(Handle& h, const std::string& needle, int ti
 
 TEST(abnormal_trace_after_auth) {
     namespace fs = std::filesystem;
-    const auto root = fs::temp_directory_path() /
+    const auto root = test_support::temp_root() /
         ("imaps-trace-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     auto cfg = fx.cfg;
     cfg.log_file = (root / "imap.log").string();
@@ -438,9 +439,9 @@ TEST(fetch_full_path_with_storage) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);   // 同步模式：sq 桥立即拿到注入的行
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_fetch_test");
+    std::filesystem::create_directories(test_support::temp_path("imaps_fetch_test"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_fetch_test/", "/tmp/imaps_fetch_test/");
+        test_support::temp_path("imaps_fetch_test/"), test_support::temp_path("imaps_fetch_test/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -450,13 +451,13 @@ TEST(fetch_full_path_with_storage) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_fsm_test_mail2";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_fsm_test_att2";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_fsm_test_mail2");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_fsm_test_att2");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
 
     const std::string body = "Subject: hello\r\n\r\nworld body 123";
-    const std::string body_path = "/tmp/imaps_fetch_test/mail_42";
+    const std::string body_path = test_support::temp_path("imaps_fetch_test/mail_42");
     { std::ofstream f(body_path, std::ios::binary); f << body; }
 
     db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
@@ -495,7 +496,7 @@ TEST(fetch_full_path_with_storage) {
     assert(w.find("world body 123") != std::string::npos);
     assert(w.find("A001 OK FETCH completed") != std::string::npos);
 
-    std::filesystem::remove_all("/tmp/imaps_fetch_test");
+    std::filesystem::remove_all(test_support::temp_path("imaps_fetch_test"));
     io->stop(); wk->stop();
     // 收尾：本用例不走 Handle。FETCH 链在会话里武装了 watchdog 定时器
     // （async_wait handler 强持 self），不 close+drain 就是一笔 LSan 泄漏。
@@ -513,9 +514,9 @@ TEST(fetch_body_part_number) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_fetch_part_test");
+    std::filesystem::create_directories(test_support::temp_path("imaps_fetch_part_test"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_fetch_part_test/", "/tmp/imaps_fetch_part_test/");
+        test_support::temp_path("imaps_fetch_part_test/"), test_support::temp_path("imaps_fetch_part_test/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -525,8 +526,8 @@ TEST(fetch_body_part_number) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_fsm_test_mail3";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_fsm_test_att3";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_fsm_test_mail3");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_fsm_test_att3");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
 
@@ -545,7 +546,7 @@ TEST(fetch_body_part_number) {
         "<p>hello html part</p>\r\n"
         "\r\n"
         "--BBBB--\r\n";
-    const std::string body_path = "/tmp/imaps_fetch_part_test/mail_43";
+    const std::string body_path = test_support::temp_path("imaps_fetch_part_test/mail_43");
     { std::ofstream f(body_path, std::ios::binary); f << body; }
 
     db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
@@ -630,7 +631,7 @@ TEST(fetch_body_part_number) {
     assert(w2.find("BODY[1]") < w2.find("BODY[]"));
     assert(w2.find("BODYSTRUCTURE ((") != std::string::npos);
 
-    std::filesystem::remove_all("/tmp/imaps_fetch_part_test");
+    std::filesystem::remove_all(test_support::temp_path("imaps_fetch_part_test"));
     io->stop(); wk->stop();
     finish_session(session);
     finish_session(session2);
@@ -646,9 +647,9 @@ TEST(fetch_many_mails_no_stack_overflow) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_fetch_many");
+    std::filesystem::create_directories(test_support::temp_path("imaps_fetch_many"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_fetch_many/", "/tmp/imaps_fetch_many/");
+        test_support::temp_path("imaps_fetch_many/"), test_support::temp_path("imaps_fetch_many/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -658,8 +659,8 @@ TEST(fetch_many_mails_no_stack_overflow) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_fetch_many";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_fetch_many";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_fetch_many");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_fetch_many");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
 
@@ -667,7 +668,7 @@ TEST(fetch_many_mails_no_stack_overflow) {
     std::vector<std::map<std::string, std::string>> rows;
     rows.reserve(N);
     for (int i = 1; i <= N; ++i) {
-        std::string bp = "/tmp/imaps_fetch_many/mail_" + std::to_string(i);
+        std::string bp = test_support::temp_path("imaps_fetch_many/mail_") + std::to_string(i);
         { std::ofstream f(bp, std::ios::binary); f << "Subject: m" << i << "\r\n\r\nbody" << i; }
         rows.push_back({{"id", std::to_string(1000 + i)}, {"sender", "a@t.local"},
             {"recipient", "b@t.local"}, {"subject", "m"}, {"body_path", bp},
@@ -697,7 +698,7 @@ TEST(fetch_many_mails_no_stack_overflow) {
     auto w = conn_ptr->written();
     assert(w.find("A001 OK FETCH completed") != std::string::npos);
     assert(w.find("RFC822.SIZE") != std::string::npos);
-    std::filesystem::remove_all("/tmp/imaps_fetch_many");
+    std::filesystem::remove_all(test_support::temp_path("imaps_fetch_many"));
     io->stop(); wk->stop();
     // 收尾：同 fetch_full_path_with_storage —— 手工 session 无 Handle 兜底。
     finish_session(session);
@@ -1124,8 +1125,8 @@ TEST(uidnext_advance_read) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_uidnext_test_mail";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_uidnext_test_att";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_uidnext_test_mail");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_uidnext_test_att");
     auto server = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router));
     auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
 
@@ -1164,8 +1165,8 @@ TEST(stats_flight_dedup_concurrent) {
     ServerConfig cfg3;
     cfg3.perf_mode = true; cfg3.apply_perf_mode();
     cfg3.use_database = false; cfg3.system_domain = "test.local";
-    cfg3.storage.local.mail_path = "/tmp/imaps_flight_test_mail";
-    cfg3.storage.local.attachment_path = "/tmp/imaps_flight_test_att";
+    cfg3.storage.local.mail_path = test_support::temp_path("imaps_flight_test_mail");
+    cfg3.storage.local.attachment_path = test_support::temp_path("imaps_flight_test_att");
     auto server = std::shared_ptr<TestServer>(new TestServer(cfg3, io, wk, router));
     auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
     fsm->set_mailbox_stats_cache(
@@ -1229,8 +1230,8 @@ TEST(stats_flight_concurrent_threads) {
     ServerConfig cfg4;
     cfg4.perf_mode = true; cfg4.apply_perf_mode();
     cfg4.use_database = false; cfg4.system_domain = "test.local";
-    cfg4.storage.local.mail_path = "/tmp/imaps_flight_test_mail2";
-    cfg4.storage.local.attachment_path = "/tmp/imaps_flight_test_att2";
+    cfg4.storage.local.mail_path = test_support::temp_path("imaps_flight_test_mail2");
+    cfg4.storage.local.attachment_path = test_support::temp_path("imaps_flight_test_att2");
     auto server = std::shared_ptr<TestServer>(new TestServer(cfg4, io, wk, router));
     auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
     fsm->set_mailbox_stats_cache(
@@ -1325,9 +1326,9 @@ TEST(fetch_rfc822_sections) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_rfc822_test");
+    std::filesystem::create_directories(test_support::temp_path("imaps_rfc822_test"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_rfc822_test/", "/tmp/imaps_rfc822_test/");
+        test_support::temp_path("imaps_rfc822_test/"), test_support::temp_path("imaps_rfc822_test/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -1336,12 +1337,12 @@ TEST(fetch_rfc822_sections) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_rfc822_test";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_rfc822_test";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_rfc822_test");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_rfc822_test");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
 
-    const std::string body_path = "/tmp/imaps_rfc822_test/mail_probe";
+    const std::string body_path = test_support::temp_path("imaps_rfc822_test/mail_probe");
     { std::ofstream f(body_path, std::ios::binary); f << kProbeRfc822Body; }
 
     db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
@@ -1393,7 +1394,7 @@ TEST(fetch_rfc822_sections) {
     assert(bs.find(") (\"text\" \"plain\" (\"CHARSET\" \"utf-8\") NIL NIL \"7bit\" 15 1")
            != std::string::npos);
 
-    std::filesystem::remove_all("/tmp/imaps_rfc822_test");
+    std::filesystem::remove_all(test_support::temp_path("imaps_rfc822_test"));
     io->stop(); wk->stop();
     finish_session(session);
     std::cout << "  [PASS] fetch_rfc822_sections (MIME/HEADER/1/TEXT/2 all return data)" << std::endl;
@@ -1406,9 +1407,9 @@ TEST(search_header_criteria) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_search_test");
+    std::filesystem::create_directories(test_support::temp_path("imaps_search_test"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_search_test/", "/tmp/imaps_search_test/");
+        test_support::temp_path("imaps_search_test/"), test_support::temp_path("imaps_search_test/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -1417,8 +1418,8 @@ TEST(search_header_criteria) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_search_test";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_search_test";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_search_test");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_search_test");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
 
@@ -1432,7 +1433,7 @@ TEST(search_header_criteria) {
     };
     std::vector<std::map<std::string, std::string>> rows;
     for (int i = 0; i < 3; ++i) {
-        auto bp = "/tmp/imaps_search_test/mail_" + std::to_string(2001 + i);
+        auto bp = test_support::temp_path("imaps_search_test/mail_") + std::to_string(2001 + i);
         { std::ofstream f(bp, std::ios::binary); f << bodies[i]; }
         rows.push_back({{"id", std::to_string(2001 + i)}, {"sender", "a@t.local"},
             {"recipient", "b@t.local"}, {"subject", "s"}, {"body_path", bp},
@@ -1526,7 +1527,7 @@ TEST(search_header_criteria) {
     w = run_search("S17 UID SEARCH HEADER Subject \"sent-copy probe\" HEADER X-Probe missing\r\n");
     assert(w.find("* SEARCH\r\n") != std::string::npos);
 
-    std::filesystem::remove_all("/tmp/imaps_search_test");
+    std::filesystem::remove_all(test_support::temp_path("imaps_search_test"));
     io->stop(); wk->stop();
     std::cout << "  [PASS] search_header_criteria (hit/miss/case/absent/UNSEEN intact)" << std::endl;
 }
@@ -1534,7 +1535,7 @@ TEST(search_header_criteria) {
 TEST(append_metadata_body_path) {
     auto db = std::make_shared<test::MockDbPool>();
     auto conn = db->acquire_connection();
-    const std::string root = "/tmp/imaps_append_metadata/";
+    const std::string root = test_support::temp_path("imaps_append_metadata/");
     std::filesystem::create_directories(root);
     auto storage = std::make_shared<storage::LocalFileStorageProvider>(root, root);
     uint64_t inserted_id = 0;
@@ -1565,9 +1566,9 @@ TEST(append_db_fail_no_orphan) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_append_fail/mail");
+    std::filesystem::create_directories(test_support::temp_path("imaps_append_fail/mail"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_append_fail/mail/", "/tmp/imaps_append_fail/att/");
+        test_support::temp_path("imaps_append_fail/mail/"), test_support::temp_path("imaps_append_fail/att/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -1576,8 +1577,8 @@ TEST(append_db_fail_no_orphan) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_append_fail/mail";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_append_fail/att";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_append_fail/mail");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_append_fail/att");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
 
@@ -1622,11 +1623,11 @@ TEST(append_db_fail_no_orphan) {
 
     // 无孤儿体文件
     int leftover = 0;
-    for (const auto& e : std::filesystem::directory_iterator("/tmp/imaps_append_fail/mail"))
+    for (const auto& e : std::filesystem::directory_iterator(test_support::temp_path("imaps_append_fail/mail")))
         leftover++;
     assert(leftover == 0);
 
-    std::filesystem::remove_all("/tmp/imaps_append_fail");
+    std::filesystem::remove_all(test_support::temp_path("imaps_append_fail"));
     io->stop(); wk->stop();
     finish_session(session);
     std::cout << "  [PASS] append_db_fail_no_orphan (tagged NO, no OK, no file)" << std::endl;
@@ -1639,9 +1640,9 @@ TEST(append_fail_then_select_responds) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_append_sel/mail");
+    std::filesystem::create_directories(test_support::temp_path("imaps_append_sel/mail"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_append_sel/mail/", "/tmp/imaps_append_sel/att/");
+        test_support::temp_path("imaps_append_sel/mail/"), test_support::temp_path("imaps_append_sel/att/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{},
         0,
@@ -1650,8 +1651,8 @@ TEST(append_fail_then_select_responds) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_append_sel/mail";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_append_sel/att";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_append_sel/mail");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_append_sel/att");
     auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
     // SELECT 统计链有缓存，测试隔离：禁用缓存直接回源
@@ -1706,7 +1707,7 @@ TEST(append_fail_then_select_responds) {
     }
     assert(responded);   // 修复前：BAD Invalid command sequence / 无响应挂死
 
-    std::filesystem::remove_all("/tmp/imaps_append_sel");
+    std::filesystem::remove_all(test_support::temp_path("imaps_append_sel"));
     io->stop(); wk->stop();
     finish_session(session);
     std::cout << "  [PASS] append_fail_then_select_responds (SELECTED-state re-select)" << std::endl;
@@ -1720,9 +1721,9 @@ TEST(append_success_then_select_responds) {
     auto db = std::make_shared<test::MockDbPool>();
     db->mock_conn()->set_deferred(false);
     namespace st = mail_system::storage;
-    std::filesystem::create_directories("/tmp/imaps_append_ok/mail");
+    std::filesystem::create_directories(test_support::temp_path("imaps_append_ok/mail"));
     auto storage = std::make_shared<st::LocalFileStorageProvider>(
-        "/tmp/imaps_append_ok/mail/", "/tmp/imaps_append_ok/att/");
+        test_support::temp_path("imaps_append_ok/mail/"), test_support::temp_path("imaps_append_ok/att/"));
     auto router2 = std::make_shared<router::StaticShardRouter>(
         std::vector<std::pair<std::string, int>>{}, 0,
         std::vector<std::shared_ptr<DBPool>>{db},
@@ -1730,8 +1731,8 @@ TEST(append_success_then_select_responds) {
     ServerConfig cfg2;
     cfg2.perf_mode = true; cfg2.apply_perf_mode();
     cfg2.use_database = false; cfg2.system_domain = "test.local";
-    cfg2.storage.local.mail_path = "/tmp/imaps_append_ok/mail";
-    cfg2.storage.local.attachment_path = "/tmp/imaps_append_ok/att";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_append_ok/mail");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_append_ok/att");
     auto server2 = std::make_shared<TestServer>(cfg2, io, wk, router2);
     auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
     fsm2->set_mailbox_stats_cache(nullptr);
@@ -1813,7 +1814,7 @@ TEST(append_success_then_select_responds) {
         assert(wait_for("A3 OK LOGOUT completed"));
         finish_session(session);
     }
-    std::filesystem::remove_all("/tmp/imaps_append_ok");
+    std::filesystem::remove_all(test_support::temp_path("imaps_append_ok"));
     io->stop(); wk->stop();
     std::cout << "  [PASS] append_success_then_select_responds (session read chain, split literal/CRLF, SELECT/LOGOUT)" << std::endl;
 }

@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // 2026-10-18: trusted submission owns a committed body until queue admission.
 // Exercise provider completion and rejection as consumers; no SMTP session or socket.
 // Negative auth callback evidence: docs/bugfixes/2026-10-18-webmail-shared-sessions.md.
@@ -56,7 +57,7 @@ class DelayedStorage final : public storage::IStorageProvider {
 
   public:
     std::filesystem::path root =
-        std::filesystem::temp_directory_path() / ("webmail-submit-" + std::to_string(getpid()));
+        test_support::temp_root() / ("webmail-submit-" + std::to_string(getpid()));
     bool exists = false;
     bool removed = false;
     bool fail_open = false;

@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // pr::ServerConfig 基类测试：JSON 加载、校验规则、监听器工具函数。
 //
 // 这是框架级配置基类，SMTP/IMAP 的 ServerConfig 都继承它。
@@ -164,7 +165,7 @@ int main() {
     //    派生 mail_system::ServerConfig 的完整解析入口是 loadFromFile（基类 loadFromJson
     //    只解析 framework 层字段）。用临时 JSON 文件走 loadFromFile 验证 outbound 块。
     {
-        auto dir = std::filesystem::temp_directory_path() / "pr_cfg_default_route_test";
+        auto dir = test_support::temp_root() / "pr_cfg_default_route_test";
         std::filesystem::create_directories(dir);
         auto cfg = dir / "ob.json";
         nlohmann::json j = {

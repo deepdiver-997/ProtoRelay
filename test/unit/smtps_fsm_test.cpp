@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // 入站 SMTP FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应码
 #undef NDEBUG
 #include <cassert>  // 在 #undef NDEBUG 后重新包含，确保 assert 生效
@@ -62,7 +63,7 @@ struct FsmTestFixture {
         // 真实存储提供者：正文落盘到 /tmp/smtps_fsm_test_mail，供落盘内容断言
         // （此前为空列表 → 正文被静默丢弃，DATA 落盘路径零覆盖）
         auto storage = std::make_shared<storage::LocalFileStorageProvider>(
-            "/tmp/smtps_fsm_test_mail", "/tmp/smtps_fsm_test_att");
+            test_support::temp_path("smtps_fsm_test_mail"), test_support::temp_path("smtps_fsm_test_att"));
         router = std::make_shared<router::StaticShardRouter>(
             std::vector<std::pair<std::string, int>>{},
             0,
@@ -82,12 +83,12 @@ struct FsmTestFixture {
         cfg.use_database       = false;
         cfg.inbound_ack_mode   = InboundAckMode::AFTER_ENQUEUE;
         cfg.system_domain      = "test.local";
-        cfg.mail_storage_path  = "/tmp/smtps_fsm_test_mail";
-        cfg.attachment_storage_path = "/tmp/smtps_fsm_test_att";
-        cfg.storage.local.mail_path       = "/tmp/smtps_fsm_test_mail";
-        cfg.storage.local.attachment_path = "/tmp/smtps_fsm_test_att";
+        cfg.mail_storage_path  = test_support::temp_path("smtps_fsm_test_mail");
+        cfg.attachment_storage_path = test_support::temp_path("smtps_fsm_test_att");
+        cfg.storage.local.mail_path       = test_support::temp_path("smtps_fsm_test_mail");
+        cfg.storage.local.attachment_path = test_support::temp_path("smtps_fsm_test_att");
 
-        system("mkdir -p /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att");
+        std::filesystem::create_directories(test_support::temp_path("smtps_fsm_test_mail")); std::filesystem::create_directories(test_support::temp_path("smtps_fsm_test_att"));
 
         server = std::shared_ptr<TestServer>(new TestServer(cfg, io_pool, worker_pool, router));
         // SmtpsSession 构造函数从 server 读取持久化队列，务必绑定到测试自身的队列
@@ -137,7 +138,7 @@ struct FsmTestFixture {
         persist_q->shutdown();
         worker_pool->stop();
         io_pool->stop();
-        system("rm -rf /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att");
+        std::filesystem::remove_all(test_support::temp_path("smtps_fsm_test_mail")); std::filesystem::remove_all(test_support::temp_path("smtps_fsm_test_att"));
     }
 
     // 创建 session，初始化 INIT 状态，返回 session + raw conn 指针
@@ -472,7 +473,7 @@ TEST(long_header_line_folded_on_ingest) {
     // 落盘在 enqueue 后由 worker 异步完成，单次扫描会撞上空窗 → 轮询至多 1s
     for (int pass = 0; pass < 200 && !subject_verified; ++pass) {
     h.conn->pump_executor();   // 落盘链路同样经 exec_ctx_,排空才推进
-    for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail")) {
+    for (auto& e : fs::directory_iterator(test_support::temp_path("smtps_fsm_test_mail"))) {
         if (!e.is_regular_file()) continue;
         if (e.path().extension() == ".mime") continue;   // 结构 JSON，非原始报文
         std::ifstream in(e.path(), std::ios::binary);
@@ -515,7 +516,7 @@ TEST(long_header_line_folded_on_ingest) {
     if (!subject_verified) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (!checked_raw_file) {
-        for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail"))
+        for (auto& e : fs::directory_iterator(test_support::temp_path("smtps_fsm_test_mail")))
             std::cerr << "  DIAG maildir entry: " << e.path().string() << std::endl;
         std::cerr << "  DIAG written tail: [" << h.conn->written().substr(
             h.conn->written().size() > 300 ? h.conn->written().size() - 300 : 0) << "]" << std::endl;

@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // pr::ServerBase 单元测试：生命周期状态、连接计数、入侵检测集成、配置热重载、
 // DNS 注入、metrics 端到端。
 //
@@ -48,7 +49,7 @@ void expect_true(bool c, const char* what) {
 }
 
 std::filesystem::path tmp_dir() {
-    return std::filesystem::temp_directory_path() / "protorelay_server_base_test";
+    return test_support::temp_root() / "protorelay_server_base_test";
 }
 
 // pr::ServerBase 是抽象基类：实现纯虚接口的最小具体子类

@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // SMTP 入站异步并发测试 — Mock DNS/DB 延迟回调 + 真实 IO 线程
 //
 // 目标：为入站校验/FSM 的异步路径（MAIL FROM SPF / RCPT user_exists / DATA_END verify_all）
@@ -115,12 +116,12 @@ struct ConcurrencyTestFixture {
         cfg.inbound_spf_mode   = "off";   // 测试按需开启（hard/pass）
         cfg.inbound_dkim_mode  = "off";
         cfg.inbound_dmarc_mode = "off";
-        cfg.mail_storage_path  = "/tmp/smtps_fsm_conc_test_mail";
-        cfg.attachment_storage_path = "/tmp/smtps_fsm_conc_test_att";
-        cfg.storage.local.mail_path       = "/tmp/smtps_fsm_conc_test_mail";
-        cfg.storage.local.attachment_path = "/tmp/smtps_fsm_conc_test_att";
+        cfg.mail_storage_path  = test_support::temp_path("smtps_fsm_conc_test_mail");
+        cfg.attachment_storage_path = test_support::temp_path("smtps_fsm_conc_test_att");
+        cfg.storage.local.mail_path       = test_support::temp_path("smtps_fsm_conc_test_mail");
+        cfg.storage.local.attachment_path = test_support::temp_path("smtps_fsm_conc_test_att");
 
-        system("mkdir -p /tmp/smtps_fsm_conc_test_mail /tmp/smtps_fsm_conc_test_att");
+        std::filesystem::create_directories(test_support::temp_path("smtps_fsm_conc_test_mail")); std::filesystem::create_directories(test_support::temp_path("smtps_fsm_conc_test_att"));
 
         server = std::shared_ptr<TestServer>(new TestServer(cfg, io_pool, worker_pool, router));
         server->m_persistentQueue = persist_q;
@@ -148,7 +149,7 @@ struct ConcurrencyTestFixture {
         worker_pool->stop();
         io_pool->stop();
         dns->join_all();
-        system("rm -rf /tmp/smtps_fsm_conc_test_mail /tmp/smtps_fsm_conc_test_att");
+        std::filesystem::remove_all(test_support::temp_path("smtps_fsm_conc_test_mail")); std::filesystem::remove_all(test_support::temp_path("smtps_fsm_conc_test_att"));
     }
 
     // 重新应用配置（FSM 通过 atomic_load 读取 server->m_config）
