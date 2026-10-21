@@ -64,6 +64,10 @@ if(ENABLE_S3_STORAGE)
     target_link_libraries(protorelay_storage PRIVATE OpenSSL::Crypto)
 endif()
 
+# Mail object layouts are application adapters, independent of DB and runtime.
+protorelay_module(protorelay_mail_storage src/mail_system/back/storage/mail_object_key_layout.cpp)
+target_link_libraries(protorelay_mail_storage PUBLIC protorelay_storage)
+
 protorelay_module(protorelay_db_mysql
     src/mail_system/back/db/mysql_pool.cpp src/mail_system/back/db/mysql_service.cpp
     src/mail_system/back/db/distributed_mysql_pool.cpp)
@@ -97,6 +101,7 @@ protorelay_module(protorelay_mail_core
     src/mail_system/back/repository/pop3_mailbox_repository.cpp
     src/mail_system/back/repository/pop3_lock_repository.cpp
     src/mail_system/back/repository/account_repository.cpp
+    src/mail_system/back/repository/persistence_repository.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp
@@ -109,7 +114,7 @@ protorelay_module(protorelay_mail_core
     src/mail_system/back/mailServer/outbound/outbound_server.cpp
     src/mail_system/back/mailServer/outbound/outbound_smtp_session.cpp)
 target_link_libraries(protorelay_mail_core PUBLIC
-    protorelay_framework protorelay_runtime protorelay_storage protorelay_smtp_client
+    protorelay_framework protorelay_runtime protorelay_mail_storage protorelay_smtp_client
     protorelay_db_mysql)
 target_include_directories(protorelay_mail_core SYSTEM PRIVATE ${CARES_INCLUDE_DIRS} ${MYSQL_INCLUDE_DIRS})
 if(CARES_LIBRARY_DIRS)
