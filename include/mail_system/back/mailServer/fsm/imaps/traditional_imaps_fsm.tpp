@@ -7,10 +7,17 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/password_rehash.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <cstring>
 #include <filesystem>
 #include <regex>
 #include <unordered_map>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mail_system {
 
@@ -2148,7 +2155,7 @@ std::vector<std::string> imap_search_tokens(const std::string& s) {
         } else {
             while (i < s.size() && s[i] != ' ' && s[i] != '\t') tok += s[i++];
         }
-        if (!tok.empty()) out.push_back(std::move(tok));
+        out.push_back(std::move(tok)); // 空引号串也是 HEADER 的合法 value
     }
     return out;
 }
@@ -2158,29 +2165,28 @@ struct ImapSearchHeaderKey {
     std::string value;   // 子串（匹配时忽略大小写）
 };
 
-// 提取 HEADER <field> <value> 判据（可多条，隐式 AND）。
-// 之前 SEARCH 完全忽略 HEADER 判据：无 flag 命中时 match 恒 true，
-// UID SEARCH HEADER Message-ID <x> 返回全箱 UID（2026-10-21 生产实测）。
-std::vector<ImapSearchHeaderKey> parse_search_header_keys(const std::string& args) {
-    std::vector<ImapSearchHeaderKey> keys;
+struct ImapSearchCriteria {
+    std::vector<ImapSearchHeaderKey> headers;
+    std::vector<std::string> keys; // 已消费 HEADER 参数，剩余的 flag/UID 判据（大写）
+};
+
+// 一次消费 HEADER <field> <value>，其参数不能再被识别为 flag 或 UID 范围。
+ImapSearchCriteria parse_search_criteria(const std::string& args) {
+    ImapSearchCriteria criteria;
     auto tokens = imap_search_tokens(args);
-    auto ieq = [](const std::string& a, const char* b) {
-        if (a.size() != std::char_traits<char>::length(b)) return false;
-        for (size_t k = 0; k < a.size(); ++k)
-            if (std::toupper(static_cast<unsigned char>(a[k])) !=
-                static_cast<unsigned char>(b[k])) return false;
-        return true;
-    };
     for (size_t i = 0; i < tokens.size(); ++i) {
-        if (!ieq(tokens[i], "HEADER")) continue;
-        if (i + 2 >= tokens.size()) break;   // 缺 field/value，判据不完整 → 忽略
-        ImapSearchHeaderKey key;
-        key.field = tokens[i + 1];
-        key.value = tokens[i + 2];
-        keys.push_back(std::move(key));
-        i += 2;
+        std::string key = tokens[i];
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        if (key == "HEADER") {
+            if (i + 2 >= tokens.size()) break;
+            criteria.headers.push_back({tokens[i + 1], tokens[i + 2]});
+            i += 2;
+        } else {
+            criteria.keys.push_back(std::move(key));
+        }
     }
-    return keys;
+    return criteria;
 }
 
 // 头字段抽取：header 块内所有同名行（含 folded 续行）合并为一个字符串。
@@ -2238,7 +2244,11 @@ std::string search_read_body(const std::shared_ptr<storage::IStorageProvider>& s
 bool mail_matches_header_keys(const std::shared_ptr<storage::IStorageProvider>& storage,
                               const MailboxMailInfo& m,
                               const std::vector<ImapSearchHeaderKey>& keys) {
-    const std::string body = search_read_body(storage, m.body_path);
+    // 旧版 GCC APPEND 把已移动的 body_path 写进 DB。只读兼容这些历史行，
+    // 用与 APPEND 相同的 provider key 寻址；不在 SEARCH 中修写生产数据。
+    const std::string body_path = !m.body_path.empty() ? m.body_path
+        : storage ? storage->build_mail_body_key(m.mail_id) : "mail/" + std::to_string(m.mail_id);
+    const std::string body = search_read_body(storage, body_path);
     size_t sep = body.find("\r\n\r\n");
     if (sep == std::string::npos) sep = body.find("\n\n");
     const std::string header_block =
@@ -2270,15 +2280,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         return;
     }
 
-    const std::string raw_args = session->get_last_command_args();
-
-    // 判据解析（不依赖 DB，先算）。flag 判据沿用既有语义；HEADER 判据从
-    // 原始参数分词提取（upper_args 的子串扫描会被含 "SEEN"/"UNSEEN" 字样的
-    // 头值污染，HEADER 命中率也因此错乱）。
-    const auto header_keys = parse_search_header_keys(raw_args);
-    std::string upper_args = raw_args;
-    std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
-    auto tokens = imap_search_tokens(upper_args);
+    const std::string raw_args = ctx->is_uid_command
+        ? ctx->uid_overridden_args : session->get_last_command_args();
+    const auto criteria = parse_search_criteria(raw_args);
+    const auto& header_keys = criteria.headers;
+    const auto& tokens = criteria.keys;
     auto has_token = [&](const char* t) {
         for (const auto& tok : tokens)
             if (tok == t) return true;
@@ -2305,7 +2311,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         [self, tag = std::move(tag), is_uid,
          search_unseen, search_seen, search_deleted,
          header_keys, storage, worker,
-         upper_args = std::move(upper_args)](
+         tokens](
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
@@ -2319,36 +2325,21 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
             // 客户端"最后同步 UID"永远无法推进 → 每次轮询都全量重同步。
             bool has_uid_range = false;
             uint64_t uid_lo = 0, uid_hi = UINT64_MAX;
-            {
-                // 遍历所有 "UID " 出现，取后面跟数字或 * 的 token 作为 UID 集。
-                // 兼容 "UID SEARCH UID X:*"（第一个 "UID " 后是 SEARCH，跳过）和 "UID X:*"。
-                size_t search_pos = 0;
-                while (search_pos < upper_args.size()) {
-                    size_t p = upper_args.find("UID ", search_pos);
-                    if (p == std::string::npos) break;
-                    size_t q = p + 4;
-                    while (q < upper_args.size() && upper_args[q] == ' ') q++;
-                    size_t e = q;
-                    while (e < upper_args.size() &&
-                           (std::isalnum(static_cast<unsigned char>(upper_args[e])) ||
-                            upper_args[e] == ':' || upper_args[e] == '*'))
-                        e++;
-                    std::string tok = upper_args.substr(q, e - q);
-                    if (!tok.empty() && tok != "SEARCH" &&
-                        (tok[0] == '*' || std::isdigit(static_cast<unsigned char>(tok[0])))) {
-                        size_t colon = tok.find(':');
-                        if (colon != std::string::npos) {
-                            std::string a = tok.substr(0, colon), b = tok.substr(colon + 1);
-                            uid_lo = (a == "*") ? 0 : safe_stoull(a);
-                            uid_hi = (b == "*") ? UINT64_MAX : safe_stoull(b);
-                        } else if (tok != "*") {
-                            uid_lo = uid_hi = safe_stoull(tok);
-                        }
-                        has_uid_range = true;
-                        break;
-                    }
-                    search_pos = p + 4;
+            for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+                if (tokens[i] != "UID") continue;
+                const auto& tok = tokens[i + 1];
+                if (tok.empty() || (tok[0] != '*' &&
+                    !std::isdigit(static_cast<unsigned char>(tok[0])))) continue;
+                size_t colon = tok.find(':');
+                if (colon != std::string::npos) {
+                    std::string a = tok.substr(0, colon), b = tok.substr(colon + 1);
+                    uid_lo = (a == "*") ? 0 : safe_stoull(a);
+                    uid_hi = (b == "*") ? UINT64_MAX : safe_stoull(b);
+                } else if (tok != "*") {
+                    uid_lo = uid_hi = safe_stoull(tok);
                 }
+                has_uid_range = true;
+                break;
             }
 
             // 匹配谓词：flag/UID 判据与旧实现完全一致，HEADER 判据在末尾 AND。
@@ -3023,7 +3014,8 @@ void TraditionalImapsFsm<ConnectionType>::create_mail_async(
         {std::to_string(mail_id),
          db::sql::clip_subject_for_db(subject.empty() ? "(无主题)" : subject),
          body_path, std::to_string(ts)},
-        [conn, storage, mail_id = static_cast<uint64_t>(mail_id), body_path = std::move(body_path),
+        // SQL 参数与回调捕获的求值顺序未指定，不能在同一调用中移动 body_path。
+        [conn, storage, mail_id = static_cast<uint64_t>(mail_id), body_path,
          cb = std::move(cb)](bool ok) mutable {
             if (ok) { cb(mail_id, std::move(body_path), ""); return; }
             // mails 行写失败：体文件已先落，必须删掉，不留孤儿

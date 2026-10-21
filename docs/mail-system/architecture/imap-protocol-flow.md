@@ -241,12 +241,19 @@ S:  a11 OK SEARCH completed
 
 | 搜索键 | 匹配条件 |
 |--------|---------|
+| `HEADER <field> <value>` | 指定头字段内大小写不敏感的子串；多词值用双引号 |
 | `ALL` | 全部 |
 | `UNSEEN` / `NEW` | 未读 |
 | `SEEN` | 已读 |
 | `DELETED` | 标记删除 |
 | `UNDELETED` | 未标记删除 |
 | `FLAGGED` | 标星 |
+
+HEADER 示例：`UID SEARCH HEADER Subject "sent-copy probe"`。值中的双引号和
+反斜杠分别用 `\"`、`\\` 转义；`HEADER Subject ""` 匹配存在 Subject 字段的邮件。
+HEADER 值里的 `SEEN`、`UNSEEN`、`UID` 仅作为头内容，不能附加 flag/UID 过滤。
+2026-10-21 修复同时兼容旧 APPEND 造成的空 `body_path`：按 provider 的 mail_id key
+读取已有正文，不在搜索时改库。根因与回归见 [IMAP 设计文档](imap-server-design.md#append--search-correctness-2026-10-21)。
 
 ### UID 模式
 
@@ -320,7 +327,10 @@ S:  a19 OK [APPENDUID 1 2056301874306351104] APPEND completed
 ```
 
 > APPEND 常用于存草稿或归档。响应中的 APPENDUID 反馈了
-> UIDVALIDITY 和分配的 mail_id。
+> UIDVALIDITY 和分配的 mail_id。literal 和尾部 CRLF 可以分属不同 TCP/TLS
+> 读取，literal 本身也可以分片；收到 APPEND OK 后，同连接的 SELECT、LOGOUT 必须
+> 继续有响应。2026-10-21 修复空行与未完成 literal 缺少续读的问题，并保证 APPEND
+> 元数据的 body_path 与实际存储 key 一致。
 
 ### IDLE 命令（实时等待）
 

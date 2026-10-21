@@ -408,6 +408,20 @@ async回调 (当前同步默认, 在async_query返回前触发):
 permanently stalled — `do_async_read` returns immediately because the buffer has
 data, but the while-loop refuses to consume it.
 
+IMAP also resumes reads after input that produces no reply: an incomplete APPEND
+literal or a standalone terminating CRLF (which can arrive after APPEND OK in a
+separate TLS record). `SessionBase` allows only one socket read in flight, so these
+requests and response/flush completions cannot overlap reads. Session regressions
+drive chunked connection input through LOGIN → APPEND → SELECT → LOGOUT.
+
+APPEND metadata copies its body key into the DB completion capture: moving that
+same string while also binding it as a SQL parameter in one call made GCC-11 store
+an empty `body_path` due to unspecified argument evaluation order. SEARCH HEADER
+can read those historical rows using the provider's mail_id key without writing
+the DB. Its parser consumes HEADER operands once, preserving quoted multiword,
+escaped and empty values; header content cannot become flag or UID criteria.
+See [IMAP correctness and regressions](../mail-system/architecture/imap-server-design.md#append--search-correctness-2026-10-21).
+
 ### 5.3 Outbound Delivery
 
 - **Event-driven**: no permanent worker thread. `try_pull()` is triggered by delivery completion and new mail submission.

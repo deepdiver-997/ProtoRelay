@@ -105,6 +105,10 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return static_cast<bool>(pending_read_.h);
     }
+    size_t read_call_count() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return read_call_count_;
+    }
     void trigger_deferred_read(const std::string& data) {
         PendingRead pr;
         {
@@ -157,6 +161,7 @@ public:
         bool defer = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
+            ++read_call_count_;
             if (deferred_read_ && read_buf_.size() <= read_pos_) {
                 pending_read_ = PendingRead{buf, std::move(h)};
                 defer = true;
@@ -287,6 +292,7 @@ private:
     bool closed_ = false;
     std::string* capture_target_ = nullptr;
     bool deferred_read_ = false;
+    size_t read_call_count_ = 0;
     bool deferred_write_ = false;
     PendingRead pending_read_;
     WriteHandler pending_write_handler_;

@@ -3,6 +3,7 @@
 // docs/bugfixes/2026-10-18-imap-multiple-body-sections.md。
 #undef NDEBUG
 #include <cassert>
+#include <chrono>
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
@@ -25,6 +26,10 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <cstdint>
+#include <map>
+#include <utility>
+#include <vector>
 
 using namespace mail_system;
 
@@ -1420,7 +1425,9 @@ TEST(search_header_criteria) {
     // 3 封邮件：仅 mail 2002 携带目标 Message-ID
     const char* bodies[3] = {
         "Subject: unrelated one\r\nMessage-ID: <other-alpha@scut.email>\r\n\r\nb1\r\n",
-        "Subject: the probe\r\nMESSAGE-ID: <PROBE-RFC822-2@scut.email>\r\n\r\nb2\r\n",
+        "Subject: sent-copy probe\r\nMESSAGE-ID: <PROBE-RFC822-2@scut.email>\r\n"
+        "X-Probe: say \"probe\" at C:\\mail\r\nX-Flag: UNSEEN\r\n"
+        "X-Range: UID 9999:*\r\n\r\nb2\r\n",
         "Subject: no msgid here\r\n\r\nb3\r\n",
     };
     std::vector<std::map<std::string, std::string>> rows;
@@ -1430,7 +1437,7 @@ TEST(search_header_criteria) {
         rows.push_back({{"id", std::to_string(2001 + i)}, {"sender", "a@t.local"},
             {"recipient", "b@t.local"}, {"subject", "s"}, {"body_path", bp},
             {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
-            {"status", "1"}, {"send_time", "1700000000"}});
+            {"status", i == 1 ? "0" : "1"}, {"send_time", "1700000000"}});
     }
     auto push_rows = [&]() {
         db->mock_conn()->push_sync_result(
@@ -1441,6 +1448,7 @@ TEST(search_header_criteria) {
         push_rows();
         auto conn_u = std::make_unique<MockConnection>();
         auto* conn_ptr = conn_u.get();
+        conn_ptr->set_deferred_read(true);
         auto session = std::make_shared<ImapsSession<MockConnection>>(
             server2.get(), std::move(conn_u), fsm2);
         auto* c = static_cast<ImapContext*>(session->get_context());
@@ -1479,14 +1487,75 @@ TEST(search_header_criteria) {
     w = run_search("S4 UID SEARCH HEADER X-Nope anything\r\n");
     assert(w.find("* SEARCH\r\n") != std::string::npos);
 
-    // 既有判据不回归：UNSEEN（status=1 全部命中）
+    // 既有判据不回归：目标邮件已读，另外两封未读。
     w = run_search("S5 UID SEARCH UNSEEN\r\n");
-    assert(w.find("2001") != std::string::npos && w.find("2002") != std::string::npos
+    assert(w.find("2001") != std::string::npos && w.find("2002") == std::string::npos
            && w.find("2003") != std::string::npos);
+
+    w = run_search("S6 UID SEARCH HEADER Subject \"sent-copy probe\"\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+    w = run_search("S7 SEARCH HEADER Subject \"sent-copy probe\"\r\n");
+    assert(w.find("* SEARCH 2\r\n") != std::string::npos);
+    w = run_search("S8 UID SEARCH HEADER Subject \"sent-copy missing\"\r\n");
+    assert(w.find("* SEARCH\r\n") != std::string::npos);
+    w = run_search("S9 UID SEARCH HEADER X-Probe \"say \\\"probe\\\" at C:\\\\mail\"\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+    std::cout << "  [PASS] search_header_quoted_values (multiword hit/miss/escaped quote/backslash)" << std::endl;
+
+    // HEADER 的值必须作为参数消费，不能再被当作 flag/UID 判据。
+    w = run_search("S10 UID SEARCH HEADER X-Flag \"UNSEEN\"\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+    w = run_search("S11 UID SEARCH HEADER X-Range \"UID 9999:*\"\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+    w = run_search("S12 UID SEARCH HEADER X-Flag \"\" SEEN\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+
+    // Linux APPEND 的旧数据：文件存在，mails.body_path 却为空（参数求值时被移动）。
+    const std::string legacy_key = storage->build_mail_body_key(2002);
+    std::filesystem::copy_file(rows[1]["body_path"], legacy_key,
+                               std::filesystem::copy_options::overwrite_existing);
+    rows[1]["body_path"].clear();
+    w = run_search("S13 UID SEARCH HEADER Subject \"sent-copy probe\"\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+    w = run_search("S14 UID SEARCH HEADER Subject \"sent-copy missing\"\r\n");
+    assert(w.find("* SEARCH\r\n") != std::string::npos);
+    w = run_search("S15 UID SEARCH UID 2002:2003 HEADER Subject \"sent-copy probe\" SEEN\r\n");
+    assert(w.find("* SEARCH 2002\r\n") != std::string::npos);
+    w = run_search("S16 UID SEARCH UID 2003:* HEADER Subject \"sent-copy probe\"\r\n");
+    assert(w.find("* SEARCH\r\n") != std::string::npos);
+    w = run_search("S17 UID SEARCH HEADER Subject \"sent-copy probe\" HEADER X-Probe missing\r\n");
+    assert(w.find("* SEARCH\r\n") != std::string::npos);
 
     std::filesystem::remove_all("/tmp/imaps_search_test");
     io->stop(); wk->stop();
     std::cout << "  [PASS] search_header_criteria (hit/miss/case/absent/UNSEEN intact)" << std::endl;
+}
+
+TEST(append_metadata_body_path) {
+    auto db = std::make_shared<test::MockDbPool>();
+    auto conn = db->acquire_connection();
+    const std::string root = "/tmp/imaps_append_metadata/";
+    std::filesystem::create_directories(root);
+    auto storage = std::make_shared<storage::LocalFileStorageProvider>(root, root);
+    uint64_t inserted_id = 0;
+    std::string returned_path;
+    TraditionalImapsFsm<MockConnection>::create_mail_async(
+        storage, conn, "sent-copy probe", "Subject: sent-copy probe\r\n\r\nbody",
+        [&](uint64_t id, std::string path, std::string error) {
+            assert(error.empty());
+            inserted_id = id;
+            returned_path = std::move(path);
+        });
+    assert(db->mock_conn()->has_pending_execute());
+    const auto params = db->mock_conn()->last_query_params();
+    assert(params.size() == 4);
+    const std::string key = storage->build_mail_body_key(std::stoull(params[0]));
+    // GCC-11 修复前失败：SQL 的 body_path 参数为空，正文却已落盘到 key。
+    assert(params[2] == key && std::filesystem::exists(key));
+    db->mock_conn()->fire_execute(true);
+    assert(inserted_id == std::stoull(params[0]) && returned_path == key);
+    std::filesystem::remove_all(root);
+    std::cout << "  [PASS] append_metadata_body_path (SQL path == storage key == callback path)" << std::endl;
 }
 
 // 缺陷2：APPEND DB 写失败 → tagged NO、无孤儿体文件、无成功日志（OK APPENDUID）
@@ -1643,6 +1712,112 @@ TEST(append_fail_then_select_responds) {
     std::cout << "  [PASS] append_fail_then_select_responds (SELECTED-state re-select)" << std::endl;
 }
 
+// Session 级回归：所有输入经 do_async_read/MockConnection 分块投递，不能直呼
+// handle_read/process_read 绕过读重武装。DB/存储走真实 APPEND 异步 worker 链。
+TEST(append_success_then_select_responds) {
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::WorkerThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(false);
+    namespace st = mail_system::storage;
+    std::filesystem::create_directories("/tmp/imaps_append_ok/mail");
+    auto storage = std::make_shared<st::LocalFileStorageProvider>(
+        "/tmp/imaps_append_ok/mail/", "/tmp/imaps_append_ok/att/");
+    auto router2 = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{}, 0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<st::IStorageProvider>>{storage});
+    ServerConfig cfg2;
+    cfg2.perf_mode = true; cfg2.apply_perf_mode();
+    cfg2.use_database = false; cfg2.system_domain = "test.local";
+    cfg2.storage.local.mail_path = "/tmp/imaps_append_ok/mail";
+    cfg2.storage.local.attachment_path = "/tmp/imaps_append_ok/att";
+    auto server2 = std::make_shared<TestServer>(cfg2, io, wk, router2);
+    auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
+    fsm2->set_mailbox_stats_cache(nullptr);
+    AuthCacheEntry auth;
+    auth.password_hash = "test123"; auth.user_id = 7;
+    fsm2->m_authCache->inject("user@test.local", auth);
+
+    // 同段尾符覆盖 pending_write_buf_ 冲刷；分段尾符覆盖 APPEND OK 后才到达的
+    // 孤立 CRLF；literal 自身也可以跨多次读取，CR/LF 可以分别到达。
+    const std::vector<std::vector<std::string>> chunks = {
+        {"12345\r\n"},
+        {"12345", "\r\n"},
+        {"12", "345", "\r", "\n"},
+        {"12345\r\n"}, // 最后一轮还延迟实际写完成，覆盖暂存响应 flush 的回调。
+    };
+    size_t case_index = 0;
+    for (const auto& parts : chunks) {
+        const bool slow_write = ++case_index == chunks.size();
+        auto conn_u = std::make_unique<MockConnection>();
+        auto* conn = conn_u.get();
+        conn->set_deferred_read(true);
+        auto session = std::make_shared<ImapsSession<MockConnection>>(
+            server2.get(), std::move(conn_u), fsm2);
+        session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+        auto wait_for = [&](const std::string& needle) {
+            for (int waited = 0; waited < 2000; waited += 5) {
+                conn->pump_executor();
+                if (conn->written().find(needle) != std::string::npos) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return false;
+        };
+        auto feed = [&](const std::string& bytes) {
+            conn->pump_executor();
+            assert(conn->has_pending_read());
+            conn->trigger_deferred_read(bytes);
+            conn->pump_executor();
+        };
+        session->do_async_read();
+        feed("A0 LOGIN user@test.local test123\r\n");
+        assert(wait_for("A0 OK LOGIN completed"));
+        assert(session->get_current_state() == static_cast<int>(ImapState::AUTHENTICATED));
+
+        db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+            std::vector<std::map<std::string, std::string>>{{{"id", "9"}}}));
+        db->mock_conn()->push_execute_result(true); // mails
+        db->mock_conn()->push_execute_result(true); // mail_recipients
+        db->mock_conn()->push_execute_result(true); // mail_mailbox
+        feed("A1 APPEND INBOX {5}\r\n");
+        assert(wait_for("+ Ready for literal data\r\n"));
+        conn->set_deferred_write(slow_write);
+        size_t literal_bytes = 0;
+        for (const auto& part : parts) {
+            feed(part);
+            literal_bytes += part.size();
+            // 分段 CRLF 明确晚于 tagged OK，确定性还原生产挂死时序。
+            if (literal_bytes >= 5) assert(wait_for("A1 OK [APPENDUID 9 "));
+        }
+        if (slow_write) {
+            assert(conn->has_pending_write());
+            conn->trigger_deferred_write();
+            conn->set_deferred_write(false);
+        }
+        conn->pump_executor();
+        // 修复前：同段 CRLF 能过，独立 CRLF 消费后没有挂起读，后续 SELECT 永不派发。
+        assert(conn->has_pending_read());
+
+        db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+            std::vector<std::map<std::string, std::string>>{{{"id", "9"}}}));
+        db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+            std::vector<std::map<std::string, std::string>>{{{"cnt", "4"}}}));
+        db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+            std::vector<std::map<std::string, std::string>>{{{"cnt", "2"}}}));
+        db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+            std::vector<std::map<std::string, std::string>>{{{"uidnext", "43"}}}));
+        feed("A2 SELECT INBOX\r\n");
+        assert(wait_for("A2 OK [READ-WRITE] SELECT completed"));
+        feed("A3 LOGOUT\r\n");
+        assert(wait_for("A3 OK LOGOUT completed"));
+        finish_session(session);
+    }
+    std::filesystem::remove_all("/tmp/imaps_append_ok");
+    io->stop(); wk->stop();
+    std::cout << "  [PASS] append_success_then_select_responds (session read chain, split literal/CRLF, SELECT/LOGOUT)" << std::endl;
+}
+
 // 缺陷3 根因：literal 之后同段到达的下一条命令不得被吞进邮件体
 TEST(append_literal_excess_not_swallowed) {
     auto h = fx.make_session();
@@ -1751,9 +1926,11 @@ int main() {
         // ── 2026-10-21 四缺陷回归 ──
         test_fetch_rfc822_sections(fx);
         test_search_header_criteria(fx);
+        test_append_metadata_body_path(fx);
         test_append_db_fail_no_orphan(fx);
         test_append_fail_then_select_responds(fx);
         test_append_literal_excess_not_swallowed(fx);
+        test_append_success_then_select_responds(fx);
 
         // ── IDLE/DONE ──
         test_idle_initiated(fx);

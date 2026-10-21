@@ -182,10 +182,12 @@ void SessionBase<ConnectionType>::do_async_read() {
     ex->post([self] {
         if (self->closed_ || !self->connection_) return;
         if (self->has_buffered_input()) return;
+        if (self->read_in_progress_.exchange(true)) return;
         self->connection_->async_read(
             pr::net::buffer(self->read_buffer_),
             [self](
                 const std::error_code& error, std::size_t bytes) mutable {
+                self->read_in_progress_.store(false);
                 if (self->closed_) return;
 
                 // watchdog 回收点：timer 到期已置 close_requested_ 并 cancel 本读 → 这里
