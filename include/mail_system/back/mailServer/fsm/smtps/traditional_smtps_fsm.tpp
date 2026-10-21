@@ -1310,10 +1310,17 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     std::function<void(bool exists)> cb)
 {
+    if (!cb) return;
     if (!session) { cb(false); return; }
     session->set_paused(true);
+    auto executor = session->get_connection().executor();
     account_policy_->user_exists_async(mail_address,
-        [session, cb = std::move(cb)](bool exists) { cb(exists); });
+        [session, executor, cb = std::move(cb)](bool exists) mutable {
+            executor->post([session, cb = std::move(cb), exists]() mutable {
+                if (session->is_closed()) return;
+                cb(exists);
+            });
+        });
 }
 
 // RCPT TO 收件人解析：用户（缓存→DB）→ 别名（缓存→DB）→ 空（550）。
@@ -1346,9 +1353,20 @@ void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& alias_address,
     std::function<void(std::vector<std::string>)> cb)
 {
-    if (session) session->set_paused(true);
+    if (!cb) return;
+    if (!session) {
+        account_policy_->alias_targets_async(alias_address, std::move(cb));
+        return;
+    }
+    session->set_paused(true);
+    auto executor = session->get_connection().executor();
     account_policy_->alias_targets_async(alias_address,
-        [session, cb = std::move(cb)](std::vector<std::string> targets) mutable { cb(std::move(targets)); });
+        [session, executor, cb = std::move(cb)](std::vector<std::string> targets) mutable {
+            executor->post([session, cb = std::move(cb), targets = std::move(targets)]() mutable {
+                if (session->is_closed()) return;
+                cb(std::move(targets));
+            });
+        });
 }
 
 
@@ -1356,7 +1374,8 @@ void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
 // 条件 UPDATE（跨天归零 + 配额 WHERE）后 SELECT ROW_COUNT() 读实际占用行数：
 //   1 行 → 占用成功（allowed=true）；0 行 → 当日配额已超（allowed=false）。
 // 失败语义：DB 故障 / 无连接 / 配额关闭（config<=0）→ fail-open 放行并 WARN。
-// 与 user_exists_async 一致：短查询直接在调用线程内联执行，不做 worker 池转发。
+// Account policy may complete inline or on a DB thread; protocol continuation
+// always returns to the connection executor, including the disabled-quota path.
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session,
@@ -1366,10 +1385,16 @@ void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
     if (!cb) return;
     if (!session) { cb(true); return; }
     auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
-    if (!cfg || cfg->smtp_daily_send_limit <= 0) { cb(true); return; }
     session->set_paused(true);
-    account_policy_->check_send_quota_async(mail_address, cfg->smtp_daily_send_limit,
-        [session, cb = std::move(cb)](bool allowed) { cb(allowed); });
+    auto executor = session->get_connection().executor();
+    auto complete = [session, executor, cb = std::move(cb)](bool allowed) mutable {
+        executor->post([session, cb = std::move(cb), allowed]() mutable {
+            if (session->is_closed()) return;
+            cb(allowed);
+        });
+    };
+    if (!cfg || cfg->smtp_daily_send_limit <= 0) { complete(true); return; }
+    account_policy_->check_send_quota_async(mail_address, cfg->smtp_daily_send_limit, std::move(complete));
 }
 
 

@@ -1202,7 +1202,7 @@ TEST(auth_from_alias_accepted_at_data_end) {
     std::cout << "  [PASS] auth_from_alias_accepted_at_data_end (别名命中 → 入队)" << std::endl;
 }
 
-TEST(auth_completion_resumes_on_connection_executor) {
+TEST(account_policy_completions_resume_on_connection_executor) {
     struct DeferredAuthenticator final : IAccountAuthenticator {
         Complete pending;
         void login_async(const std::string&, const std::string&, Complete complete, bool) override {
@@ -1231,12 +1231,44 @@ TEST(auth_completion_resumes_on_connection_executor) {
     assert(completed == 0 && executor->tasks.size() == 1);
     executor->drain();
     assert(completed == 1);
+
+    int policies = 0;
+    fx.fsm->user_exists_async(session, "user0@test.local", [&](bool exists) {
+        assert(executor->running && exists);
+        ++policies;
+    });
+    fx.fsm->alias_targets_async(session, "solo@test.local", [&](std::vector<std::string> targets) {
+        assert(executor->running && targets == std::vector<std::string>{"user0@test.local"});
+        ++policies;
+    });
+    fx.fsm->check_send_quota_async(session, "user0@test.local", [&](bool allowed) {
+        assert(executor->running && allowed); // Disabled quota still uses the same boundary.
+        ++policies;
+    });
+    assert(policies == 0 && executor->tasks.size() == 3);
+    executor->drain();
+    assert(policies == 3);
+
+    // Existing no-session fallback semantics remain available to non-session callers.
+    fx.fsm->user_exists_async({}, "user0@test.local", [&](bool exists) { assert(!exists); ++policies; });
+    fx.fsm->alias_targets_async({}, "solo@test.local", [&](std::vector<std::string> targets) {
+        assert(targets == std::vector<std::string>{"user0@test.local"}); ++policies;
+    });
+    fx.fsm->check_send_quota_async({}, "user0@test.local", [&](bool allowed) { assert(allowed); ++policies; });
+    assert(policies == 6);
+
+    int after_close = 0;
+    fx.fsm->user_exists_async(session, "user0@test.local", [&](bool) { ++after_close; });
+    fx.fsm->alias_targets_async(session, "solo@test.local", [&](std::vector<std::string>) { ++after_close; });
+    fx.fsm->check_send_quota_async(session, "user0@test.local", [&](bool) { ++after_close; });
+    assert(executor->tasks.size() == 3);
     session->close();
     executor->drain();
+    assert(after_close == 0);
     session.reset();
     fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
         fx.router, fx.fsm->m_authCache, fx.worker_pool));
-    std::cout << "  [PASS] auth_completion_resumes_on_connection_executor" << std::endl;
+    std::cout << "  [PASS] account_policy_completions_resume_on_connection_executor" << std::endl;
 }
 
 TEST(auth_from_alias_case_normalized_accepted_at_data_end) {
@@ -1400,7 +1432,7 @@ int main() {
         test_auth_from_mismatch_rejected_at_data_end(fx);
         test_auth_from_match_accepted_at_data_end(fx);
         test_auth_from_alias_accepted_at_data_end(fx);
-        test_auth_completion_resumes_on_connection_executor(fx);
+        test_account_policy_completions_resume_on_connection_executor(fx);
         test_auth_from_alias_case_normalized_accepted_at_data_end(fx);
         test_auth_from_alias_miss_rejected_at_data_end(fx);
         test_auth_from_alias_db_unavailable_fails_closed_at_data_end(fx);
