@@ -146,6 +146,10 @@ struct FsmTestFixture {
     struct Handle {
         MockConnection* conn;
         std::shared_ptr<SmtpsSession<MockConnection>> session;
+        // An idle peer may leave a read holding the session. Close and drain
+        // before releasing the last external owner so no callback/self cycle
+        // outlives this fixture's server and shared runtimes.
+        ~Handle() { finish_session(session); }
     };
 
     Handle make_session(const std::string& preload_data = "",
@@ -153,6 +157,10 @@ struct FsmTestFixture {
                         bool advertise_starttls = true) {
         auto conn_u = std::make_unique<MockConnection>();
         auto* conn_ptr = conn_u.get();
+        // Exhausting a scripted input batch represents an idle, connected peer.
+        // EOF is an explicit peer action (trigger_deferred_read("")), not the
+        // absence of more currently available bytes while AUTH/DB work runs.
+        conn_ptr->set_deferred_read(true);
         if (!preload_data.empty())
             conn_ptr->set_read_data(preload_data);
 
@@ -172,7 +180,7 @@ struct FsmTestFixture {
         return {conn_ptr, session};
     }
 
-    // 调用 process_read 启动 FSM（需预加载数据确保不会因 EOF 而提前关闭）
+    // Start the FSM; the scripted peer stays connected until explicit EOF or teardown.
     void start(Handle& h) {
         h.session->process_read();
         h.conn->pump_executor();   // 响应写经 exec_ctx_ 串行化(09-06),需排空才可见
@@ -1271,6 +1279,48 @@ TEST(account_policy_completions_resume_on_connection_executor) {
     std::cout << "  [PASS] account_policy_completions_resume_on_connection_executor" << std::endl;
 }
 
+TEST(idle_peer_waits_for_delayed_auth_then_explicit_eof_closes) {
+    struct DeferredAuthenticator final : IAccountAuthenticator {
+        Complete pending;
+        void login_async(const std::string&, const std::string&, Complete complete, bool) override {
+            pending = std::move(complete);
+        }
+    };
+    auto authenticator = std::make_shared<DeferredAuthenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    const auto token = outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session("EHLO test\r\nAUTH PLAIN " + token + "\r\n", InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(authenticator->pending && h.session->is_paused());
+    assert(!h.session->is_closed() && h.conn->is_open());
+    assert(!HAS(h.conn->written(), "235 Authentication successful"));
+
+    AccountAuthResult result;
+    result.ok = true;
+    auto complete = std::move(authenticator->pending);
+    complete(std::move(result)); // Delayed service completion after all scripted bytes were consumed.
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
+
+    // The peer can send another batch while still connected.
+    h.conn->clear_written();
+    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("NOOP\r\n"); });
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "250"));
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
+
+    // A real EOF remains terminal; the fixture does not hide disconnect handling.
+    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read(""); });
+    h.conn->pump_executor();
+    assert(h.session->is_closed() && !h.conn->is_open());
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] idle_peer_waits_for_delayed_auth_then_explicit_eof_closes" << std::endl;
+}
+
 TEST(auth_from_alias_case_normalized_accepted_at_data_end) {
     // 规则 3 别名分支大小写规范化：别名目标大小写与登录账号不同也命中
     fx.fsm->m_aliasCache->put("casealias@test.local", {"User0@Test.LOCAL"});
@@ -1433,6 +1483,7 @@ int main() {
         test_auth_from_match_accepted_at_data_end(fx);
         test_auth_from_alias_accepted_at_data_end(fx);
         test_account_policy_completions_resume_on_connection_executor(fx);
+        test_idle_peer_waits_for_delayed_auth_then_explicit_eof_closes(fx);
         test_auth_from_alias_case_normalized_accepted_at_data_end(fx);
         test_auth_from_alias_miss_rejected_at_data_end(fx);
         test_auth_from_alias_db_unavailable_fails_closed_at_data_end(fx);
