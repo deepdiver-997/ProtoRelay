@@ -24,4 +24,24 @@ foreach(header
         message(FATAL_ERROR "Public client API exposes the Asio backend: ${header}")
     endif()
 endforeach()
-message(STATUS "Framework/application and client/backend include boundaries hold")
+# The Webmail service orchestrates typed reads and body loading; SQL/result
+# access belongs to the injected repository implementation.
+file(READ "${PR_SOURCE_ROOT}/include/mail_system/back/webmail/mail_service.h" webmail_service)
+if(webmail_service MATCHES "db::sql::|IDBResult|->(async_query|async_execute)[ \t]*[(]")
+    message(FATAL_ERROR "Webmail service bypasses its read repository")
+endif()
+if(webmail_service MATCHES "#[ \t]*include[ \t]*[<\"]mail_system/back/db/")
+    message(FATAL_ERROR "Webmail service directly includes the database layer")
+endif()
+foreach(header
+    mail_system/back/repository/imap_mutation_repository.h
+    mail_system/back/repository/webmail_read_repository.h)
+    file(READ "${PR_SOURCE_ROOT}/include/${header}" source)
+    if(source MATCHES "boost::|#[ \t]*include[ \t]*[<\"](boost/|mysql/|mariadb/)")
+        message(FATAL_ERROR "Repository API exposes a concrete backend: ${header}")
+    endif()
+    if(source MATCHES "#[ \t]*include[ \t]*[<\"][^>\"]*sql_queries")
+        message(FATAL_ERROR "Repository API includes SQL builders: ${header}")
+    endif()
+endforeach()
+message(STATUS "Framework, client and repository dependency boundaries hold")

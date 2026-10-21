@@ -375,6 +375,8 @@ set(COMMON_SRCS
     src/mail_system/back/common/account_policy.cpp
     src/mail_system/back/common/account_authentication.cpp
     src/mail_system/back/repository/mailbox_repository.cpp
+    src/mail_system/back/repository/imap_mutation_repository.cpp
+    src/mail_system/back/repository/webmail_read_repository.cpp
     src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
@@ -813,6 +815,15 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(mailbox_repository_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mailbox_repository_test)
 
+    foreach(_repository imap_mutation_repository webmail_read_repository)
+        add_executable(${_repository}_test
+            src/mail_system/back/repository/${_repository}.cpp
+            src/mail_system/back/db/sql_queries.cpp
+            test/unit/${_repository}_test.cpp)
+        target_include_directories(${_repository}_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        setup_mail_target(${_repository}_test)
+    endforeach()
+
     add_executable(smtp_client_contract_test
         src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_contract_test.cpp)
     target_include_directories(smtp_client_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
@@ -1075,7 +1086,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     if(ENABLE_ASAN)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
             readiness_waiter_test async_db_adapter_test account_authentication_test
-            mailbox_repository_test smtp_client_contract_test storage_boundary_test
+            mailbox_repository_test imap_mutation_repository_test webmail_read_repository_test
+            smtp_client_contract_test storage_boundary_test
             logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
