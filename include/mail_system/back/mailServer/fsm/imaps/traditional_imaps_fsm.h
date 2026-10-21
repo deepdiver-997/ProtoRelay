@@ -7,9 +7,10 @@
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/repository/mailbox_repository.h"
 #include "mail_system/back/repository/imap_mutation_repository.h"
+#include "mail_system/back/repository/imap_message_repository.h"
+#include "mail_system/back/repository/imap_folder_repository.h"
+#include "mail_system/back/common/imap_append_service.h"
 #include <stdexcept>
-#include "mail_system/back/db/db_service.h"
-#include "mail_system/back/db/sql_queries.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
@@ -17,7 +18,6 @@
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/common/bcrypt.h"
-#include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include <atomic>
@@ -76,6 +76,9 @@ protected:
     std::shared_ptr<IAccountAuthenticator> authenticator_;
     std::shared_ptr<repository::IMailboxRepository> m_mailboxRepository = repository::make_sql_mailbox_repository();
     std::shared_ptr<repository::IImapMutationRepository> m_mutationRepository = repository::make_sql_imap_mutation_repository();
+    std::shared_ptr<repository::IImapMessageRepository> m_messageRepository = repository::make_sql_imap_message_repository();
+    std::shared_ptr<repository::IImapFolderRepository> m_folderRepository = repository::make_sql_imap_folder_repository();
+    std::shared_ptr<IImapAppendService> m_appendService;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
     std::shared_ptr<MailboxListCache> m_mailboxListCache;
     // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
@@ -97,6 +100,7 @@ public:
         m_shardRouter(std::move(shard_router)) {
         authenticator_ = std::make_shared<AccountAuthenticationService>(
             m_shardRouter, m_authCache, m_workerThreadPool);
+        m_appendService = make_imap_append_service(m_workerThreadPool, m_messageRepository);
         init_transition_table();
         init_state_handlers();
     }
@@ -120,13 +124,32 @@ public:
     }
     std::shared_ptr<repository::IImapMutationRepository> get_mutation_repository() const { return m_mutationRepository; }
 
+    // Configure before serving sessions. Install a custom APPEND service last;
+    // changing its metadata repository rebuilds the default service.
+    void set_message_repository(std::shared_ptr<repository::IImapMessageRepository> value) {
+        if (!value) throw std::invalid_argument("IMAP message repository is required");
+        m_messageRepository = std::move(value);
+        m_appendService = make_imap_append_service(m_workerThreadPool, m_messageRepository);
+    }
+    std::shared_ptr<repository::IImapMessageRepository> get_message_repository() const { return m_messageRepository; }
+    void set_folder_repository(std::shared_ptr<repository::IImapFolderRepository> value) {
+        if (!value) throw std::invalid_argument("IMAP folder repository is required");
+        m_folderRepository = std::move(value);
+    }
+    std::shared_ptr<repository::IImapFolderRepository> get_folder_repository() const { return m_folderRepository; }
+    void set_append_service(std::shared_ptr<IImapAppendService> value) {
+        if (!value) throw std::invalid_argument("IMAP APPEND service is required");
+        m_appendService = std::move(value);
+    }
+    std::shared_ptr<IImapAppendService> get_append_service() const { return m_appendService; }
+
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
 
     void set_mailbox_list_cache(std::shared_ptr<MailboxListCache> cache) { m_mailboxListCache = cache; }
     std::shared_ptr<MailboxListCache> get_mailbox_list_cache() const { return m_mailboxListCache; }
 
-    // 写命令完成后调用：精确失效 (user, mailbox) 的列表缓存（未注入缓存时空操作）
+    // 写命令完成后调用：精确失效 (user, mailbox) 的列表与统计缓存（未注入时空操作）
     void invalidate_mailbox_list(uint64_t user_id, uint64_t mailbox_id);
 
     std::shared_ptr<ScopedConnection> acquire_connection(int shard) {
@@ -203,11 +226,9 @@ public:
         return it != names.end() ? it->second : "UNKNOWN_EVENT";
     }
 
-    // ========== 数据库操作（CPS：async_query/async_execute 链） ==========
-    // 全部 static：可在 worker/异步回调里调用，依赖显式传入。
-    // 底层 MySQL async_* 目前是默认同步包装（回调同步触发），但调用方结构
-    // 已异步就绪；将来接真异步 DB 时这些调用方无需改动。conn 由调用方持有的
-    // shared ScopedConnection 保活，链中每个回调都捕获它避免悬垂。
+    // ========== 可注入应用仓储 facade ==========
+    // 协议只消费领域结果。仓储持有连接租约并负责数据库方言与列映射；
+    // 内联/延迟完成均可，协议状态恢复必须经会话 executor 串行化。
 
     // 用户认证（复用和 SMTP 相同的 users 表）
     // 登录认证（查 DB + bcrypt）。bcrypt 几十~几百 ms 纯 CPU，调用方
@@ -232,39 +253,17 @@ public:
                                         uint64_t mailbox_id, uint64_t user_id,
                                         std::function<void(bool, std::vector<MailboxMailInfo>)> cb);
 
-    static void get_mail_info_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
+    void get_mail_info_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
                                     std::function<void(bool, MailboxMailInfo)> cb);
 
-    static void get_mail_sender_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
+    void get_mail_sender_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
                                       std::function<void(std::string)> cb);
 
-    static void get_mail_recipients_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
+    void get_mail_recipients_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
                                           std::function<void(std::vector<std::string>)> cb);
 
-    static void get_user_email_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+    void get_user_email_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                      std::function<void(std::string)> cb);
-
-    // 邮件持久化（APPEND）。storage 写入 + DB 插入；调用方应在 worker 线程发起
-    // （storage append 是阻塞 I/O，不许在 io 线程）。cb(mail_id, body_path, error)，
-    // 失败 mail_id=0。
-    static void create_mail_async(const std::shared_ptr<storage::IStorageProvider>& storage,
-                                  std::shared_ptr<ScopedConnection> conn,
-                                  const std::string& subject, const std::string& body_content,
-                                  std::function<void(uint64_t, std::string, std::string)> cb);
-
-    static void link_mail_to_mailbox_async(std::shared_ptr<ScopedConnection> conn,
-                                           uint64_t mail_id, uint64_t user_id,
-                                           uint64_t mailbox_id,
-                                           const std::string& sender,
-                                           const std::string& recipient,
-                                           int status, std::function<void(bool)> cb);
-
-    // APPEND 半写回滚（2026-10-21）：mails/mail_recipients/mail_mailbox 三表
-    // 显式删（不赌生产 FK 级联）+ 体文件删除。removed=false 表示有 DB 删除未成功
-    // （留痕排查）。调用方应在 worker 线程发起（体文件删除是阻塞 I/O）。
-    static void delete_mail_cascade_async(std::shared_ptr<ScopedConnection> conn,
-                                          const std::shared_ptr<storage::IStorageProvider>& storage,
-                                          uint64_t mail_id, std::function<void(bool)> cb);
 
     // 缓存感知的邮箱统计（CPS）。缓存命中且未过期时 cb 同步触发。
     // 本函数在 miss/stale 时自行回源并写回缓存，无需调用方再刷。

@@ -1177,9 +1177,11 @@ TEST(mailbox_repository_injection) {
 class MutationMailboxReads final : public repository::IMailboxRepository {
 public:
     uint64_t target = 77;
+    bool fail_messages = false;
     void get_mailboxes_async(Lease, uint64_t, ListCallback cb) override { cb(true, {}); }
     void find_mailbox_id_async(Lease, uint64_t, const std::string&, std::function<void(uint64_t)> cb) override { cb(target); }
     void get_mailbox_mails_async(Lease, uint64_t, uint64_t, MessagesCallback cb) override {
+        if (fail_messages) { cb(false, {}); return; }
         MailboxMailInfo first; first.mail_id = 501; first.status = 1;
         MailboxMailInfo second; second.mail_id = 502; second.is_deleted = true;
         cb(true, {first, second});
@@ -1279,7 +1281,7 @@ TEST(mutation_repository_store_and_expunge_injection) {
         assert(request.seen.value() && request.flagged.value() && request.deleted.value());
         assert(request.recipient_fallback == "owner@test.local");
         assert(!fixture.pool->mock_conn()->has_pending_query() && !fixture.pool->mock_conn()->has_pending_execute());
-        fixture.mutations->finish_store({false});
+        fixture.mutations->finish_store({true});
         assert(fixture.has_list(7) && fixture.has_stats(7) && h.conn->written().empty());
         h.conn->pump_executor();
         assert(!fixture.has_list(7) && !fixture.has_stats(7) && fixture.has_list(88));
@@ -1292,7 +1294,7 @@ TEST(mutation_repository_store_and_expunge_injection) {
         h.session->process_read();
         assert(fixture.mutations->expunges == 1 && fixture.mutations->expunge_scope.user_id == 41
                && fixture.mutations->expunge_scope.mailbox_id == 7);
-        fixture.mutations->finish_expunge({false});
+        fixture.mutations->finish_expunge({true});
         assert(fixture.has_list(7) && h.conn->written().empty());
         h.conn->pump_executor();
         assert(!fixture.has_list(7) && fixture.has_list(88));
@@ -1365,6 +1367,149 @@ TEST(mutation_repository_close_resumes_context_on_executor) {
     assert(!ctx->mailbox_selected && !fixture.has_list(7));
     assert(HAS(h.conn->written(), "W4 OK CLOSE completed"));
     std::cout << "  [PASS] CLOSE uses the injected expunge repository and serial context completion" << std::endl;
+}
+
+TEST(mutation_failures_return_no_without_false_notifications) {
+    for (const std::string command : {"STORE 1 +FLAGS (\\Seen)", "EXPUNGE", "CLOSE"}) {
+        MutationProtocolFixture fixture(fx);
+        auto h = fixture.make_session();
+        h.session->handle_read("F1 " + command + "\r\n");
+        h.session->process_read();
+        if (command.find("STORE") == 0) fixture.mutations->finish_store({false});
+        else fixture.mutations->finish_expunge({false});
+        assert(fixture.has_list(7) && fixture.has_stats(7));
+        h.conn->pump_executor();
+        const auto response = h.conn->written();
+        assert(HAS(response, "F1 NO") && !HAS(response, "F1 OK"));
+        assert(!HAS(response, "* 1 FETCH") && !HAS(response, "* 2 EXPUNGE"));
+        assert(!fixture.has_list(7) && !fixture.has_stats(7));
+        auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+        assert(ctx->mailbox_selected && h.session->get_current_state() == static_cast<int>(ImapState::SELECTED));
+        assert(!h.session->is_paused() && h.conn->has_pending_read());
+        h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("F2 NOOP\r\n"); });
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "F2 OK NOOP completed"));
+    }
+    {
+        MutationProtocolFixture fixture(fx);
+        fixture.reads->fail_messages = true;
+        auto h = fixture.make_session();
+        h.session->handle_read("F3 EXPUNGE\r\n");
+        h.session->process_read();
+        assert(h.conn->written().empty() && !fixture.mutations->expunges);
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "F3 NO Server error") && !HAS(h.conn->written(), "* 2 EXPUNGE"));
+        assert(fixture.has_list(7) && fixture.has_stats(7));
+        assert(!h.session->is_paused() && h.conn->has_pending_read());
+    }
+    std::cout << "  [PASS] STORE/EXPUNGE/CLOSE fail closed without false changes and permit following commands" << std::endl;
+}
+class InjectedImapMessages final : public repository::IImapMessageRepository {
+public:
+    void get_mail_async(Lease, uint64_t id, MailComplete cb) override {
+        MailboxMailInfo info; info.mail_id = id; info.subject = "injected"; cb(true, info);
+    }
+    void get_sender_async(Lease, uint64_t, AddressComplete cb) override { cb("sender@test"); }
+    void get_recipients_async(Lease, uint64_t, RecipientsComplete cb) override { cb({"recipient@test"}); }
+    void get_user_address_async(Lease, uint64_t, AddressComplete cb) override { cb("owner@test"); }
+    void insert_mail_async(Lease, repository::ImapMailRecord, Complete cb) override { cb(true); }
+    void link_mail_async(Lease, repository::ImapMailLink, Complete cb) override { cb(true); }
+    void remove_mail_async(Lease, uint64_t, Complete cb) override { cb(true); }
+};
+class InjectedImapFolders final : public repository::IImapFolderRepository {
+public:
+    repository::ImapMailboxScope scope;
+    std::string name, operation;
+    Complete pending;
+    void save(Lease lease, Complete cb) {
+        pending = [lease = std::move(lease), cb = std::move(cb)](repository::ImapFolderResult value) {
+            assert(lease && lease->is_valid()); cb(value);
+        };
+    }
+    void create_async(Lease lease, uint64_t user, std::string decoded, Complete cb) override {
+        operation = "CREATE"; scope = {user, 0}; name = std::move(decoded); save(std::move(lease), std::move(cb));
+    }
+    void remove_async(Lease lease, repository::ImapMailboxScope value, Complete cb) override {
+        operation = "DELETE"; scope = value; save(std::move(lease), std::move(cb));
+    }
+    void rename_async(Lease lease, repository::ImapMailboxScope value, std::string decoded, Complete cb) override {
+        operation = "RENAME"; scope = value; name = std::move(decoded); save(std::move(lease), std::move(cb));
+    }
+    void finish(repository::ImapFolderResult value) { auto cb = std::move(pending); assert(cb); cb(value); }
+};
+class InjectedAppendService final : public IImapAppendService {
+public:
+    ImapAppendRequest request;
+    Complete pending;
+    void append_async(Lease lease, std::shared_ptr<pr::storage::IStorageProvider>, ImapAppendRequest value, Complete cb) override {
+        request = std::move(value);
+        pending = [lease = std::move(lease), cb = std::move(cb)](ImapAppendResult result) {
+            assert(lease && lease->is_valid()); cb(std::move(result));
+        };
+    }
+    void finish(ImapAppendResult result) { auto cb = std::move(pending); assert(cb); cb(std::move(result)); }
+};
+TEST(message_repository_read_facades_are_injectable) {
+    MutationProtocolFixture fixture(fx);
+    fixture.fsm->set_message_repository(std::make_shared<InjectedImapMessages>());
+    int calls = 0;
+    fixture.fsm->get_mail_info_async({}, 81, [&](bool ok, MailboxMailInfo info) { assert(ok && info.mail_id == 81 && info.subject == "injected"); ++calls; });
+    fixture.fsm->get_mail_sender_async({}, 81, [&](std::string value) { assert(value == "sender@test"); ++calls; });
+    fixture.fsm->get_mail_recipients_async({}, 81, [&](std::vector<std::string> value) { assert(value.size() == 1 && value[0] == "recipient@test"); ++calls; });
+    fixture.fsm->get_user_email_async({}, 41, [&](std::string value) { assert(value == "owner@test"); ++calls; });
+    assert(calls == 4 && !fixture.pool->mock_conn()->has_pending_query());
+    std::cout << "  [PASS] message metadata read facades delegate without SQL" << std::endl;
+}
+TEST(folder_repository_protocol_injection) {
+    using Status = repository::ImapFolderStatus;
+    struct Case { std::string command, name; Status status; bool changed; };
+    const std::vector<Case> cases{
+        {"CREATE " + imap_utils::encode_mailbox_name("项目"), "项目", Status::ok, true},
+        {"DELETE Archive", "", Status::protected_mailbox, false},
+        {"DELETE Archive", "", Status::database_error, true},
+        {"RENAME Archive " + imap_utils::encode_mailbox_name("新"), "新", Status::database_error, true}
+    };
+    for (const auto& test : cases) {
+        MutationProtocolFixture fixture(fx);
+        auto folders = std::make_shared<InjectedImapFolders>();
+        fixture.fsm->set_folder_repository(folders);
+        auto h = fixture.make_session();
+        h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
+        h.session->handle_read("D1 " + test.command + "\r\n"); h.session->process_read();
+        assert(folders->pending && folders->scope.user_id == 41 && folders->name == test.name);
+        if (folders->operation != "CREATE") assert(folders->scope.mailbox_id == 77);
+        folders->finish({test.status, test.changed});
+        assert(h.conn->written().empty() && fixture.has_list(77));
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), test.status == Status::ok ? "D1 OK" : "D1 NO"));
+        if (folders->operation != "CREATE" && test.changed) assert(!fixture.has_list(77) && !fixture.has_stats(77));
+        if (!test.changed) assert(fixture.has_list(77));
+    }
+    std::cout << "  [PASS] decoded folder requests and typed failures remain in the protocol adapter" << std::endl;
+}
+TEST(append_service_protocol_injection) {
+    for (bool ok : {true, false}) {
+        MutationProtocolFixture fixture(fx);
+        auto append = std::make_shared<InjectedAppendService>(); fixture.fsm->set_append_service(append);
+        auto h = fixture.make_session();
+        const std::string body = "Subject: injected\r\n\r\nliteral";
+        h.session->handle_read("P1 APPEND Archive (\\Draft) {" + std::to_string(body.size()) + "}\r\n");
+        h.session->process_read(); h.conn->pump_executor(); h.conn->clear_written();
+        h.session->handle_read(body); h.session->process_read();
+        assert(append->pending && append->request.user_id == 41 && append->request.mailbox_id == 77);
+        assert(append->request.body == body && append->request.initial_status == 1);
+        assert(append->request.authenticated_address == "owner@test.local");
+        assert(append->request.subject.find("injected") == 0);
+        ImapAppendResult result; result.ok = ok; result.mail_id = ok ? 901 : 0;
+        if (!ok) result.error = "Insert mail record failed";
+        append->finish(std::move(result));
+        assert(h.conn->written().empty() && fixture.has_list(77));
+        h.conn->pump_executor();
+        assert(!fixture.has_list(77) && !fixture.has_stats(77));
+        if (ok) assert(HAS(h.conn->written(), "P1 OK [APPENDUID 77 901] APPEND completed"));
+        else assert(HAS(h.conn->written(), "P1 NO [SERVERBUG] APPEND failed: Insert mail record failed"));
+    }
+    std::cout << "  [PASS] APPEND parser delegates a stable business request and resumes on its executor" << std::endl;
 }
 
 TEST(uidnext_advance_read) {
@@ -1791,28 +1936,32 @@ TEST(search_header_criteria) {
 }
 
 TEST(append_metadata_body_path) {
+    struct InlineWorkers final : pr::ThreadPoolBase {
+        void start() override {}
+        void stop(bool = true) override {}
+        size_t thread_count() const override { return 1; }
+        bool is_running() const override { return true; }
+        void post_impl(std::function<void()> task) override { task(); }
+    };
     auto db = std::make_shared<test::MockDbPool>();
     auto conn = db->acquire_connection();
     const std::string root = test_support::temp_path("imaps_append_metadata/");
     std::filesystem::create_directories(root);
     auto storage = std::make_shared<storage::LocalFileStorageProvider>(root, root);
-    uint64_t inserted_id = 0;
-    std::string returned_path;
-    TraditionalImapsFsm<MockConnection>::create_mail_async(
-        storage, conn, "sent-copy probe", "Subject: sent-copy probe\r\n\r\nbody",
-        [&](uint64_t id, std::string path, std::string error) {
-            assert(error.empty());
-            inserted_id = id;
-            returned_path = std::move(path);
-        });
+    auto service = make_imap_append_service(std::make_shared<InlineWorkers>());
+    ImapAppendResult output;
+    service->append_async(conn, storage, {41, 7, "sent-copy probe", "Subject: sent-copy probe\r\n\r\nbody", "owner@test", 0},
+        [&](ImapAppendResult result) { output = std::move(result); });
     assert(db->mock_conn()->has_pending_execute());
     const auto params = db->mock_conn()->last_query_params();
     assert(params.size() == 4);
     const std::string key = storage->build_mail_body_key(std::stoull(params[0]));
-    // GCC-11 修复前失败：SQL 的 body_path 参数为空，正文却已落盘到 key。
     assert(params[2] == key && std::filesystem::exists(key));
     db->mock_conn()->fire_execute(true);
-    assert(inserted_id == std::stoull(params[0]) && returned_path == key);
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>());
+    db->mock_conn()->fire_execute(true);
+    db->mock_conn()->fire_execute(true);
+    assert(output.ok && output.mail_id == std::stoull(params[0]) && output.body_key == key);
     std::filesystem::remove_all(root);
     std::cout << "  [PASS] append_metadata_body_path (SQL path == storage key == callback path)" << std::endl;
 }
@@ -2146,6 +2295,10 @@ int main() {
         test_mutation_repository_copy_move_failures(fx);
         test_mutation_repository_same_mailbox_move_is_rejected(fx);
         test_mutation_repository_close_resumes_context_on_executor(fx);
+        test_mutation_failures_return_no_without_false_notifications(fx);
+        test_message_repository_read_facades_are_injectable(fx);
+        test_folder_repository_protocol_injection(fx);
+        test_append_service_protocol_injection(fx);
         test_uidnext_advance_read(fx);
         test_uidnext_no_db_default(fx);
 

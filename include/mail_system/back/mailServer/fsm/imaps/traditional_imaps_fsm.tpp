@@ -4,6 +4,7 @@
 #include "mail_system/back/mailServer/imaps_server.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
 #include "mail_system/back/common/mime_parser.h"
+#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/password_rehash.h"
 #include <algorithm>
@@ -394,7 +395,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
     worker->post(
         [self, tag, username = std::move(username), password = std::move(password),
          authenticator, ok_text, fail_text]() mutable {
-            // async CPS 链（仿 POP3/SMTP auth）：每步 async_query + 回调续作。
+            // 委托应用认证服务，完成后继续协议响应。
             // 底层 MySQL async_* 是默认同步包装（回调内联执行），链在 worker
             // 线程跑完；将来接真异步 DB，回调在 DB 线程触发，conn 由链内
             // shared ScopedConnection 保活，调用方结构无需改动。
@@ -1064,11 +1065,10 @@ template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::invalidate_mailbox_list(
     uint64_t user_id, uint64_t mailbox_id)
 {
-    // flags 变化与删信都不推进 uidnext，列表缓存只能靠写命令显式失效保一致；
+    // flags 变化与删信都不推进 uidnext，列表及统计缓存靠写命令显式失效保一致；
     // TTL 只兜跨节点/跨协议改库（SMTP 投递、POP3 DELE）的底。
-    if (m_mailboxListCache) {
-        m_mailboxListCache->invalidate(mbox_cache_key(user_id, mailbox_id));
-    }
+    if (m_mailboxListCache) m_mailboxListCache->invalidate(mbox_cache_key(user_id, mailbox_id));
+    if (m_mailboxStatsCache) m_mailboxStatsCache->invalidate(mbox_cache_key(user_id, mailbox_id));
 }
 
 // ---------- FETCH 续作链 ----------
@@ -1475,8 +1475,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
          mailbox_id, user_id, recipient_fallback = ctx->username](bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok || mails.empty()) {
-                send_tagged(self, tag, "OK", "STORE completed");
-                self->drain_buffered_commands();
+                self->get_connection().executor()->post([self, tag = std::move(tag), ok] {
+                    if (self->is_closed()) return;
+                    send_tagged(self, tag, ok ? "OK" : "NO", ok ? "STORE completed" : "STORE failed: database error");
+                    self->drain_buffered_commands();
+                });
                 return;
             }
 
@@ -1484,8 +1487,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
             std::vector<std::pair<uint64_t, uint64_t>> ranges;
             expand_seq_set(seq_set, mails.size(), ranges);
             if (ranges.empty()) {
-                send_tagged(self, tag, "OK", "STORE completed");
-                self->drain_buffered_commands();
+                self->get_connection().executor()->post([self, tag = std::move(tag)] {
+                    if (self->is_closed()) return;
+                    send_tagged(self, tag, "OK", "STORE completed");
+                    self->drain_buffered_commands();
+                });
                 return;
             }
 
@@ -1514,17 +1520,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
             }
             m_mutationRepository->store_async(conn, std::move(request),
                 [this, self, tag = std::move(tag), response = std::move(response),
-                 mailbox_id, user_id](repository::ImapMutationResult) mutable {
+                 mailbox_id, user_id](repository::ImapMutationResult result) mutable {
                     if (self->is_closed()) return;
                     self->get_connection().executor()->post(
                         [this, self, tag = std::move(tag), response = std::move(response),
-                         mailbox_id, user_id]() mutable {
+                         mailbox_id, user_id, result]() mutable {
                             if (self->is_closed()) return;
-                            if (m_mailboxStatsCache)
-                                m_mailboxStatsCache->invalidate(mbox_cache_key(user_id, mailbox_id));
                             invalidate_mailbox_list(user_id, mailbox_id);
-                            // Retain the existing STORE response policy; the
-                            // repository separately reports aggregate write failure.
+                            if (!result.ok) {
+                                send_tagged(self, tag, "NO", "STORE failed: database error");
+                                self->drain_buffered_commands();
+                                return;
+                            }
                             response += tag + " OK STORE completed\r\n";
                             self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
                             self->drain_buffered_commands();
@@ -1563,8 +1570,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
-                send_tagged(self, tag, "NO", "Server error");
-                self->drain_buffered_commands();
+                self->get_connection().executor()->post([this, self, tag = std::move(tag)]() mutable {
+                    if (self->is_closed()) return;
+                    send_tagged(self, tag, "NO", "Server error");
+                    self->drain_buffered_commands();
+                });
                 return;
             }
 
@@ -1580,13 +1590,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
             m_mutationRepository->expunge_async(
                 conn, {user_id, mailbox_id},
                 [this, self, tag = std::move(tag), expunged_seqs = std::move(expunged_seqs),
-                 mailbox_id, user_id](repository::ImapMutationResult) mutable {
+                 mailbox_id, user_id](repository::ImapMutationResult result) mutable {
                     if (self->is_closed()) return;
                     self->get_connection().executor()->post(
                         [this, self, tag = std::move(tag), expunged_seqs = std::move(expunged_seqs),
-                         mailbox_id, user_id]() mutable {
+                         mailbox_id, user_id, result]() mutable {
                             if (self->is_closed()) return;
                             invalidate_mailbox_list(user_id, mailbox_id);
+                            if (!result.ok) {
+                                send_tagged(self, tag, "NO", "EXPUNGE failed: database error");
+                                self->drain_buffered_commands();
+                                return;
+                            }
                             std::string response;
                             for (auto seq : expunged_seqs)
                                 response += "* " + std::to_string(seq) + " EXPUNGE\r\n";
@@ -1629,16 +1644,23 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
             uint64_t user_id = ctx->user_id;
             m_mutationRepository->expunge_async(
                 conn, {user_id, mailbox_id},
-                [this, self, finish, mailbox_id, user_id](repository::ImapMutationResult) {
+                [this, self, finish, tag, mailbox_id, user_id](repository::ImapMutationResult result) {
                     if (self->is_closed()) return;
-                    self->get_connection().executor()->post([this, self, finish, mailbox_id, user_id] {
+                    self->get_connection().executor()->post([this, self, finish, tag, mailbox_id, user_id, result] {
                         if (self->is_closed()) return;
                         invalidate_mailbox_list(user_id, mailbox_id);
+                        if (!result.ok) {
+                            send_tagged(self, tag, "NO", "CLOSE failed: database error");
+                            self->drain_buffered_commands();
+                            return;
+                        }
                         finish([self]() { self->drain_buffered_commands(); });
                     });
                 });
             return;
         }
+        send_tagged(session, tag, "NO", "CLOSE failed: database unavailable");
+        return;
     }
     finish([]() {});
 }
@@ -1723,16 +1745,16 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
     }
 
     session->set_paused(true);
-    (*conn)->async_execute(db::sql::build_imap_create_mailbox(),
-                        {std::to_string(ctx->user_id), mailbox_name},
-                        // ⚠ 回调必须持 conn：不持则 handle_* 返回即 ScopedConnection
-                        // 析构归池，op 在飞时连接被他人借走（协议串号/UAF，见
-                        // bench/imap REPORT 2026-09-24）。下同，全文件同规约。
-                        [session, tag, conn](bool ok) {
-                            if (ok) send_tagged(session, tag, "OK", "CREATE completed");
-                            else send_tagged(session, tag, "NO", "CREATE failed (maybe already exists)");
-                            session->drain_buffered_commands();
-                        });
+    m_folderRepository->create_async(conn, ctx->user_id, std::move(mailbox_name),
+        [session, tag](repository::ImapFolderResult result) {
+            if (session->is_closed()) return;
+            session->get_connection().executor()->post([session, tag, result] {
+                if (session->is_closed()) return;
+                if (result.status == repository::ImapFolderStatus::ok) send_tagged(session, tag, "OK", "CREATE completed");
+                else send_tagged(session, tag, "NO", "CREATE failed (maybe already exists)");
+                session->drain_buffered_commands();
+            });
+        });
 }
 
 // ---------- DELETE ----------
@@ -1771,40 +1793,28 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         [this, self, conn, tag = std::move(tag), user_id](uint64_t mailbox_id) mutable {
             if (!self || self->is_closed()) return;
             if (mailbox_id == 0) {
-                send_tagged(self, tag, "NO", "Mailbox not found");
-                self->drain_buffered_commands();
+                self->get_connection().executor()->post([self, tag = std::move(tag)] {
+                    if (self->is_closed()) return;
+                    send_tagged(self, tag, "NO", "Mailbox not found");
+                    self->drain_buffered_commands();
+                });
                 return;
             }
 
-            // Check if it's a system mailbox
-            (*conn)->async_query(db::sql::build_imap_check_mailbox_is_system(),
-                                 {std::to_string(mailbox_id)},
-                                 [this, self, conn, tag = std::move(tag), mailbox_id, user_id]
-                                 (std::shared_ptr<IDBResult> result) mutable {
-                                     if (result && result->get_row_count() > 0 &&
-                                         result->get_value(0, "is_system") == "1") {
-                                         send_tagged(self, tag, "NO", "Cannot delete system mailbox");
-                                         self->drain_buffered_commands();
-                                         return;
-                                     }
-                                     // 删除消息 + 删除邮箱
-                                     (*conn)->async_execute(db::sql::build_imap_delete_mailbox_messages(),
-                                                            {std::to_string(mailbox_id)},
-                                                            [this, self, conn, tag = std::move(tag), mailbox_id, user_id]
-                                                            (bool ok1) mutable {
-                                                                (*conn)->async_execute(
-                                                                    db::sql::build_imap_delete_mailbox(),
-                                                                    {std::to_string(mailbox_id)},
-                                                                    [this, self, conn, tag = std::move(tag), ok1, mailbox_id, user_id](bool ok2) {
-                                                                        this->invalidate_mailbox_list(user_id, mailbox_id);
-                                                                        if (ok1 && ok2)
-                                                                            send_tagged(self, tag, "OK", "DELETE completed");
-                                                                        else
-                                                                            send_tagged(self, tag, "NO", "DELETE failed");
-                                                                        self->drain_buffered_commands();
-                                                                    });
-                                                              });
-                                 });
+            m_folderRepository->remove_async(conn, {user_id, mailbox_id},
+                [this, self, tag = std::move(tag), mailbox_id, user_id](repository::ImapFolderResult result) mutable {
+                    if (self->is_closed()) return;
+                    self->get_connection().executor()->post([this, self, tag = std::move(tag), mailbox_id, user_id, result] {
+                        if (self->is_closed()) return;
+                        if (result.may_have_changed) invalidate_mailbox_list(user_id, mailbox_id);
+                        using Status = repository::ImapFolderStatus;
+                        if (result.status == Status::ok) send_tagged(self, tag, "OK", "DELETE completed");
+                        else if (result.status == Status::protected_mailbox) send_tagged(self, tag, "NO", "Cannot delete system mailbox");
+                        else if (result.status == Status::not_found) send_tagged(self, tag, "NO", "Mailbox not found");
+                        else send_tagged(self, tag, "NO", "DELETE failed");
+                        self->drain_buffered_commands();
+                    });
+                });
         });
 }
 
@@ -1859,21 +1869,28 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
     // CPS 链：找邮箱 id → 改名
     TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
         conn, user_id, old_name,
-        [self, conn, tag = std::move(tag), new_name = std::move(new_name)](
+        [this, self, conn, tag = std::move(tag), user_id, new_name = std::move(new_name)](
             uint64_t mailbox_id) mutable {
             if (!self || self->is_closed()) return;
             if (mailbox_id == 0) {
-                send_tagged(self, tag, "NO", "Mailbox not found");
-                self->drain_buffered_commands();
+                self->get_connection().executor()->post([self, tag = std::move(tag)] {
+                    if (self->is_closed()) return;
+                    send_tagged(self, tag, "NO", "Mailbox not found");
+                    self->drain_buffered_commands();
+                });
                 return;
             }
-            (*conn)->async_execute(db::sql::build_imap_rename_mailbox(),
-                                   {new_name, std::to_string(mailbox_id)},
-                                   [self, conn, tag = std::move(tag)](bool ok) {
-                                       if (ok) send_tagged(self, tag, "OK", "RENAME completed");
-                                       else send_tagged(self, tag, "NO", "RENAME failed");
-                                       self->drain_buffered_commands();
-                                   });
+            m_folderRepository->rename_async(conn, {user_id, mailbox_id}, std::move(new_name),
+                [this, self, tag = std::move(tag), user_id, mailbox_id](repository::ImapFolderResult result) mutable {
+                    if (self->is_closed()) return;
+                    self->get_connection().executor()->post([this, self, tag = std::move(tag), user_id, mailbox_id, result] {
+                        if (self->is_closed()) return;
+                        if (result.may_have_changed) invalidate_mailbox_list(user_id, mailbox_id);
+                        if (result.status == repository::ImapFolderStatus::ok) send_tagged(self, tag, "OK", "RENAME completed");
+                        else send_tagged(self, tag, "NO", "RENAME failed");
+                        self->drain_buffered_commands();
+                    });
+                });
         });
 }
 
@@ -1987,8 +2004,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
         }
     }
 
-    // CPS 链：找目标邮箱 → worker 写 storage + DB（阻塞 I/O 不进 io 线程）→
-    // create → user_email → link → 回 APPENDUID
     auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
@@ -1996,96 +2011,46 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
     }
     session->set_paused(true);
     auto self = session->shared_from_this();
-    uint64_t user_id = ctx->user_id;
-
-    TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
-        conn, user_id, mailbox_name,
-        [this, self, conn, tag = std::move(tag), subject = std::move(subject),
-         body_content = std::move(body_content), init_status,
-         mailbox_name = mailbox_name, user_id](
-            uint64_t target_mbox_id) mutable {
-            if (!self || self->is_closed()) return;
-            if (target_mbox_id == 0) {
-                send_tagged(self, tag, "NO", "APPEND failed: mailbox not found");
-                self->drain_buffered_commands();
+    ImapAppendRequest request;
+    request.user_id = ctx->user_id;
+    request.subject = std::move(subject);
+    request.body = std::move(body_content);
+    request.initial_status = init_status;
+    request.authenticated_address = ctx->username;
+    const auto user_id = request.user_id;
+    find_mailbox_id_async(conn, user_id, mailbox_name,
+        [this, self, conn, tag = std::move(tag), request = std::move(request)](uint64_t mailbox_id) mutable {
+            if (self->is_closed()) return;
+            if (!mailbox_id) {
+                self->get_connection().executor()->post([self, tag = std::move(tag)] {
+                    if (self->is_closed()) return;
+                    send_tagged(self, tag, "NO", "APPEND failed: mailbox not found");
+                    self->drain_buffered_commands();
+                });
                 return;
             }
-            auto storage = this->get_storage(0);
-            auto worker = this->m_workerThreadPool;
-            if (!worker) {
-                send_tagged(self, tag, "NO", "Server not ready");
-                self->drain_buffered_commands();
-                return;
-            }
-            // storage append 是阻塞 I/O，整体丢 worker
-            worker->post([this, self, conn, tag = std::move(tag), storage,
-                          subject = std::move(subject), body_content = std::move(body_content),
-                          init_status, mailbox_name = std::move(mailbox_name),
-                          user_id, target_mbox_id]() mutable {
-                TraditionalImapsFsm<ConnectionType>::create_mail_async(
-                    storage, conn, subject, body_content,
-                    [this, self, conn, storage, tag = std::move(tag), user_id, target_mbox_id,
-                     init_status, mailbox_name = std::move(mailbox_name)](
-                        uint64_t mail_id, std::string, std::string error) mutable {
-                        if (!self || self->is_closed()) return;
-                        if (mail_id == 0) {
-                            send_tagged(self, tag, "NO", "[SERVERBUG] APPEND failed: " + error);
+            const auto user = request.user_id;
+            request.mailbox_id = mailbox_id;
+            m_appendService->append_async(conn, get_storage(0), std::move(request),
+                [this, self, tag = std::move(tag), user, mailbox_id](ImapAppendResult result) mutable {
+                    if (self->is_closed()) return;
+                    self->get_connection().executor()->post(
+                        [this, self, tag = std::move(tag), user, mailbox_id, result = std::move(result)]() mutable {
+                            if (self->is_closed()) return;
+                            invalidate_mailbox_list(user, mailbox_id);
+                            if (!result.ok) {
+                                if (!result.cleanup_complete) LOG_IMAP_ERROR("APPEND: rollback incomplete, orphan may remain");
+                                if (result.error == "Server not ready") send_tagged(self, tag, "NO", result.error);
+                                else send_tagged(self, tag, "NO", "[SERVERBUG] APPEND failed" +
+                                    (result.error.empty() ? std::string{} : ": " + result.error));
+                            } else {
+                                const std::string response = tag + " OK [APPENDUID " + std::to_string(mailbox_id)
+                                    + " " + std::to_string(result.mail_id) + "] APPEND completed\r\n";
+                                self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
+                            }
                             self->drain_buffered_commands();
-                            return;
-                        }
-                        TraditionalImapsFsm<ConnectionType>::get_user_email_async(
-                            conn, user_id,
-                            [this, self, conn, storage, tag = std::move(tag), mail_id, user_id,
-                             target_mbox_id, init_status, mailbox_name = std::move(mailbox_name)](
-                                std::string user_email) mutable {
-                                if (!self || self->is_closed()) return;
-                                if (user_email.empty()) {
-                                    auto* c = static_cast<ImapContext*>(self->get_context());
-                                    if (c) user_email = c->username;
-                                }
-                                TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox_async(
-                                    conn, mail_id, user_id, target_mbox_id,
-                                    user_email, user_email, init_status,
-                                    [this, self, conn, storage, tag = std::move(tag), mail_id,
-                                     target_mbox_id, user_id, mailbox_name = std::move(mailbox_name),
-                                     user_email](bool ok) mutable {
-                                        if (!self || self->is_closed()) return;
-                                        if (!ok) {
-                                            // 关联写失败 → 回 tagged NO，并清掉半写状态：
-                                            // mails/mail_recipients/mail_mailbox 三表显式删
-                                            // （生产 FK 不明，不赌级联），体文件一并删除。
-                                            // 之前忽略失败仍回 OK，且孤儿体文件永留盘上
-                                            // （2026-10-21 生产实测 /opt/smtpServer/mail/<id>）。
-                                            LOG_IMAP_ERROR(
-                                                "APPEND: link failed for mail_id={}, rolling back",
-                                                mail_id);
-                                            TraditionalImapsFsm<ConnectionType>::delete_mail_cascade_async(
-                                                conn, storage, mail_id,
-                                                [self, tag = std::move(tag)](bool removed) {
-                                                    if (!self || self->is_closed()) return;
-                                                    if (!removed)
-                                                        LOG_IMAP_ERROR(
-                                                            "APPEND: rollback incomplete, orphan may remain");
-                                                    send_tagged(self, tag, "NO",
-                                                                "[SERVERBUG] APPEND failed");
-                                                    self->drain_buffered_commands();
-                                                });
-                                            return;
-                                        }
-                                        this->invalidate_mailbox_list(user_id, target_mbox_id);
-                                        // 返回 APPENDUID
-                                        uint64_t uidvalidity = target_mbox_id;
-                                        std::string response = tag + " OK [APPENDUID "
-                                            + std::to_string(uidvalidity) + " "
-                                            + std::to_string(mail_id) + "] APPEND completed\r\n";
-                                        self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
-                                        self->drain_buffered_commands();
-                                        LOG_IMAP_INFO("APPEND: mail_id={}, mailbox={}, user={}",
-                                                      mail_id, mailbox_name, user_email);
-                                    });
-                            });
-                    });
-            });
+                        });
+                });
         });
 }
 
@@ -2708,12 +2673,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_timeout(
 // ========== 辅助函数 ==========
 
 // ====================================================================
-// ImapsFsm DB helper —— CPS：async_query/async_execute 链
+// 应用仓储 facade：协议不依赖 SQL、结果集列名或具体数据库驱动。
+// 仓储保留连接租约，协议续作维持会话 executor 约束。
 // ====================================================================
-// 全部 static：可在 worker/异步回调里调用。底层 MySQL async_* 目前是默认
-// 同步包装（回调同步触发），但调用方结构已异步就绪；将来接真异步 DB 时
-// 这些调用方无需改动。conn 由调用方持有的 shared ScopedConnection 保活。
-
 // 用户认证（仿 POP3 auth_user_async / SMTP auth 链）。调用方须在 worker
 // 线程发起（bcrypt 几十~几百 ms 纯 CPU，不许在 io 线程算）。
 template <typename ConnectionType>
@@ -2761,193 +2723,32 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::get_mail_info_async(
-    std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
-    std::function<void(bool, MailboxMailInfo)> cb)
+    std::shared_ptr<ScopedConnection> conn, uint64_t id,
+    std::function<void(bool, MailboxMailInfo)> complete)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(false, MailboxMailInfo{}); return; }
-    (*conn)->async_query(
-        "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time FROM mails WHERE id = ?",
-        {std::to_string(mail_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            MailboxMailInfo info;
-            if (!result || result->get_row_count() == 0) { cb(false, info); return; }
-            info.mail_id = safe_stoull(result->get_value(0, "id"));
-            info.subject = result->get_value(0, "subject");
-            info.body_path = result->get_value(0, "body_path");
-            info.send_time = static_cast<time_t>(safe_stoull(result->get_value(0, "send_time")));
-            cb(true, std::move(info));
-        });
+    m_messageRepository->get_mail_async(std::move(conn), id, std::move(complete));
 }
-
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::get_mail_sender_async(
-    std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
-    std::function<void(std::string)> cb)
+    std::shared_ptr<ScopedConnection> conn, uint64_t id,
+    std::function<void(std::string)> complete)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(""); return; }
-    (*conn)->async_query(
-        "SELECT sender FROM mail_recipients WHERE mail_id = ? LIMIT 1",
-        {std::to_string(mail_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0) cb(result->get_value(0, "sender"));
-            else cb("");
-        });
+    m_messageRepository->get_sender_async(std::move(conn), id, std::move(complete));
 }
-
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::get_mail_recipients_async(
-    std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
-    std::function<void(std::vector<std::string>)> cb)
+    std::shared_ptr<ScopedConnection> conn, uint64_t id,
+    std::function<void(std::vector<std::string>)> complete)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb({}); return; }
-    (*conn)->async_query(
-        "SELECT recipient FROM mail_recipients WHERE mail_id = ?",
-        {std::to_string(mail_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            std::vector<std::string> recipients;
-            if (result) {
-                for (size_t i = 0; i < result->get_row_count(); ++i) {
-                    recipients.push_back(result->get_value(i, "recipient"));
-                }
-            }
-            cb(std::move(recipients));
-        });
+    m_messageRepository->get_recipients_async(std::move(conn), id, std::move(complete));
 }
-
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::get_user_email_async(
-    std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
-    std::function<void(std::string)> cb)
+    std::shared_ptr<ScopedConnection> conn, uint64_t id,
+    std::function<void(std::string)> complete)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(""); return; }
-    (*conn)->async_query(
-        "SELECT mail_address FROM users WHERE id = ?",
-        {std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0) cb(result->get_value(0, "mail_address"));
-            else cb("");
-        });
+    m_messageRepository->get_user_address_async(std::move(conn), id, std::move(complete));
 }
-
-// 邮件持久化（APPEND）。storage 写入是阻塞 I/O，调用方须在 worker 线程发起。
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::create_mail_async(
-    const std::shared_ptr<storage::IStorageProvider>& storage,
-    std::shared_ptr<ScopedConnection> conn,
-    const std::string& subject, const std::string& body_content,
-    std::function<void(uint64_t, std::string, std::string)> cb)
-{
-    if (!cb) return;
-    if (!conn || !conn->is_valid()) { cb(0, "", "DB connection failed"); return; }
-    int64_t mail_id = algorithm::get_snowflake_generator().next_id();
-
-    std::string body_path;
-    if (storage) {
-        std::string storage_key = storage->build_mail_body_key(static_cast<uint64_t>(mail_id));
-        storage::IoError err;
-        if (!storage->append_binary(storage_key, body_content.data(),
-                                    body_content.size(), err)) {
-            cb(0, "", "Storage error: " + err.message);
-            return;
-        }
-        body_path = storage_key;
-    } else {
-        std::string base = "mail/";
-        std::string fp = base + std::to_string(mail_id);
-        std::ofstream out(fp, std::ios::binary);
-        if (!out) { cb(0, "", "Cannot write " + fp); return; }
-        out.write(body_content.data(), static_cast<std::streamsize>(body_content.size()));
-        if (!out) { cb(0, "", "Write failed " + fp); return; }
-        body_path = fp;
-    }
-
-    auto ts = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    (*conn)->async_execute(db::sql::build_imap_append_mail_metadata(),
-        {std::to_string(mail_id),
-         db::sql::clip_subject_for_db(subject.empty() ? "(无主题)" : subject),
-         body_path, std::to_string(ts)},
-        // SQL 参数与回调捕获的求值顺序未指定，不能在同一调用中移动 body_path。
-        [conn, storage, mail_id = static_cast<uint64_t>(mail_id), body_path,
-         cb = std::move(cb)](bool ok) mutable {
-            if (ok) { cb(mail_id, std::move(body_path), ""); return; }
-            // mails 行写失败：体文件已先落，必须删掉，不留孤儿
-            // （2026-10-21 生产实测失败路径残留 /opt/smtpServer/mail/<id>）。
-            if (storage) {
-                storage::IoError rm_err;
-                if (!storage->remove_object(body_path, rm_err))
-                    LOG_IMAP_ERROR("APPEND: failed to remove orphan body {}: {}",
-                                   body_path, rm_err.message);
-            } else {
-                std::error_code rm_ec;
-                std::filesystem::remove(body_path, rm_ec);
-            }
-            cb(0, "", "Insert mail record failed");
-        });
-}
-
-// APPEND 半写回滚：三表显式删（不赌生产 FK 级联）+ 体文件删除。
-// 任一 DB 删除失败都继续其余清理，最终以 removed=false 提示调用方留痕。
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::delete_mail_cascade_async(
-    std::shared_ptr<ScopedConnection> conn,
-    const std::shared_ptr<storage::IStorageProvider>& storage,
-    uint64_t mail_id, std::function<void(bool)> cb)
-{
-    if (!conn || !conn->is_valid()) { if (cb) cb(false); return; }
-    auto step = [conn, storage, mail_id, cb = std::move(cb)](
-                    bool ok1, bool ok2, bool ok3) mutable {
-        bool removed = ok1 && ok2 && ok3;
-        if (storage) {
-            storage::IoError err;
-            const std::string key = storage->build_mail_body_key(mail_id);
-            if (storage->remove_object(key, err)) {
-                // removed 语义只反映 DB 侧；文件删除失败仅记日志
-            } else {
-                LOG_IMAP_ERROR("APPEND rollback: failed to remove body {}: {}",
-                               key, err.message);
-            }
-        }
-        if (cb) cb(removed);
-    };
-    (*conn)->async_execute(db::sql::build_delete_mailbox_links_by_mail(),
-        {std::to_string(mail_id)},
-        [conn, mail_id, step = std::move(step)](bool ok1) mutable {
-            (*conn)->async_execute(db::sql::build_delete_mail_recipients_by_mail(),
-                {std::to_string(mail_id)},
-                [conn, mail_id, step = std::move(step), ok1](bool ok2) mutable {
-                    (*conn)->async_execute(db::sql::build_delete_mail_by_id(),
-                        {std::to_string(mail_id)},
-                        [step = std::move(step), ok1, ok2](bool ok3) mutable {
-                            step(ok1, ok2, ok3);
-                        });
-                });
-        });
-}
-
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox_async(
-    std::shared_ptr<ScopedConnection> conn,
-    uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id,
-    const std::string& sender, const std::string& recipient,
-    int status, std::function<void(bool)> cb)
-{
-    if (!conn || !conn->is_valid()) { if (cb) cb(false); return; }
-    int64_t rid = algorithm::get_snowflake_generator().next_id();
-    (*conn)->async_execute(db::sql::build_imap_append_mail_recipient(),
-        {std::to_string(rid), std::to_string(mail_id), sender, recipient, std::to_string(status)},
-        [conn, mail_id, mailbox_id, user_id, cb = std::move(cb)](bool ok) mutable {
-            if (!ok) { cb(false); return; }
-            // mail_mailbox.id 是 AUTO_INCREMENT，省略由 DB 生成；
-            // UNIQUE KEY uk_mail_box_user 防重复关联。
-            // SQL 走 builder：生产 mail_mailbox 无 add_time 列（2026-10-21 生产
-            // 实测 Unknown column），与 SMTP 入站路径（persistent_queue）同款三列写法。
-            (*conn)->async_execute(db::sql::build_imap_append_mailbox(),
-                {std::to_string(mail_id), std::to_string(mailbox_id), std::to_string(user_id)},
-                [conn, cb = std::move(cb)](bool ok2) mutable { cb(ok2); });
-        });
-}
-
 
 // 缓存感知的邮箱统计（CPS）+ single-flight：同一 (user,mailbox) 只允许一个回源
 // 查询链在途。缓存 miss/stale 时，首个连接成为 flight owner 发起查询，其余并发
