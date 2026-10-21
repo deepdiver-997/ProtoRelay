@@ -3,6 +3,11 @@
 #include "mail_system/back/server_config.h"
 #include "framework/net/executor.h"
 #include "mail_system/back/algorithm/snow.h"
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace mail_system::persist_storage { class PersistentQueue; }
 
@@ -27,13 +32,15 @@ class MailSubmissionService : public std::enable_shared_from_this<MailSubmission
     MailSubmissionService(std::shared_ptr<router::IShardRouter> router,
                           std::shared_ptr<pr::ThreadPoolBase> workers, std::shared_ptr<AccountPolicy> policy,
                           std::shared_ptr<persist_storage::PersistentQueue> queue,
-                          ExecutorProvider executors, ServerConfig config, uint16_t node_id = 1);
+                          ExecutorProvider executors, ServerConfig config, uint16_t node_id = 1,
+                          std::shared_ptr<repository::IAccountRepository> accounts = nullptr);
     void submit_async(Request request, Complete cb);
 
   private:
     struct Operation;
     std::shared_ptr<router::IShardRouter> router_;
     std::shared_ptr<pr::ThreadPoolBase> workers_;
+    std::shared_ptr<repository::IAccountRepository> accounts_;
     std::shared_ptr<AccountPolicy> policy_;
     std::shared_ptr<persist_storage::PersistentQueue> queue_;
     ExecutorProvider executors_;

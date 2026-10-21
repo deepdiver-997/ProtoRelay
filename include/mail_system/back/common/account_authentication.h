@@ -2,11 +2,12 @@
 
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/common/auth_cache.h"
-#include "mail_system/back/router/i_shard_router.h"
+#include "mail_system/back/repository/account_repository.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace mail_system {
 struct AccountAuthResult {
@@ -35,15 +36,17 @@ class AccountAuthenticationService final : public IAccountAuthenticator {
 public:
     AccountAuthenticationService(std::shared_ptr<router::IShardRouter> router,
                                  std::shared_ptr<AuthCache> cache,
-                                 std::shared_ptr<pr::ThreadPoolBase> workers)
-        : router_(std::move(router)), cache_(std::move(cache)), workers_(std::move(workers)) {}
+                                 std::shared_ptr<pr::ThreadPoolBase> workers,
+                                 std::shared_ptr<repository::IAccountRepository> accounts = nullptr)
+        : accounts_(accounts ? std::move(accounts) : repository::make_account_repository(std::move(router))),
+          cache_(std::move(cache)), workers_(std::move(workers)) {}
     // Completion may be inline without workers. With workers, credential hashing
     // is dispatched there even when a database completes on an IO thread.
     // Each asynchronous chain retains its connection and pool until completion.
     void login_async(const std::string& address, const std::string& password,
                      Complete complete, bool fresh = false) override;
 private:
-    std::shared_ptr<router::IShardRouter> router_;
+    std::shared_ptr<repository::IAccountRepository> accounts_;
     std::shared_ptr<AuthCache> cache_;
     std::shared_ptr<pr::ThreadPoolBase> workers_;
 };

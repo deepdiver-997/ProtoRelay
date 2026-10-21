@@ -4,8 +4,7 @@
 #include "framework/cache/lru_cache.h"
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
-#include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/router/i_shard_router.h"
+#include <chrono>
 
 #include <functional>
 #include <memory>
@@ -19,11 +18,12 @@ class AccountPolicy {
   public:
     AccountPolicy(std::shared_ptr<router::IShardRouter> shard_router, std::shared_ptr<AuthCache> auth_cache,
                   std::shared_ptr<pr::ThreadPoolBase> worker_pool,
-                  std::shared_ptr<IAccountAuthenticator> authenticator = nullptr)
-        : router_(std::move(shard_router)), cache_(std::move(auth_cache)),
-          worker_pool_(std::move(worker_pool)),
+                  std::shared_ptr<IAccountAuthenticator> authenticator = nullptr,
+                  std::shared_ptr<repository::IAccountRepository> accounts = nullptr)
+        : accounts_(accounts ? std::move(accounts) : repository::make_account_repository(shard_router)),
           authenticator_(authenticator ? std::move(authenticator) :
-              std::make_shared<AccountAuthenticationService>(router_, cache_, worker_pool_)) {}
+              std::make_shared<AccountAuthenticationService>(std::move(shard_router), std::move(auth_cache),
+                                                             std::move(worker_pool), accounts_)) {}
 
     // SMTP retains the existing short AuthCache window. Web login requests fresh=true
     // and receives the post-rehash credential stamp used by durable sessions.
@@ -120,9 +120,7 @@ class AccountPolicy {
 
     std::shared_ptr<AuthCache> recipients_ = std::make_shared<AuthCache>();
     std::shared_ptr<AliasCache> aliases_ = std::make_shared<AliasCache>(10000, std::chrono::seconds(300));
-    std::shared_ptr<router::IShardRouter> router_;
-    std::shared_ptr<AuthCache> cache_;
-    std::shared_ptr<pr::ThreadPoolBase> worker_pool_;
+    std::shared_ptr<repository::IAccountRepository> accounts_;
     std::shared_ptr<IAccountAuthenticator> authenticator_;
 };
 

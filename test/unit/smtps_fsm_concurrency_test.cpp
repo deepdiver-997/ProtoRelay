@@ -8,6 +8,7 @@
 //   - 验证跨线程的 paused/resume、shared_ptr 保活（回调晚于 session 逻辑结束不悬垂）。
 // 配合 TSan（-fsanitize=thread）可检测 session 状态竞争。
 #undef NDEBUG
+#include "mail_system/back/common/bcrypt.h"
 #include <cassert>  // 在 #undef NDEBUG 后重新包含，确保 assert 生效
 #include "mail_system/back/mailServer/smtps_server.h"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp"
