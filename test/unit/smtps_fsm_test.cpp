@@ -991,25 +991,31 @@ TEST(data_without_rcpt) {
 TEST(timeout_handler) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::TIMEOUT);
-    // 关闭经 exec_ctx_ 串行化(09-06),轮询排空后再断言
-    for (int waited = 0; waited < 2000 && h.conn->is_open(); waited += 5) {
-        h.conn->pump_executor();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
     h.conn->pump_executor();
-    assert(!h.conn->is_open());
+    // The FSM's empty-input TIMEOUT event arms a read. Actual watchdog expiry
+    // is a separate SessionBase timer path; lack of script data is not EOF.
+    assert(h.conn->is_open());
+    assert(h.conn->has_pending_read());
+    assert(static_cast<SmtpsEvent>(h.session->get_next_event()) == SmtpsEvent::TIMEOUT);
     std::cout << "  [PASS] timeout_handler" << std::endl;
 }
 
 TEST(error_handler) {
     auto h = fx.make_session();
-    fx.fsm->process_event(h.session, SmtpsEvent::ERROR);
-    for (int waited = 0; waited < 2000 && h.conn->is_open(); waited += 5) {
+    // Protocol errors are tolerated three times, then close on the fourth.
+    // Previously the mock's implicit EOF falsely made the first error terminal.
+    for (int failure = 1; failure <= 4; ++failure) {
+        h.conn->clear_written();
+        fx.fsm->process_event(h.session, SmtpsEvent::ERROR);
         h.conn->pump_executor();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(h.session->stay_times_ == failure);
+        if (failure <= 3) {
+            assert(h.conn->is_open());
+            assert(HAS(h.conn->written(), "500 Error:"));
+        } else {
+            assert(!h.conn->is_open());
+        }
     }
-    h.conn->pump_executor();
-    assert(!h.conn->is_open());
     std::cout << "  [PASS] error_handler" << std::endl;
 }
 
@@ -1352,7 +1358,7 @@ TEST(idle_peer_waits_for_delayed_auth_then_explicit_eof_closes) {
 
     // The peer can send another batch while still connected.
     h.conn->clear_written();
-    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("EHLO still-connected\r\n"); });
+    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("MAIL FROM:<user0@test.local>\r\n"); });
     h.conn->pump_executor();
     assert(HAS(h.conn->written(), "250"));
     assert(!h.session->is_closed() && h.conn->has_pending_read());
