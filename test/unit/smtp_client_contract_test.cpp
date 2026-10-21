@@ -2,6 +2,7 @@
 #undef NDEBUG
 #include "mail_system/back/smtp_client/client_session.h"
 #include "manual_executor.h"
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <deque>
