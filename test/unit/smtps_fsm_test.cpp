@@ -1311,7 +1311,9 @@ TEST(delayed_auth_and_quota_resume_buffered_pipeline) {
     const auto reply = h.conn->written();
     assert(HAS(reply, "235 Authentication successful"));
     assert(HAS(reply, "250 Ok"));
-    assert(HAS(reply, "250 OK")); // NOOP is reached after MAIL FROM and RCPT.
+    // NOOP is currently unsupported by this parser. Its explicit response proves
+    // the command after RCPT was consumed, independently of earlier 250 replies.
+    assert(HAS(reply, "500 Error: Unknown command: NOOP"));
     auto* context = static_cast<SmtpsContext*>(h.session->get_context());
     assert(context->sender_address == "user0@test.local");
     assert(context->recipient_addresses == std::vector<std::string>{"rcpt@test.local"});
@@ -1350,7 +1352,7 @@ TEST(idle_peer_waits_for_delayed_auth_then_explicit_eof_closes) {
 
     // The peer can send another batch while still connected.
     h.conn->clear_written();
-    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("NOOP\r\n"); });
+    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("EHLO still-connected\r\n"); });
     h.conn->pump_executor();
     assert(HAS(h.conn->written(), "250"));
     assert(!h.session->is_closed() && h.conn->has_pending_read());
