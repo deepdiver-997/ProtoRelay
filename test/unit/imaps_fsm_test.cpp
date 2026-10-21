@@ -189,6 +189,36 @@ TEST(login_success_real_auth) {
     std::cout << "  [PASS] login_success_real_auth (real parser → async auth)" << std::endl;
 }
 
+TEST(login_uses_injected_authentication_service) {
+    struct Authenticator final : IAccountAuthenticator {
+        std::atomic<int> calls{0};
+        void login_async(const std::string& address, const std::string&, Complete complete, bool) override {
+            ++calls;
+            AccountAuthResult result;
+            result.ok = true;
+            result.address = address;
+            result.user_id = 202;
+            complete(std::move(result));
+        }
+    };
+    auto authenticator = std::make_shared<Authenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    // This account is absent from both the cache and database. The frontend
+    // accepts the injected application's result without performing credential SQL.
+    h.session->handle_read("I001 LOGIN injected@test.local ignored\r\n");
+    h.session->process_read();
+    auto reply = wait_for_reply(h);
+    assert(HAS(reply, "I001 OK LOGIN completed"));
+    assert(authenticator->calls == 1);
+    auto* context = static_cast<ImapContext*>(h.session->get_context());
+    assert(context->is_authenticated && context->user_id == 202);
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] login_uses_injected_authentication_service" << std::endl;
+}
+
 TEST(login_wrong_password) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
@@ -1858,6 +1888,7 @@ int main() {
         test_capability_response(fx);
         test_login_response(fx);
         test_login_success_real_auth(fx);
+        test_login_uses_injected_authentication_service(fx);
         test_abnormal_trace_after_auth(fx);
         test_auth_plain_ir_success(fx);
         test_auth_plain_two_step(fx);
