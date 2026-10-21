@@ -2,6 +2,7 @@
 #define PR_FRAMEWORK_STORAGE_DISTRIBUTED_FILE_STORAGE_PROVIDER_H
 
 #include "framework/storage/i_storage_provider.h"
+#include "framework/storage/local_file_metadata_cache.h"
 
 #include <atomic>
 #include <cstddef>
@@ -11,7 +12,7 @@
 namespace pr {
 namespace storage {
 
-class DistributedFileStorageProvider : public IStorageProvider {
+class DistributedFileStorageProvider : public IStorageProvider, public LocalFileMetadataCache {
 public:
     DistributedFileStorageProvider(std::vector<std::string> storage_roots,
                                    std::size_t replica_count = 1);

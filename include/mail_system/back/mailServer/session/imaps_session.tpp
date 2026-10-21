@@ -46,7 +46,7 @@ namespace {
 // ====================================================================
 template <typename ConnectionType>
 ImapsSession<ConnectionType>::ImapsSession(
-    pr::ServerBase* server,
+    MailServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm)
     : pr::SessionBase<ConnectionType>(std::move(connection), server)
@@ -155,6 +155,9 @@ void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
             session->context_.current_tag = session->current_tag_;
             session->command_parsed_ = true;
             session->next_event_ = ImapEvent::APPEND;
+        } else {
+            // 本块没有凑齐 literal，不会发响应；必须自行续读下一块。
+            this->do_async_read();
         }
         return;
     }
@@ -168,7 +171,12 @@ void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
     auto trim_end = line.find_last_not_of(" \t");
     if (trim_end != std::string::npos) line.resize(trim_end + 1);
 
-    if (line.empty()) return;  // 空行，忽略（下轮 do_async_read 取新数据）
+    if (line.empty()) {
+        // imaplib 把 APPEND literal 与终结 CRLF 分开发送。独立 CRLF 没有
+        // 响应完成回调来续读；只忽略会在已回 APPEND OK 后永久停住会话。
+        this->do_async_read();
+        return;
+    }
 
     LOG_IMAP_DETAIL_DEBUG("IMAP line: [{}]", line);
 

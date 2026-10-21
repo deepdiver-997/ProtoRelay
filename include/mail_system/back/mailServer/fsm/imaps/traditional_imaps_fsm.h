@@ -2,10 +2,12 @@
 #define TRADITIONAL_IMAPS_FSM_H
 
 #include "framework/session_base.h"
+#include "mail_system/back/common/account_authentication.h"
 #include "framework/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/repository/mailbox_repository.h"
+#include <stdexcept>
 #include "mail_system/back/db/db_service.h"
-#include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/sql_queries.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
@@ -17,7 +19,6 @@
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
-#include <boost/asio/ssl.hpp>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -67,6 +68,8 @@ protected:
     std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
+    std::shared_ptr<IAccountAuthenticator> authenticator_;
+    std::shared_ptr<repository::IMailboxRepository> m_mailboxRepository = repository::make_sql_mailbox_repository();
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
     std::shared_ptr<MailboxListCache> m_mailboxListCache;
     // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
@@ -86,11 +89,24 @@ public:
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
         m_shardRouter(std::move(shard_router)) {
+        authenticator_ = std::make_shared<AccountAuthenticationService>(
+            m_shardRouter, m_authCache, m_workerThreadPool);
         init_transition_table();
         init_state_handlers();
     }
 
     ~TraditionalImapsFsm() override = default;
+    void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
+        if (authenticator) authenticator_ = std::move(authenticator);
+    }
+
+
+    // Configure before serving sessions, like the shared cache dependencies.
+    void set_mailbox_repository(std::shared_ptr<repository::IMailboxRepository> value) {
+        if (!value) throw std::invalid_argument("IMAP mailbox repository is required");
+        m_mailboxRepository = std::move(value);
+    }
+    std::shared_ptr<repository::IMailboxRepository> get_mailbox_repository() const { return m_mailboxRepository; }
 
     void set_mailbox_stats_cache(std::shared_ptr<MailboxStatsCache> cache) { m_mailboxStatsCache = cache; }
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
@@ -184,24 +200,23 @@ public:
     // 用户认证（复用和 SMTP 相同的 users 表）
     // 登录认证（查 DB + bcrypt）。bcrypt 几十~几百 ms 纯 CPU，调用方
     // 必须在 worker 线程发起本函数（见 handle_login）。
-    static void auth_user_async(const std::shared_ptr<router::IShardRouter>& shard_router,
-                                const std::shared_ptr<AuthCache>& auth_cache,
+    static void auth_user_async(const std::shared_ptr<IAccountAuthenticator>& authenticator,
                                 const std::string& mail_address,
                                 const std::string& password,
                                 std::function<void(bool ok, uint64_t user_id, int shard)> cb);
 
     // 邮箱列表（LIST/LSUB）。失败 cb(false, {})。
-    static void get_mailboxes_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+    void get_mailboxes_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                     std::function<void(bool,
-                                        std::vector<std::tuple<uint64_t, std::string, int>>)> cb);
+                                        std::vector<MailboxSummary>)> cb);
 
     // 按名称找邮箱 id（含 INBOX 兜底）。失败 cb(0)。
-    static void find_mailbox_id_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+    void find_mailbox_id_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
                                       const std::string& mailbox_name,
                                       std::function<void(uint64_t)> cb);
 
     // 邮箱内邮件列表（FETCH/SEARCH/STORE/EXPUNGE/COPY/MOVE 用）。
-    static void get_mailbox_mails_async(std::shared_ptr<ScopedConnection> conn,
+    void get_mailbox_mails_async(std::shared_ptr<ScopedConnection> conn,
                                         uint64_t mailbox_id, uint64_t user_id,
                                         std::function<void(bool, std::vector<MailboxMailInfo>)> cb);
 
@@ -245,15 +260,15 @@ public:
                                         uint64_t user_id, uint64_t mailbox_id,
                                         std::function<void(MailboxCacheEntry, bool, bool)> cb);
 
-    static void get_mailbox_count_async(std::shared_ptr<ScopedConnection> conn,
+    void get_mailbox_count_async(std::shared_ptr<ScopedConnection> conn,
                                         uint64_t mailbox_id, uint64_t user_id,
                                         std::function<void(size_t)> cb);
 
-    static void get_mailbox_unseen_count_async(std::shared_ptr<ScopedConnection> conn,
+    void get_mailbox_unseen_count_async(std::shared_ptr<ScopedConnection> conn,
                                                uint64_t mailbox_id, uint64_t user_id,
                                                std::function<void(size_t)> cb);
 
-    static void get_mailbox_uidnext_async(std::shared_ptr<ScopedConnection> conn,
+    void get_mailbox_uidnext_async(std::shared_ptr<ScopedConnection> conn,
                                           uint64_t mailbox_id, uint64_t user_id,
                                           std::function<void(uint64_t)> cb);
 

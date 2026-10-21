@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 #include "framework/net/asio_executor.h"
 // 持久化完成边界：订阅竞态、事务提交、取消/超时、关机与背压。
 // 2026-10-18 前科及负验证：docs/bugfixes/2026-10-18-persist-completion-callback.md。
@@ -100,7 +101,7 @@ struct Fixture {
     static std::atomic<int> serial;
     Fixture(bool database = true) {
         workers->start();
-        directory = std::filesystem::temp_directory_path() /
+        directory = test_support::temp_root() /
             ("persist-completion-" + std::to_string(getpid()) + "-" + std::to_string(++serial));
         auto provider = std::make_shared<storage::LocalFileStorageProvider>((directory / "mail").string(), (directory / "att").string());
         storage::IoError storage_error; assert(provider->ensure_ready(storage_error));

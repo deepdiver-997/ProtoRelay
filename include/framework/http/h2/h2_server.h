@@ -6,7 +6,6 @@
 // ──────────────────────────────────────────────────────────────────
 #include "framework/tcp_server_base.h"
 #include "framework/http/h2/h2_session.h"
-#include "framework/db/db_pool.h"
 #include <memory>
 #include <string>
 
@@ -15,11 +14,10 @@ namespace h2 {
 
 class H2Server : public pr::TcpServerBase<TcpH2Session, SslH2Session> {
 public:
-    H2Server(const mail_system::ServerConfig& config,
+    H2Server(const pr::ServerConfig& config,
              std::string doc_root,
              std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
-             std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
-             std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
+             std::shared_ptr<pr::ThreadPoolBase> workerThreadPool);
     ~H2Server() override { stop(); }
 
     const std::string& doc_root() const { return doc_root_; }
@@ -27,10 +25,10 @@ public:
 protected:
     std::shared_ptr<TcpH2Session> make_tcp_session(
         std::unique_ptr<pr::TcpConnection> conn,
-        const mail_system::ListenerConfig& lc) override;
+        const pr::ListenerConfig& lc) override;
     std::shared_ptr<SslH2Session> make_ssl_session(
         std::unique_ptr<pr::SslConnection> conn,
-        const mail_system::ListenerConfig& lc) override;
+        const pr::ListenerConfig& lc) override;
     bool should_reject_connection(std::string& reason,
         const std::string& client_ip = "") const override;
 

@@ -2,11 +2,11 @@
 #define MAIL_SYSTEM_OUTBOUND_SERVER_H
 
 #include "framework/metrics_server.h"
-#include "framework/server_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
+#include "framework/net/client_transport.h"
 #include "mail_system/back/mailServer/session/outbound_smtp_session.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
 #include "mail_system/back/mailServer/outbound/outbox_repository.h"
-#include <boost/asio/steady_timer.hpp>
 #include <map>
 #include <vector>
 #include <memory>
@@ -16,7 +16,6 @@
 #include <chrono>
 #include <atomic>
 
-namespace pr { class IOThreadPool; }
 
 namespace mail_system {
 namespace outbound {
@@ -45,7 +44,7 @@ public:
     static constexpr int MIN_RETRY_DELAY_SEC = 5;
     static constexpr int MAX_RETRY_DELAY_SEC = 60;
 
-    OutboundServer(pr::ServerBase* server,
+    OutboundServer(mail_system::MailServerBase* server,
                    int max_per_mx = DEFAULT_MAX_SESSIONS_PER_MX,
                    int idle_timeout = DEFAULT_IDLE_TIMEOUT_SEC);
 
@@ -113,7 +112,8 @@ private:
     static std::string extract_domain(const std::string& addr);
 
     // ── 成员 ──────────────────────────────────────────────────
-    std::shared_ptr<pr::IOThreadPool> io_pool_;
+    std::shared_ptr<pr::net::IClientTransportProvider> transports_;
+    std::shared_ptr<pr::net::IExecutorProvider> executors_;
     std::shared_ptr<pr::ThreadPoolBase> worker_pool_;
     std::shared_ptr<router::IShardRouter> shard_router_;
     std::shared_ptr<pr::IDnsResolver> dns_resolver_;
@@ -134,9 +134,9 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> last_active_;
 
     std::atomic<bool> running_{false};
-    boost::asio::any_io_executor scheduler_executor_;
-    std::shared_ptr<boost::asio::steady_timer> evict_timer_;
-    std::shared_ptr<boost::asio::steady_timer> retry_timer_;
+    std::shared_ptr<pr::net::IExecutor> scheduler_executor_;
+    std::shared_ptr<pr::net::ITimer> evict_timer_;
+    std::shared_ptr<pr::net::ITimer> retry_timer_;
 
     // 2026-08-27: weak_ptr 持 metrics，outbound_server 析构后自动失效。
     std::weak_ptr<pr::MetricsServer> m_metrics;

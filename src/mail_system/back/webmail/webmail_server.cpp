@@ -1,7 +1,7 @@
 #include "mail_system/back/submission/outbound_config_factory.h"
 #include "mail_system/back/webmail/webmail_server.h"
 
-#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/net/executor.h"
 #include "mail_system/back/webmail/direct_submitter.h"
 #include "mail_system/back/mailServer/outbound/cares_dns_resolver.h"
 #include "mail_system/back/mailServer/outbound/outbound_config.h"
@@ -17,7 +17,7 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
                              std::shared_ptr<AuthCache> auth_cache,
                              std::shared_ptr<SessionStore> sessions,
                              std::shared_ptr<ISmtpSubmitter> submitter, uint16_t submission_node_id)
-    : pr::http::HttpServer(config, std::move(doc_root), io_pool, worker_pool,
+    : pr::http::BasicHttpServer<MailServerBase>(config, std::move(doc_root), io_pool, worker_pool,
                            std::move(shard_router)),
       auth_cache_(auth_cache ? std::move(auth_cache) : std::make_shared<AuthCache>()),
       sessions_(sessions ? std::move(sessions) : (config.use_database
@@ -48,7 +48,10 @@ WebmailServer::WebmailServer(const mail_system::ServerConfig& config,
         persist_queue_->set_outbound_server(outbound_);
         auto service = std::make_shared<submission::MailSubmissionService>(get_shard_router(), worker_pool,
             std::make_shared<AccountPolicy>(get_shard_router(), auth_cache_, worker_pool), persist_queue_,
-            [pool = std::static_pointer_cast<pr::IOThreadPool>(io_pool)] { return pool->get_io_context().get_executor(); },
+            [pool = std::dynamic_pointer_cast<pr::net::IExecutorProvider>(io_pool)] {
+                if (!pool) throw std::invalid_argument("submission runtime must provide executors");
+                return pool->next_executor();
+            },
             config, submission_node_id);
         submitter_ = std::make_shared<DirectSubmitter>(std::move(service));
         outbound_->start();
@@ -66,6 +69,6 @@ WebmailServer::~WebmailServer() { stop(); }
 void WebmailServer::stop(pr::ServerState state) {
     if (outbound_) outbound_->stop();
     if (persist_queue_) persist_queue_->shutdown();
-    pr::http::HttpServer::stop(state);
+    pr::http::BasicHttpServer<MailServerBase>::stop(state);
 }
 } // namespace mail_system::webmail

@@ -3,6 +3,7 @@
 #undef NDEBUG
 #include <cassert>
 #include "mail_system/back/webmail/smtp_submitter.h"
+#include "framework/net/asio_client_transport.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/mime_composer.h"
 #include "mail_system/back/common/smtp_wire.h"
@@ -98,7 +99,9 @@ SubmitResult run(std::vector<Step> steps, std::string greeting = "220 test.local
     boost::asio::io_context io;
     auto server = std::make_shared<ScriptServer>(io, std::move(steps), std::move(greeting));
     server->start();
-    LoopbackSmtpSubmitter submitter(io.get_executor(), server->port(), timeout);
+    LoopbackSmtpSubmitter submitter([&io] {
+        return pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(io.get_executor()));
+    }, server->port(), timeout);
     SubmitRequest request{"sender@test.local", std::make_shared<SessionPassword>("secret"),
                            {"a@test.local", "hidden@test.local"}, ".first\r\n.\r\nlast\r\n"};
     int calls = 0;
@@ -121,8 +124,9 @@ void test_executor_provider() {
     for (int i = 0; i < 4; ++i) {
         peers.push_back(std::make_shared<ScriptServer>(peers_io, success_script(), "220 test.local\r\n"));
         peers.back()->start();
-        auto submitter = std::make_shared<LoopbackSmtpSubmitter>([&]() -> boost::asio::any_io_executor {
-            return selections.fetch_add(1) % 2 ? second_io.get_executor() : first_io.get_executor();
+        auto submitter = std::make_shared<LoopbackSmtpSubmitter>([&]() {
+            auto executor = selections.fetch_add(1) % 2 ? second_io.get_executor() : first_io.get_executor();
+            return pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(executor));
         }, peers.back()->port());
         submitter->submit_async({"sender@test.local", std::make_shared<SessionPassword>("secret"),
                                 {"a@test.local", "hidden@test.local"}, ".first\r\n.\r\nlast\r\n"},

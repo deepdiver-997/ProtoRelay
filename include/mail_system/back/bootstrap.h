@@ -11,7 +11,7 @@
 // 认识所有驱动"搬出框架。）
 // ================================================================
 
-#include "framework/server_config.h"
+#include "mail_system/back/server_config.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/router/i_shard_router.h"
 

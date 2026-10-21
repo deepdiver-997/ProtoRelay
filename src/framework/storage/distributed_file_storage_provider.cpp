@@ -1,3 +1,4 @@
+#include "framework/storage/local_file_download_stream.h"
 #include "framework/storage/distributed_file_storage_provider.h"
 
 #include <cstdio>

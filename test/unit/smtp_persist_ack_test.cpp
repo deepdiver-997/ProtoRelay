@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // 2026-10-18：after_persist 的 worker sleep 轮询会耗尽工作池，使持久化本身
 // 无线程执行；见 docs/bugfixes/2026-10-18-persist-completion-callback.md。
 #undef NDEBUG
@@ -59,7 +60,7 @@ struct TestServer : SmtpsServer {
 };
 enum class Scenario { Success, Closed, Timeout };
 bool run(Scenario scenario) {
-    const auto directory = std::filesystem::temp_directory_path() / ("smtp-persist-ack-" + std::to_string(getpid()));
+    const auto directory = test_support::temp_root() / ("smtp-persist-ack-" + std::to_string(getpid()));
     auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
     auto workers = std::make_shared<GatePool>(); workers->start();
     auto storage = std::make_shared<storage::LocalFileStorageProvider>((directory / "mail").string(), (directory / "att").string());

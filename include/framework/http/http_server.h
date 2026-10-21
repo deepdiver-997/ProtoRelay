@@ -11,20 +11,26 @@
 #include "framework/http/http_types.hpp"
 #include "framework/http/http_fsm.h"
 #include "framework/http/http_session.h"
-#include "framework/db/db_pool.h"
 #include <memory>
 #include <string>
 
 namespace pr::http {
 
-class HttpServer : public pr::TcpServerBase<TcpHttpSession, SslHttpSession> {
+template <typename Base = pr::ServerBase>
+class BasicHttpServer : public pr::TcpServerBase<TcpHttpSession, SslHttpSession, Base> {
 public:
-    HttpServer(const mail_system::ServerConfig& config,
-               std::string doc_root,
-               std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,
-               std::shared_ptr<pr::ThreadPoolBase> workerThreadPool,
-               std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
-    ~HttpServer() override { stop(); }
+    template <typename... Resources>
+    BasicHttpServer(const typename Base::Config& config, std::string doc_root,
+                    std::shared_ptr<pr::ThreadPoolBase> io,
+                    std::shared_ptr<pr::ThreadPoolBase> workers, Resources&&... resources)
+        : pr::TcpServerBase<TcpHttpSession, SslHttpSession, Base>(
+              config, std::move(io), std::move(workers), std::forward<Resources>(resources)...),
+          doc_root_(std::move(doc_root)) {
+        m_tcp_fsm = std::make_shared<HttpFsm<pr::TcpConnection>>();
+        m_ssl_fsm = std::make_shared<HttpFsm<pr::SslConnection>>();
+        LOG_SERVER_INFO("HttpServer ready, doc_root={}", doc_root_);
+    }
+    ~BasicHttpServer() override { this->stop(); }
 
     const std::string& doc_root() const { return doc_root_; }
 
@@ -35,10 +41,10 @@ public:
 protected:
     std::shared_ptr<TcpHttpSession> make_tcp_session(
         std::unique_ptr<pr::TcpConnection> conn,
-        const mail_system::ListenerConfig& lc) override;
+        const pr::ListenerConfig& lc) override;
     std::shared_ptr<SslHttpSession> make_ssl_session(
         std::unique_ptr<pr::SslConnection> conn,
-        const mail_system::ListenerConfig& lc) override;
+        const pr::ListenerConfig& lc) override;
     bool should_reject_connection(std::string& reason,
         const std::string& client_ip = "") const override;
 
@@ -49,6 +55,10 @@ private:
     ApiHandler api_handler_;   // 业务 API 路由（可空），工厂转发给每个 session
 };
 
+using HttpServer = BasicHttpServer<>;
+
 } // namespace pr::http
+
+#include "framework/http/http_server.tpp"
 
 #endif // PR_FRAMEWORK_HTTP_HTTP_SERVER_H

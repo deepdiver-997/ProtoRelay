@@ -3,6 +3,10 @@
 // 向后兼容 shim（2026-10-18）：本组件已上移 framework/storage（namespace pr::storage）。
 // 应用代码的 include 路径与 mail_system::storage 限定名保持不变。
 #include "framework/storage/i_storage_provider.h"
+// Compatibility aliases are intentionally confined to this application shim.
+#include "framework/storage/buffered_upload_stream.h"
+#include "framework/storage/local_file_read_stream.h"
+#include "framework/storage/local_file_write_stream.h"
 
 namespace mail_system {
 namespace storage {

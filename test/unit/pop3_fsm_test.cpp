@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // POP3 FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应
 // 覆盖 11 命令 + 状态错 + 大小写 + 未知命令 + 锁 + dot-stuffing。
 // 仿 smtps_fsm_test.cpp / imaps_fsm_test.cpp 的夹具模式。
@@ -29,19 +30,19 @@ using namespace mail_system;
 
 // ========== 测试夹具 ==========
 
-struct TestServer : pr::ServerBase {
+struct TestServer : MailServerBase {
     TestServer(const ServerConfig& c,
                std::shared_ptr<pr::ThreadPoolBase> io,
                std::shared_ptr<pr::ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : pr::ServerBase(c, io, w, std::move(r)) {}
+        : MailServerBase(c, io, w, std::move(r)) {}
     void start() override {}
     bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };
 
 struct FsmTestFixture {
-    static constexpr const char* MAIL_DIR = "/tmp/pop3_fsm_test_mail";
-    static constexpr const char* ATT_DIR  = "/tmp/pop3_fsm_test_att";
+    static inline const std::string MAIL_DIR = test_support::temp_path("pop3_fsm_test_mail");
+    static inline const std::string ATT_DIR  = test_support::temp_path("pop3_fsm_test_att");
 
     std::shared_ptr<pr::IOThreadPool> io_pool;
     std::shared_ptr<pr::WorkerThreadPool> worker_pool;

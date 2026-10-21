@@ -1,3 +1,4 @@
+#include "framework/storage/buffered_upload_stream.h"
 #include "framework/storage/hdfs_web_storage_provider.h"
 
 #include "framework/storage/buffered_upload_stream.h"

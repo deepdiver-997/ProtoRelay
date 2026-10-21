@@ -1,13 +1,10 @@
 #pragma once
 #include "framework/thread_pool/thread_pool_base.h"
+#include "mail_system/back/common/account_authentication.h"
 #include "framework/cache/lru_cache.h"
-#include "mail_system/back/common/credential_stamp.h"
 #include "mail_system/back/common/auth_cache.h"
-#include "mail_system/back/common/password_rehash.h"
-#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/router/i_shard_router.h"
 
 #include <functional>
@@ -18,28 +15,24 @@
 
 namespace mail_system {
 
-struct AccountAuthResult {
-    bool ok = false;
-    // true → 503（DB 不可用，可重试）；false 且 !ok → 401（凭据错/账号禁用，
-    // 与三协议一样不区分原因，避免给未认证调用方提供账号枚举通道）。
-    bool server_error = false;
-    uint64_t user_id = 0;
-    std::string address;
-    std::string credential_stamp;
-    int shard = 0;
-};
-
 class AccountPolicy {
   public:
     AccountPolicy(std::shared_ptr<router::IShardRouter> shard_router, std::shared_ptr<AuthCache> auth_cache,
-                  std::shared_ptr<pr::ThreadPoolBase> worker_pool)
+                  std::shared_ptr<pr::ThreadPoolBase> worker_pool,
+                  std::shared_ptr<IAccountAuthenticator> authenticator = nullptr)
         : router_(std::move(shard_router)), cache_(std::move(auth_cache)),
-          worker_pool_(std::move(worker_pool)) {}
+          worker_pool_(std::move(worker_pool)),
+          authenticator_(authenticator ? std::move(authenticator) :
+              std::make_shared<AccountAuthenticationService>(router_, cache_, worker_pool_)) {}
 
     // SMTP retains the existing short AuthCache window. Web login requests fresh=true
     // and receives the post-rehash credential stamp used by durable sessions.
     void login_async(const std::string &mail_address, const std::string &password,
                      std::function<void(AccountAuthResult)> cb, bool fresh = false);
+
+    void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
+        if (authenticator) authenticator_ = std::move(authenticator);
+    }
 
     using AliasCache = pr::LruCache<std::string, std::vector<std::string>>;
     void set_recipient_caches(std::shared_ptr<AuthCache> recipients, std::shared_ptr<AliasCache> aliases) {
@@ -130,6 +123,7 @@ class AccountPolicy {
     std::shared_ptr<router::IShardRouter> router_;
     std::shared_ptr<AuthCache> cache_;
     std::shared_ptr<pr::ThreadPoolBase> worker_pool_;
+    std::shared_ptr<IAccountAuthenticator> authenticator_;
 };
 
 } // namespace mail_system

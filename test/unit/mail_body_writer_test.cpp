@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // 正文写入顺序回归测试 — 针对「邮件被写成 M[k:]+M[:k] 环形错位」那类 bug。
 //
 // 历史现象：生产上 3 封邮件的正文文件开头是报文尾部、报文头躺在文件中间，
@@ -256,7 +257,7 @@ static void test_append_stream_rejects_out_of_order() {
 
 // 8. LocalFileWriteStream 真实文件往返 + abort 清理
 static void test_local_file_round_trip() {
-    const auto dir = std::filesystem::temp_directory_path() / "mail_body_writer_test";
+    const auto dir = test_support::temp_root() / "mail_body_writer_test";
     std::filesystem::create_directories(dir);
     const auto path = (dir / "roundtrip.eml").string();
     std::filesystem::remove(path);
@@ -324,7 +325,7 @@ public:
 // 同一段调用代码，在本地后端和远程后端上必须得到相同结果。
 // 这是「抽象是否真的封住了 mmap」的判据：调用方不该知道后端用了什么。
 static void test_read_side_backend_agnostic() {
-    const auto dir = std::filesystem::temp_directory_path() / "mail_body_writer_test";
+    const auto dir = test_support::temp_root() / "mail_body_writer_test";
     std::filesystem::create_directories(dir);
     const auto path = (dir / "readside.eml").string();
     const std::string payload = make_payload(5000, 21);

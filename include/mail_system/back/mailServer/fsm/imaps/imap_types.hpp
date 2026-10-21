@@ -1,6 +1,7 @@
 #ifndef IMAPS_FSM_H
 #define IMAPS_FSM_H
 
+#include "mail_system/back/entities/mailbox.h"
 #include <cstdint>
 #include <string>
 #include <ctime>
@@ -127,19 +128,6 @@ struct ImapContext {
     }
 };
 
-// 邮箱邮件信息（用于 FETCH / SEARCH）
-struct MailboxMailInfo {
-    uint64_t mail_id;
-    std::string sender;
-    std::string recipient;
-    std::string subject;
-    std::string body_path;
-    bool is_starred;
-    bool is_deleted;
-    bool is_important;
-    int status;        // 0=read, 1=unread
-    time_t send_time;
-};
 
 } // namespace mail_system
 

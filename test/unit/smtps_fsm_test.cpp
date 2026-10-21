@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // 入站 SMTP FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应码
 #undef NDEBUG
 #include <cassert>  // 在 #undef NDEBUG 后重新包含，确保 assert 生效
@@ -15,6 +16,7 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/algorithm/line_folder.h"
 #include "mock_connection.h"
+#include "manual_executor.h"
 
 #include <filesystem>
 #include <fstream>
@@ -62,7 +64,7 @@ struct FsmTestFixture {
         // 真实存储提供者：正文落盘到 /tmp/smtps_fsm_test_mail，供落盘内容断言
         // （此前为空列表 → 正文被静默丢弃，DATA 落盘路径零覆盖）
         auto storage = std::make_shared<storage::LocalFileStorageProvider>(
-            "/tmp/smtps_fsm_test_mail", "/tmp/smtps_fsm_test_att");
+            test_support::temp_path("smtps_fsm_test_mail"), test_support::temp_path("smtps_fsm_test_att"));
         router = std::make_shared<router::StaticShardRouter>(
             std::vector<std::pair<std::string, int>>{},
             0,
@@ -82,12 +84,12 @@ struct FsmTestFixture {
         cfg.use_database       = false;
         cfg.inbound_ack_mode   = InboundAckMode::AFTER_ENQUEUE;
         cfg.system_domain      = "test.local";
-        cfg.mail_storage_path  = "/tmp/smtps_fsm_test_mail";
-        cfg.attachment_storage_path = "/tmp/smtps_fsm_test_att";
-        cfg.storage.local.mail_path       = "/tmp/smtps_fsm_test_mail";
-        cfg.storage.local.attachment_path = "/tmp/smtps_fsm_test_att";
+        cfg.mail_storage_path  = test_support::temp_path("smtps_fsm_test_mail");
+        cfg.attachment_storage_path = test_support::temp_path("smtps_fsm_test_att");
+        cfg.storage.local.mail_path       = test_support::temp_path("smtps_fsm_test_mail");
+        cfg.storage.local.attachment_path = test_support::temp_path("smtps_fsm_test_att");
 
-        system("mkdir -p /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att");
+        std::filesystem::create_directories(test_support::temp_path("smtps_fsm_test_mail")); std::filesystem::create_directories(test_support::temp_path("smtps_fsm_test_att"));
 
         server = std::shared_ptr<TestServer>(new TestServer(cfg, io_pool, worker_pool, router));
         // SmtpsSession 构造函数从 server 读取持久化队列，务必绑定到测试自身的队列
@@ -137,13 +139,17 @@ struct FsmTestFixture {
         persist_q->shutdown();
         worker_pool->stop();
         io_pool->stop();
-        system("rm -rf /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att");
+        std::filesystem::remove_all(test_support::temp_path("smtps_fsm_test_mail")); std::filesystem::remove_all(test_support::temp_path("smtps_fsm_test_att"));
     }
 
     // 创建 session，初始化 INIT 状态，返回 session + raw conn 指针
     struct Handle {
         MockConnection* conn;
         std::shared_ptr<SmtpsSession<MockConnection>> session;
+        // An idle peer may leave a read holding the session. Close and drain
+        // before releasing the last external owner so no callback/self cycle
+        // outlives this fixture's server and shared runtimes.
+        ~Handle() { finish_session(session); }
     };
 
     Handle make_session(const std::string& preload_data = "",
@@ -151,6 +157,10 @@ struct FsmTestFixture {
                         bool advertise_starttls = true) {
         auto conn_u = std::make_unique<MockConnection>();
         auto* conn_ptr = conn_u.get();
+        // Exhausting a scripted input batch represents an idle, connected peer.
+        // EOF is an explicit peer action (trigger_deferred_read("")), not the
+        // absence of more currently available bytes while AUTH/DB work runs.
+        conn_ptr->set_deferred_read(true);
         if (!preload_data.empty())
             conn_ptr->set_read_data(preload_data);
 
@@ -170,7 +180,7 @@ struct FsmTestFixture {
         return {conn_ptr, session};
     }
 
-    // 调用 process_read 启动 FSM（需预加载数据确保不会因 EOF 而提前关闭）
+    // Start the FSM; the scripted peer stays connected until explicit EOF or teardown.
     void start(Handle& h) {
         h.session->process_read();
         h.conn->pump_executor();   // 响应写经 exec_ctx_ 串行化(09-06),需排空才可见
@@ -188,7 +198,9 @@ static bool wait_for_response(Handle& h, const std::string& needle, int timeout_
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     h.conn->pump_executor();
-    return h.conn->written().find(needle) != std::string::npos;
+    const bool found = h.conn->written().find(needle) != std::string::npos;
+    if (!found) std::cerr << "Timed out waiting for: " << needle << "\nSMTP replies:\n" << h.conn->written() << std::endl;
+    return found;
 }
 
 // ========== 测试宏 ==========
@@ -472,7 +484,7 @@ TEST(long_header_line_folded_on_ingest) {
     // 落盘在 enqueue 后由 worker 异步完成，单次扫描会撞上空窗 → 轮询至多 1s
     for (int pass = 0; pass < 200 && !subject_verified; ++pass) {
     h.conn->pump_executor();   // 落盘链路同样经 exec_ctx_,排空才推进
-    for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail")) {
+    for (auto& e : fs::directory_iterator(test_support::temp_path("smtps_fsm_test_mail"))) {
         if (!e.is_regular_file()) continue;
         if (e.path().extension() == ".mime") continue;   // 结构 JSON，非原始报文
         std::ifstream in(e.path(), std::ios::binary);
@@ -515,7 +527,7 @@ TEST(long_header_line_folded_on_ingest) {
     if (!subject_verified) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (!checked_raw_file) {
-        for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail"))
+        for (auto& e : fs::directory_iterator(test_support::temp_path("smtps_fsm_test_mail")))
             std::cerr << "  DIAG maildir entry: " << e.path().string() << std::endl;
         std::cerr << "  DIAG written tail: [" << h.conn->written().substr(
             h.conn->written().size() > 300 ? h.conn->written().size() - 300 : 0) << "]" << std::endl;
@@ -979,25 +991,31 @@ TEST(data_without_rcpt) {
 TEST(timeout_handler) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::TIMEOUT);
-    // 关闭经 exec_ctx_ 串行化(09-06),轮询排空后再断言
-    for (int waited = 0; waited < 2000 && h.conn->is_open(); waited += 5) {
-        h.conn->pump_executor();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
     h.conn->pump_executor();
-    assert(!h.conn->is_open());
+    // The FSM's empty-input TIMEOUT event arms a read. Actual watchdog expiry
+    // is a separate SessionBase timer path; lack of script data is not EOF.
+    assert(h.conn->is_open());
+    assert(h.conn->has_pending_read());
+    assert(static_cast<SmtpsEvent>(h.session->get_next_event()) == SmtpsEvent::TIMEOUT);
     std::cout << "  [PASS] timeout_handler" << std::endl;
 }
 
 TEST(error_handler) {
     auto h = fx.make_session();
-    fx.fsm->process_event(h.session, SmtpsEvent::ERROR);
-    for (int waited = 0; waited < 2000 && h.conn->is_open(); waited += 5) {
+    // Protocol errors are tolerated three times, then close on the fourth.
+    // Previously the mock's implicit EOF falsely made the first error terminal.
+    for (int failure = 1; failure <= 4; ++failure) {
+        h.conn->clear_written();
+        fx.fsm->process_event(h.session, SmtpsEvent::ERROR);
         h.conn->pump_executor();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(h.session->stay_times_ == failure);
+        if (failure <= 3) {
+            assert(h.conn->is_open());
+            assert(HAS(h.conn->written(), "500 Error:"));
+        } else {
+            assert(!h.conn->is_open());
+        }
     }
-    h.conn->pump_executor();
-    assert(!h.conn->is_open());
     std::cout << "  [PASS] error_handler" << std::endl;
 }
 
@@ -1198,6 +1216,162 @@ TEST(auth_from_alias_accepted_at_data_end) {
     std::cout << "  [PASS] auth_from_alias_accepted_at_data_end (别名命中 → 入队)" << std::endl;
 }
 
+TEST(account_policy_completions_resume_on_connection_executor) {
+    struct DeferredAuthenticator final : IAccountAuthenticator {
+        Complete pending;
+        void login_async(const std::string&, const std::string&, Complete complete, bool) override {
+            pending = std::move(complete);
+        }
+    };
+    auto authenticator = std::make_shared<DeferredAuthenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    auto executor = std::make_shared<test::ManualExecutor>();
+    auto connection = std::make_unique<MockConnection>(executor);
+    auto session = std::make_shared<SmtpsSession<MockConnection>>(
+        fx.server.get(), std::move(connection), fx.fsm);
+    int completed = 0;
+    fx.fsm->auth_user_async(session, "user0@test.local", "test123",
+        [&](bool ok, int shard) {
+            assert(executor->running); // A service/DB thread cannot reenter the protocol.
+            assert(ok && shard == 3);
+            ++completed;
+        });
+    assert(session->is_paused() && authenticator->pending && completed == 0);
+    AccountAuthResult result;
+    result.ok = true;
+    result.shard = 3;
+    auto complete = std::move(authenticator->pending);
+    complete(std::move(result)); // Simulate a service/DB completion outside the executor.
+    assert(completed == 0 && executor->tasks.size() == 1);
+    executor->drain();
+    assert(completed == 1);
+
+    int policies = 0;
+    fx.fsm->user_exists_async(session, "user0@test.local", [&](bool exists) {
+        assert(executor->running && exists);
+        ++policies;
+    });
+    fx.fsm->alias_targets_async(session, "solo@test.local", [&](std::vector<std::string> targets) {
+        assert(executor->running && targets == std::vector<std::string>{"user0@test.local"});
+        ++policies;
+    });
+    fx.fsm->check_send_quota_async(session, "user0@test.local", [&](bool allowed) {
+        assert(executor->running && allowed); // Disabled quota still uses the same boundary.
+        ++policies;
+    });
+    assert(policies == 0 && executor->tasks.size() == 3);
+    executor->drain();
+    assert(policies == 3);
+
+    // Existing no-session fallback semantics remain available to non-session callers.
+    fx.fsm->user_exists_async({}, "user0@test.local", [&](bool exists) { assert(!exists); ++policies; });
+    fx.fsm->alias_targets_async({}, "solo@test.local", [&](std::vector<std::string> targets) {
+        assert(targets == std::vector<std::string>{"user0@test.local"}); ++policies;
+    });
+    fx.fsm->check_send_quota_async({}, "user0@test.local", [&](bool allowed) { assert(allowed); ++policies; });
+    assert(policies == 6);
+
+    int after_close = 0;
+    fx.fsm->user_exists_async(session, "user0@test.local", [&](bool) { ++after_close; });
+    fx.fsm->alias_targets_async(session, "solo@test.local", [&](std::vector<std::string>) { ++after_close; });
+    fx.fsm->check_send_quota_async(session, "user0@test.local", [&](bool) { ++after_close; });
+    assert(executor->tasks.size() == 3);
+    session->close();
+    executor->drain();
+    assert(after_close == 0);
+    session.reset();
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] account_policy_completions_resume_on_connection_executor" << std::endl;
+}
+
+TEST(delayed_auth_and_quota_resume_buffered_pipeline) {
+    struct DeferredAuthenticator final : IAccountAuthenticator {
+        Complete pending;
+        void login_async(const std::string&, const std::string&, Complete complete, bool) override {
+            pending = std::move(complete);
+        }
+    };
+    auto authenticator = std::make_shared<DeferredAuthenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    const auto token = outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session(
+        "EHLO test\r\nAUTH PLAIN " + token + "\r\n"
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "NOOP\r\n", InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(authenticator->pending && h.session->is_paused() && h.session->has_buffered_input());
+    assert(!HAS(h.conn->written(), "235 Authentication successful"));
+
+    AccountAuthResult result;
+    result.ok = true;
+    auto complete = std::move(authenticator->pending);
+    complete(std::move(result));
+    // Draining executes the deferred auth result, then the separately posted
+    // disabled-quota completion. No new input or worker timing can drive RCPT.
+    h.conn->pump_executor();
+    const auto reply = h.conn->written();
+    assert(HAS(reply, "235 Authentication successful"));
+    assert(HAS(reply, "250 Ok"));
+    // NOOP is currently unsupported by this parser. Its explicit response proves
+    // the command after RCPT was consumed, independently of earlier 250 replies.
+    assert(HAS(reply, "500 Error: Unknown command: NOOP"));
+    auto* context = static_cast<SmtpsContext*>(h.session->get_context());
+    assert(context->sender_address == "user0@test.local");
+    assert(context->recipient_addresses == std::vector<std::string>{"rcpt@test.local"});
+    assert(!h.session->is_paused() && !h.session->has_buffered_input());
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] delayed_auth_and_quota_resume_buffered_pipeline" << std::endl;
+}
+
+TEST(idle_peer_waits_for_delayed_auth_then_explicit_eof_closes) {
+    struct DeferredAuthenticator final : IAccountAuthenticator {
+        Complete pending;
+        void login_async(const std::string&, const std::string&, Complete complete, bool) override {
+            pending = std::move(complete);
+        }
+    };
+    auto authenticator = std::make_shared<DeferredAuthenticator>();
+    fx.fsm->set_authenticator(authenticator);
+    std::string plain;
+    plain += '\0'; plain += "user0@test.local"; plain += '\0'; plain += "test123";
+    const auto token = outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(plain.data()), plain.size());
+    auto h = fx.make_session("EHLO test\r\nAUTH PLAIN " + token + "\r\n", InboundAuthPolicy::ON);
+    fx.start(h);
+    assert(authenticator->pending && h.session->is_paused());
+    assert(!h.session->is_closed() && h.conn->is_open());
+    assert(!HAS(h.conn->written(), "235 Authentication successful"));
+
+    AccountAuthResult result;
+    result.ok = true;
+    auto complete = std::move(authenticator->pending);
+    complete(std::move(result)); // Delayed service completion after all scripted bytes were consumed.
+    assert(wait_for_response(h, "235 Authentication successful"));
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
+
+    // The peer can send another batch while still connected.
+    h.conn->clear_written();
+    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read("MAIL FROM:<user0@test.local>\r\n"); });
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "250"));
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
+
+    // A real EOF remains terminal; the fixture does not hide disconnect handling.
+    h.conn->executor()->post([connection = h.conn] { connection->trigger_deferred_read(""); });
+    h.conn->pump_executor();
+    assert(h.session->is_closed() && !h.conn->is_open());
+    fx.fsm->set_authenticator(std::make_shared<AccountAuthenticationService>(
+        fx.router, fx.fsm->m_authCache, fx.worker_pool));
+    std::cout << "  [PASS] idle_peer_waits_for_delayed_auth_then_explicit_eof_closes" << std::endl;
+}
+
 TEST(auth_from_alias_case_normalized_accepted_at_data_end) {
     // 规则 3 别名分支大小写规范化：别名目标大小写与登录账号不同也命中
     fx.fsm->m_aliasCache->put("casealias@test.local", {"User0@Test.LOCAL"});
@@ -1359,6 +1533,9 @@ int main() {
         test_auth_from_mismatch_rejected_at_data_end(fx);
         test_auth_from_match_accepted_at_data_end(fx);
         test_auth_from_alias_accepted_at_data_end(fx);
+        test_account_policy_completions_resume_on_connection_executor(fx);
+        test_delayed_auth_and_quota_resume_buffered_pipeline(fx);
+        test_idle_peer_waits_for_delayed_auth_then_explicit_eof_closes(fx);
         test_auth_from_alias_case_normalized_accepted_at_data_end(fx);
         test_auth_from_alias_miss_rejected_at_data_end(fx);
         test_auth_from_alias_db_unavailable_fails_closed_at_data_end(fx);

@@ -4,6 +4,7 @@
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/session_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/mailServer/fsm/pop3/pop3_types.hpp"
 #include "mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h"
 #include <cctype>
@@ -15,8 +16,9 @@ namespace mail_system {
 template <typename ConnectionType>
 class Pop3Session : public pr::SessionBase<ConnectionType> {
 public:
+    MailServerBase* get_server() const { return static_cast<MailServerBase*>(this->m_server); }
     Pop3Session(
-        pr::ServerBase* server,
+        MailServerBase* server,
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalPop3Fsm<ConnectionType>> fsm);
 

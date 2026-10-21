@@ -60,7 +60,12 @@ public:
     // （op 在飞时连接被提前还池再借出 = 两链同抢一条连接，协议必然串号）。
     virtual bool async_in_flight() const { return false; }
 
-    // Async wrappers with default sync impl
+    // Compatibility async wrappers: execute synchronously on the caller and invoke
+    // completion inline. "async" alone does not promise nonblocking IO or a thread.
+    // Drivers may override with different completion threads; callers serialize
+    // continuation state explicitly. For an opt-in worker/completion-executor
+    // boundary around a synchronous driver, use AsyncDBConnectionAdapter.
+    // Every connection remains single-flight throughout a transaction/operation.
     virtual void async_query(const std::string& sql, QueryCallback cb) {
         if (cb) cb(query(sql));
     }

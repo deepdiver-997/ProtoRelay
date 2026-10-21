@@ -7,21 +7,8 @@
 // ──────────────────────────────────────────────────────────────────
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/worker_thread_pool.h"
-#include "framework/db/db_pool.h"
-#include "mail_system/back/router/static_shard_router.h"
-#include "mail_system/back/storage/i_storage_provider.h"
-
-// 纯 DI（2026-10-18）：pr::ServerBase 三件套缺一不可。web 静态服务器不用邮件业务
-// 资源，显式传 null-object（空 router），不悄悄自建。
-static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
-    return std::make_shared<mail_system::router::StaticShardRouter>(
-        std::vector<std::pair<std::string, int>>{}, 0,
-        std::vector<std::shared_ptr<pr::DBPool>>{},
-        std::vector<std::shared_ptr<mail_system::storage::IStorageProvider>>{});
-}
-
 #include "framework/http/http_server.h"
-#include "mail_system/back/common/logger.h"
+#include "framework/log/log_macros.h"
 #include <csignal>
 #include <iostream>
 #include <memory>
@@ -29,7 +16,7 @@ static std::shared_ptr<mail_system::router::IShardRouter> make_null_router() {
 #include <thread>
 #include <chrono>
 
-using namespace mail_system;
+using namespace pr;
 
 static sigset_t g_sigset;
 static std::unique_ptr<pr::http::HttpServer> g_server;
@@ -53,10 +40,6 @@ int main(int argc, char* argv[]) {
         config.address = "0.0.0.0";
         config.maxConnections = 10000;
         config.listeners.emplace_back(pr::ListenerType::TCP, static_cast<uint16_t>(port));
-        // pr::ServerBase 初始化总会装配本地存储，给两个非空路径避免 create_directories("")
-        config.storage.provider = "local";
-        config.storage.local.mail_path = "config/storage/mail";
-        config.storage.local.attachment_path = "config/storage/attachments";
 
         std::cout << "Starting HTTP/1.1 static server on :" << port
                   << "  doc_root=" << doc_root << "\n";
@@ -65,7 +48,7 @@ int main(int argc, char* argv[]) {
         io_pool->start();
         auto wk_pool = std::make_shared<pr::WorkerThreadPool>(config.worker_thread_count);
         wk_pool->start();
-        g_server = std::make_unique<pr::http::HttpServer>(config, doc_root, io_pool, wk_pool, make_null_router());
+        g_server = std::make_unique<pr::http::HttpServer>(config, doc_root, io_pool, wk_pool);
         g_server->start();
 
         LOG_SERVER_INFO("HTTP server running. Ctrl+C to stop.");

@@ -202,6 +202,8 @@ protected:
     std::vector<char> use_buffer_;
     std::string command_read_buffer_;
     std::string pending_write_buf_;
+    // 写完成、忽略空行和 literal 分片都可能请求续读；同一连接只允许一个在途读。
+    std::atomic<bool> read_in_progress_{false};
     mutable std::string client_address_;
     // 跨线程访问：io 线程在读写错误路径 close() 写；SPF/DNS/存储等异步
     // 回调线程在续作入口读（pause 独占约定覆盖不到这个标志本身）。

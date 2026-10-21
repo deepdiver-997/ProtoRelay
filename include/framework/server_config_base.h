@@ -48,6 +48,7 @@ struct ListenerConfig {
 };
 
 struct ServerConfig {
+    using Config = ServerConfig;
     std::string address;
 
     std::vector<ListenerConfig> listeners;
@@ -76,6 +77,15 @@ struct ServerConfig {
     std::string log_file;
     bool log_to_console;
     bool log_to_file;
+
+    bool metrics_enabled = false;
+    uint16_t metrics_port = 9090;
+    std::string metrics_bind_address = "127.0.0.1";
+    bool intrusion_detection_enabled = false;
+    int intrusion_persist_interval_sec = 60;
+    int intrusion_persist_dirty_threshold = 256;
+    int intrusion_max_records = 10000;
+    int intrusion_ban_threshold = 0;
 
     ServerConfig()
         : address("0.0.0.0")
@@ -146,7 +156,27 @@ struct ServerConfig {
         dhFile   = resolve_path(base_dir, j.value("dhFile", dhFile));
         enable_tls1_3 = j.value("enable_tls1_3", enable_tls1_3);
 
+        metrics_enabled = j.value("metrics_enabled", metrics_enabled);
+        metrics_port = j.value("metrics_port", metrics_port);
+        metrics_bind_address = j.value("metrics_bind_address", metrics_bind_address);
+        intrusion_detection_enabled = j.value("intrusion_detection_enabled", false);
+        intrusion_persist_interval_sec = j.value("intrusion_persist_interval_sec", 60);
+        intrusion_persist_dirty_threshold = j.value("intrusion_persist_dirty_threshold", 256);
+        intrusion_max_records = j.value("intrusion_max_records", 10000);
+        intrusion_ban_threshold = j.value("intrusion_ban_threshold", 0);
         return true;
+    }
+
+    virtual bool loadFromFile(const std::string& filename) {
+        try {
+            std::ifstream input(filename);
+            if (!input) return false;
+            nlohmann::json json;
+            input >> json;
+            return loadFromJson(json, std::filesystem::path(filename).parent_path().string());
+        } catch (const std::exception&) {
+            return false;
+        }
     }
 
     // ---- 校验 (子类应重写以扩展) ----

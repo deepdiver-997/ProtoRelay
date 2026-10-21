@@ -13,6 +13,7 @@
 // ================================================================
 
 #include "framework/http/http_server.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/webmail/api/api_router.h"
 #include "mail_system/back/webmail/auth_service.h"
 #include "mail_system/back/webmail/mail_service.h"
@@ -23,7 +24,7 @@
 
 namespace mail_system::webmail {
 
-class WebmailServer : public pr::http::HttpServer {
+class WebmailServer : public pr::http::BasicHttpServer<MailServerBase> {
 public:
     // DB 模式缺省装配共享会话及直接提交；依赖仍可从装配根注入。
     WebmailServer(const mail_system::ServerConfig& config,

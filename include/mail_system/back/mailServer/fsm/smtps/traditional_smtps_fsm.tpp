@@ -255,7 +255,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
 
     // RFC 5321: EHLO 响应首行必须是服务器自身的域名（非回显客户端 EHLO 参数）。
     // Gmail 会校验该主机名：若服务器自称是 "*.google.com"（回显客户端）会触发安全中止。
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
     std::string helo = cfg->helo_hostname.empty() ? cfg->system_domain : cfg->helo_hostname;
     if (helo.empty()) helo = session->get_last_command_args();
 
@@ -299,7 +299,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> self, const std::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS: {}", ec.message()); return; }
             self->set_current_state(static_cast<int>(SmtpsState::INIT));
-            auto server = static_cast<SmtpsServer*>(self->get_server());
+            auto server = static_cast<SmtpsServer*>(static_cast<MailServerBase*>(self->get_server()));
             auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
             server->handoff_starttls(self->release_connection(), std::move(trace));
         });
@@ -322,7 +322,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
             std::string password = (null2 != std::string::npos) ? decoded.substr(null2 + 1) : "";
             ctx->client_username = username;
             if (username.find('@') == std::string::npos) {
-                auto cfg = std::atomic_load(&session->get_server()->m_config);
+                auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
@@ -373,7 +373,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
             std::string password = (null2 != std::string::npos) ? decoded.substr(null2 + 1) : "";
             ctx->client_username = username;
             if (username.find('@') == std::string::npos) {
-                auto cfg = std::atomic_load(&session->get_server()->m_config);
+                auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
@@ -438,7 +438,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
     std::string username = static_cast<SmtpsContext*>(session->get_context())->client_username;
     std::string password = mail_system::outbound::base64_decode(session->get_last_command_args());
     if (username.find('@') == std::string::npos) {
-        auto cfg = std::atomic_load(&session->get_server()->m_config);
+        auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
         username += "@" + cfg->system_domain;
         static_cast<SmtpsContext*>(session->get_context())->client_username = username;
     }
@@ -477,7 +477,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         const auto& lc = ctx->listener_config;
-        auto cfg = std::atomic_load(&session->get_server()->m_config);
+        auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
 
         bool require_auth = false;
         switch (lc.auth_policy) {
@@ -517,7 +517,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         // SPF/配额 proceed 之前确定性拒绝，不依赖 DNS。状态处理与下方 SPF 硬拒
         // 一致：回 WAIT_AUTH 继续读。
         {
-            auto cfg = std::atomic_load(&session->get_server()->m_config);
+            auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
             const std::string envelope_sender = session->get_last_command_args().substr(
                 addr_start + 1, addr_end - addr_start - 1);
             if (cfg->reject_unauthenticated_local_sender && !ctx->is_authenticated &&
@@ -544,7 +544,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
 
         // MAIL FROM 后续处理（SPF 检查 → 250 / 拒绝）抽成 proceed：
         // 认证账号要先过每日发信配额，通过后再进入 SPF 逻辑
-        auto cfg = std::atomic_load(&session->get_server()->m_config);
+        auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
         // 认证提交豁免 SPF：SPF 只该管 MTA 间未认证投递（RFC 7208 语义）。
         // 认证客户端已用密码证明身份，且发件人强制等于自身账号，无从伪装，
         // 对它们做 SPF 只会把从非授权 IP 登录的合法用户（家里/咖啡馆）误杀。
@@ -563,18 +563,24 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                     [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        s->do_async_read();
+                        // Quota may have completed after the original input loop
+                        // paused. Resume buffered RCPT/DATA before requesting IO.
+                        s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
                 return;
             }
 
-            auto* dns = session->get_server()->get_dns_resolver().get();
+            auto* dns = static_cast<MailServerBase*>(session->get_server())->get_dns_resolver().get();
             if (!dns) {
                 session->do_async_write("250 Ok\r\n",
                     [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
                         if (ec) return;
                         s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        s->do_async_read();
+                        // Quota may have completed after the original input loop
+                        // paused. Resume buffered RCPT/DATA before requesting IO.
+                        s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
                 return;
             }
@@ -695,7 +701,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     if (ctx->is_authenticated) {
         // 外部投递开关：external_delivery_enabled=false 时拒外部域收件人。
         // 内部投递（system_domain）不受影响；未认证 25 端口 MTA 入站本来就禁中继。
-        auto cfg = std::atomic_load(&session->get_server()->m_config);
+        auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
         std::string domain;
         auto at = recipient.rfind('@');
         if (at != std::string::npos) domain = recipient.substr(at + 1);
@@ -744,7 +750,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     }
 
     // 未认证（25 端口 MTA 入站）：禁止中继，只收本地已注册用户
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
     std::string local = recipient;
     std::string domain;
     auto at = recipient.rfind('@');
@@ -901,7 +907,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (!smtp_session) { session->close(); return; }
 
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
 
     // MIME 预解析：仅当消息 ≤ 阈值才 eager 解析（大消息跳过，交给 IMAP lazy 解析）
     // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用。
@@ -913,7 +919,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
     // （与 commit 回调同一约定）。
     const bool has_body = smtp_session->get_mail() &&
                           !smtp_session->get_mail()->body_path.empty();
-    auto provider = has_body ? session->get_server()->m_shardRouter->get_storage(
+    auto provider = has_body ? static_cast<MailServerBase*>(session->get_server())->m_shardRouter->get_storage(
                                    static_cast<size_t>(ctx->shard_index))
                              : nullptr;
     if (!has_body || !provider) {
@@ -986,7 +992,12 @@ void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
         return;
     }
     parse_mime_tree(body_read->view(), smtp_session->get_mail()->mime_root);
-    save_mime_tree(smtp_session->get_mail()->body_path,
+    auto* ctx = static_cast<SmtpsContext*>(smtp_session->get_context());
+    auto router = smtp_session->get_server()->get_shard_router();
+    auto provider = ctx && router ? router->get_storage(
+                              static_cast<size_t>(ctx->shard_index)) : nullptr;
+    auto metadata = mime_metadata_store_for(provider);
+    save_mime_tree(metadata, smtp_session->get_mail()->body_path,
                    smtp_session->get_mail()->mime_root);
 }
 
@@ -1002,7 +1013,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
         if (!smtp_session) { session->close(); return; }
-        auto cfg = std::atomic_load(&session->get_server()->m_config);
+        auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
 
     try {
 
@@ -1029,11 +1040,11 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                 return;
             }
             const bool ack_after_enqueue =
-                std::atomic_load(&session->get_server()->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
+                std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
             if (ack_after_enqueue) {
                 session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                 smtp_session->reset_mail_state();
-                session->get_server()->increment_mails_accepted();
+                static_cast<MailServerBase*>(session->get_server())->increment_mails_accepted();
                 session->do_async_write("250 OK\r\n",
                     [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
                         if (ec) return;
@@ -1044,7 +1055,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
             // 在连接 executor 上等待完成/超时，不占用持久化需要的 worker。
             session->set_paused(true);
             const auto timeout = std::chrono::milliseconds(
-                std::atomic_load(&session->get_server()->m_config)->inbound_persist_wait_timeout_ms);
+                std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config)->inbound_persist_wait_timeout_ms);
             smtp_session->async_wait_pending_mail(timeout, [session](persist_storage::PersistResult result) {
                 auto* smtp = static_cast<SmtpsSession<ConnectionType>*>(session.get());
                 if (session->is_closed()) { smtp->clear_pending_mail_submission(); return; }
@@ -1052,7 +1063,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                 if (!result.timed_out && result.status == persist_storage::PersistStatus::SUCCESS) {
                     session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                     smtp->reset_mail_state();
-                    session->get_server()->increment_mails_accepted();
+                    static_cast<MailServerBase*>(session->get_server())->increment_mails_accepted();
                     session->do_async_write("250 OK\r\n",
                         [](auto s, const std::error_code& ec) {
                             if (!ec) s->do_async_read();
@@ -1084,7 +1095,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
         const std::string body_path = (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty())
             ? smtp_session->get_mail()->body_path : std::string();
 
-        auto* dns = session->get_server()->get_dns_resolver().get();
+        auto* dns = static_cast<MailServerBase*>(session->get_server())->get_dns_resolver().get();
         if (dns && !body_path.empty()) {
             inbound::SpfResult pre_spf{ctx->spf_result, ""};
             session->set_paused(true);   // 校验期间暂停流水线，回调中恢复
@@ -1124,7 +1135,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (!smtp_session) { session->close(); return; }
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
 
     auto reject_and_close = [session, smtp_session](const char* reply) {
         smtp_session->discard_current_mail();
@@ -1283,10 +1294,20 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     const std::string& password, AuthCallback cb)
 {
+    if (!cb) return;
     if (!session) { cb(false, 0); return; }
     session->set_paused(true);
+    auto executor = session->get_connection().executor();
     account_policy_->login_async(mail_address, password,
-        [session, cb = std::move(cb)](AccountAuthResult out) { cb(out.ok, out.ok ? out.shard : 0); });
+        [session, executor, cb = std::move(cb)](AccountAuthResult out) mutable {
+            // Password work completes on a worker/DB thread. Resume protocol
+            // state and buffered commands on the connection's serial executor,
+            // after the input-dispatch loop which paused this session has exited.
+            executor->post([session, cb = std::move(cb), out = std::move(out)]() mutable {
+                if (session->is_closed()) return;
+                cb(out.ok, out.ok ? out.shard : 0);
+            });
+        });
 }
 
 
@@ -1295,10 +1316,17 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
     std::function<void(bool exists)> cb)
 {
+    if (!cb) return;
     if (!session) { cb(false); return; }
     session->set_paused(true);
+    auto executor = session->get_connection().executor();
     account_policy_->user_exists_async(mail_address,
-        [session, cb = std::move(cb)](bool exists) { cb(exists); });
+        [session, executor, cb = std::move(cb)](bool exists) mutable {
+            executor->post([session, cb = std::move(cb), exists]() mutable {
+                if (session->is_closed()) return;
+                cb(exists);
+            });
+        });
 }
 
 // RCPT TO 收件人解析：用户（缓存→DB）→ 别名（缓存→DB）→ 空（550）。
@@ -1331,9 +1359,20 @@ void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& alias_address,
     std::function<void(std::vector<std::string>)> cb)
 {
-    if (session) session->set_paused(true);
+    if (!cb) return;
+    if (!session) {
+        account_policy_->alias_targets_async(alias_address, std::move(cb));
+        return;
+    }
+    session->set_paused(true);
+    auto executor = session->get_connection().executor();
     account_policy_->alias_targets_async(alias_address,
-        [session, cb = std::move(cb)](std::vector<std::string> targets) mutable { cb(std::move(targets)); });
+        [session, executor, cb = std::move(cb)](std::vector<std::string> targets) mutable {
+            executor->post([session, cb = std::move(cb), targets = std::move(targets)]() mutable {
+                if (session->is_closed()) return;
+                cb(std::move(targets));
+            });
+        });
 }
 
 
@@ -1341,7 +1380,8 @@ void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
 // 条件 UPDATE（跨天归零 + 配额 WHERE）后 SELECT ROW_COUNT() 读实际占用行数：
 //   1 行 → 占用成功（allowed=true）；0 行 → 当日配额已超（allowed=false）。
 // 失败语义：DB 故障 / 无连接 / 配额关闭（config<=0）→ fail-open 放行并 WARN。
-// 与 user_exists_async 一致：短查询直接在调用线程内联执行，不做 worker 池转发。
+// Account policy may complete inline or on a DB thread; protocol continuation
+// always returns to the connection executor, including the disabled-quota path.
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session,
@@ -1350,11 +1390,17 @@ void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
 {
     if (!cb) return;
     if (!session) { cb(true); return; }
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
-    if (!cfg || cfg->smtp_daily_send_limit <= 0) { cb(true); return; }
+    auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
     session->set_paused(true);
-    account_policy_->check_send_quota_async(mail_address, cfg->smtp_daily_send_limit,
-        [session, cb = std::move(cb)](bool allowed) { cb(allowed); });
+    auto executor = session->get_connection().executor();
+    auto complete = [session, executor, cb = std::move(cb)](bool allowed) mutable {
+        executor->post([session, cb = std::move(cb), allowed]() mutable {
+            if (session->is_closed()) return;
+            cb(allowed);
+        });
+    };
+    if (!cfg || cfg->smtp_daily_send_limit <= 0) { complete(true); return; }
+    account_policy_->check_send_quota_async(mail_address, cfg->smtp_daily_send_limit, std::move(complete));
 }
 
 

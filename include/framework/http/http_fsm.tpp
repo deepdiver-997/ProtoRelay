@@ -4,7 +4,7 @@
 // 本文件在实例化前依赖 HttpSession<ConnectionType> 的完整定义（serve() 等）。
 #include "framework/http/http_session.h"
 #include "framework/http/http_session.tpp"
-#include "mail_system/back/common/logger.h"
+#include "framework/log/log_macros.h"
 
 namespace pr::http {
 

@@ -2,6 +2,8 @@
 #define PR_FRAMEWORK_STORAGE_LOCAL_FILE_STORAGE_PROVIDER_H
 
 #include "framework/storage/i_storage_provider.h"
+#include "framework/storage/local_file_download_stream.h"
+#include "framework/storage/local_file_metadata_cache.h"
 
 #include <atomic>
 #include <memory>
@@ -10,7 +12,7 @@
 namespace pr {
 namespace storage {
 
-class LocalFileStorageProvider : public IStorageProvider {
+class LocalFileStorageProvider : public IStorageProvider, public LocalFileMetadataCache {
 public:
     LocalFileStorageProvider(std::string mail_root, std::string attachment_root);
 

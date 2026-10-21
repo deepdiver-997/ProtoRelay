@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // Logging backend boundary: custom handlers, no-spdlog formatting, filtering,
 // concurrent delivery, rotation, and compressed-log compatibility.
 #undef NDEBUG
@@ -79,7 +80,7 @@ int main() {
     for (auto& writer : writers) writer.join();
     assert(delivered == 400);
 
-    auto dir = std::filesystem::temp_directory_path() /
+    auto dir = test_support::temp_root() /
         ("protorelay_logger_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(dir);
     pr::LogConfig config{(dir / "standard.log").string(), 0, 2, false, true};

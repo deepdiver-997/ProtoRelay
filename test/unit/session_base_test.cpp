@@ -121,6 +121,25 @@ int main() {
         finish_session(s);
     }
 
+    // 多个续读来源（写回调/忽略 CRLF）不得重叠读同一 socket/SSL stream。
+    {
+        auto s = make_session();
+        auto& conn = s->get_connection();
+        conn.set_deferred_read(true);
+        s->do_async_read();
+        s->do_async_read();
+        conn.pump_executor();
+        expect_true(conn.read_call_count() == 1 && conn.has_pending_read(),
+                    "duplicate read requests share one pending socket read");
+        conn.trigger_deferred_read("NOOP\r\n");
+        conn.pump_executor();
+        s->do_async_read();
+        conn.pump_executor();
+        expect_true(conn.read_call_count() == 2 && conn.has_pending_read(),
+                    "read completion permits the next socket read");
+        finish_session(s);
+    }
+
     // ── do_async_read：读错误（EOF）→ handle_error → close ───
     {
         auto s = make_session();

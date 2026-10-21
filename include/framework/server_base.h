@@ -5,24 +5,11 @@
 #include <memory>
 #include <string>
 #include <map>
-#include "framework/server_config.h"
-#include "framework/db/db_pool.h"
-#include "framework/net/dns_resolver.h"
+#include "framework/server_config_base.h"
 #include "framework/net/executor.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "framework/intrusion_detector.h"
 #include "framework/metrics_server.h"
-#include <atomic>
-#include <memory>
-#include <string>
-#include <map>
-
-// 应用层类型只前向声明（include 泄漏清理，2026-10-17）。必须放在 namespace pr
-// 之外：它们就是 mail_system 命名空间的应用层类型，放进 pr 会变成
-// pr::mail_system::* 假类型（2026-10-18 命名空间翻转时的教训）。成员是
-// shared_ptr，拷贝/析构都不需要完整类型；解引用方自己 include 真头。
-namespace mail_system { class IMailboxCache; }
-namespace mail_system { namespace router { class IShardRouter; } }
 
 namespace pr {
 
@@ -45,13 +32,11 @@ inline const char* server_state_to_string(ServerState s) {
 // ================================================================
 class ServerBase {
 public:
-    // 纯依赖注入（2026-10-18）：只接受现成资源，任一为空/未 start → 抛
-    // std::invalid_argument 响亮报错，绝不悄悄自建。装配（DB 池/存储/路由的
-    // 具体工厂）在 mail_system::bootstrap::assemble —— 框架不认识任何具体驱动。
-    ServerBase(const mail_system::ServerConfig& config,
-         std::shared_ptr<ThreadPoolBase> ioThreadPool,
-         std::shared_ptr<ThreadPoolBase> workerThreadPool,
-         std::shared_ptr<mail_system::router::IShardRouter> shardRouter);
+    using Config = pr::ServerConfig;
+    // Injected runtimes are owned and stopped by the application composition root.
+    ServerBase(const Config& config,
+               std::shared_ptr<ThreadPoolBase> ioThreadPool,
+               std::shared_ptr<ThreadPoolBase> workerThreadPool);
     virtual ~ServerBase();
 
     ServerBase(const ServerBase&) = delete;
@@ -69,7 +54,7 @@ public:
     void request_stop() { m_state.store(ServerState::Pausing, std::memory_order_release); }
 
     // reload 运行时配置
-    bool reload_config(const std::string& json_file);
+    virtual bool reload_config(const std::string& json_file);
 
     // Backend-neutral scheduling for server-owned maintenance tasks.
     std::shared_ptr<net::IExecutor> get_executor() const;
@@ -77,29 +62,28 @@ public:
     // ── 共享成员（所有协议共用） ──────────────────────────────
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
-    std::shared_ptr<mail_system::router::IShardRouter> m_shardRouter;
-    std::shared_ptr<pr::IDnsResolver> m_dnsResolver;
-
-    void set_mailbox_cache(std::shared_ptr<mail_system::IMailboxCache> cache) { m_mailboxCache = cache; }
-    std::shared_ptr<mail_system::IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
-    std::shared_ptr<mail_system::router::IShardRouter> get_shard_router() const { return m_shardRouter; }
-    std::shared_ptr<pr::IDnsResolver> get_dns_resolver() const { return m_dnsResolver; }
-
-    std::shared_ptr<mail_system::IMailboxCache> m_mailboxCache;
-    std::string m_domain;
     std::string m_configFilePath;
-    std::shared_ptr<mail_system::ServerConfig> m_config;
+
+private:
+    // Framework clients use config_snapshot(); applications may override it to
+    // publish their richer configuration without exposing a stale sliced copy.
+    std::shared_ptr<Config> framework_config_;
+
+public:
+    // A single virtual snapshot keeps sessions on their application's current
+    // immutable configuration without exposing application types to the framework.
+    virtual std::shared_ptr<const Config> config_snapshot() const {
+        return std::atomic_load(&framework_config_);
+    }
 
     // ── 连接计数 ──────────────────────────────────────────────
     std::atomic<size_t> active_connections_{0};
     std::atomic<size_t> connections_total_{0};
     std::atomic<size_t> connections_rejected_total_{0};
-    std::atomic<size_t> mails_accepted_total_{0};
     void increment_connection_count();
     void decrement_connection_count();
     void increment_connections_total();
     void increment_connections_rejected();
-    void increment_mails_accepted();
 
     // ── 入侵检测 ──────────────────────────────────────────────
     IntrusionDetector m_intrusionDetector;
@@ -114,7 +98,7 @@ public:
         }
     }
     bool is_ip_banned(const std::string& ip) const {
-        auto cfg = std::atomic_load(&m_config);
+        auto cfg = config_snapshot();
         if (!cfg->intrusion_detection_enabled || cfg->intrusion_ban_threshold <= 0) return false;
         bool banned = m_intrusionDetector.is_banned(ip);
         // 2026-08-27: ban 命中计数（被拒连接时上层 reject 路径会查 is_ip_banned）。
@@ -128,7 +112,7 @@ public:
 
     // ── Metrics ───────────────────────────────────────────────
     std::weak_ptr<MetricsServer> get_metrics() const { return m_metricsServer; }
-    void refresh_metrics();
+    virtual void refresh_metrics();
     void push_metric_gauge(const std::string& name, const MetricsServer::LabelMap& labels, double v);
     void push_metric_counter(const std::string& name, const MetricsServer::LabelMap& labels, uint64_t v);
     void push_metric_observe(const std::string& name, const MetricsServer::LabelMap& labels, double v);
@@ -137,6 +121,7 @@ public:
     [[deprecated]] std::string build_status_response() const;
 
 protected:
+    bool validate_reload_structure(const Config& replacement) const;
     virtual void stop(ServerState state = ServerState::Pausing);
     virtual bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const = 0;
 
@@ -145,6 +130,7 @@ protected:
     std::shared_ptr<MetricsServer> m_metricsServer;
 
     std::atomic<ServerState> m_state{ServerState::Stopped};
+
 };
 
 } // namespace pr

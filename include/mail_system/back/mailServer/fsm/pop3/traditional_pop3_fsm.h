@@ -2,6 +2,7 @@
 #define TRADITIONAL_POP3_FSM_H
 
 #include "framework/session_base.h"
+#include "mail_system/back/common/account_authentication.h"
 #include "framework/fsm_base.h"
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/router/i_shard_router.h"
@@ -24,6 +25,7 @@ protected:
     std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
+    std::shared_ptr<IAccountAuthenticator> authenticator_;
     // 每会话上下文。Pop3Context 是 per-session 状态，由 session 拥有；
     // FSM 通过 session->get_context() 获取裸指针。
     // 这里不存，避免所有权歧义。
@@ -36,11 +38,17 @@ public:
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
         m_shardRouter(std::move(shard_router)) {
+        authenticator_ = std::make_shared<AccountAuthenticationService>(
+            m_shardRouter, m_authCache, m_workerThreadPool);
         init_transition_table();
         init_state_handlers();
     }
 
     ~TraditionalPop3Fsm() override = default;
+    void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
+        if (authenticator) authenticator_ = std::move(authenticator);
+    }
+
 
     // ========== 事件派发入口（session 调） ==========
     void process_event(
@@ -56,8 +64,7 @@ public:
     // （回调同步触发），但调用方结构已异步就绪；将来接真异步 DB 时这些
     // 调用方无需改动。conn 由调用方持有的 shared ScopedConnection 保活，
     // 链中每个回调都捕获它避免悬垂。
-    static void auth_user_async(const std::shared_ptr<router::IShardRouter>& shard_router,
-                                const std::shared_ptr<AuthCache>& auth_cache,
+    static void auth_user_async(const std::shared_ptr<IAccountAuthenticator>& authenticator,
                                 const std::string& mail_address,
                                 const std::string& password,
                                 std::function<void(bool ok, uint64_t user_id, int shard)> cb);

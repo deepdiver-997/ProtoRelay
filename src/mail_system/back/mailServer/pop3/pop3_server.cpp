@@ -79,7 +79,7 @@ Pop3Server::~Pop3Server() {
 }
 
 void Pop3Server::start() {
-    pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>>::start();
+    pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>, MailServerBase>::start();
     start_lock_sweeper();
 }
 
@@ -87,7 +87,7 @@ void Pop3Server::stop(pr::ServerState state) {
     // Mark stopped immediately; cancel on the owning executor. A queued expiry
     // cannot access a destroyed server or start another maintenance task.
     if (auto sweeper = std::move(m_lock_sweeper)) sweeper->stop();
-    pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>>::stop(state);
+    pr::TcpServerBase<Pop3Session<pr::TcpConnection>, Pop3Session<pr::SslConnection>, MailServerBase>::stop(state);
 }
 
 void Pop3Server::start_lock_sweeper() {

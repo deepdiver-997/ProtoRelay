@@ -2,6 +2,7 @@
 #define SMTPS_SERVER_H
 
 #include "framework/tcp_server_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/mailServer/session/smtps_session.h"
@@ -12,7 +13,7 @@
 namespace mail_system {
 
 class SmtpsServer : public pr::TcpServerBase<SmtpsSession<pr::TcpConnection>,
-                                          SmtpsSession<pr::SslConnection>> {
+                                          SmtpsSession<pr::SslConnection>, MailServerBase> {
 public:
     SmtpsServer(const ServerConfig& config,
          std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,

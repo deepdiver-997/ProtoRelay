@@ -7,10 +7,17 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/password_rehash.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <cstring>
 #include <filesystem>
 #include <regex>
 #include <unordered_map>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mail_system {
 
@@ -366,7 +373,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
 {
     // 自动补 @domain（兼容只传本地部分的客户端）
     if (!username.empty() && username.find('@') == std::string::npos) {
-        auto config = std::atomic_load(&session->get_server()->m_config);
+        auto config = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
         username += "@" + config->system_domain;
         LOG_IMAP_DEBUG("Auto-domain applied: {}@{}", username, config->system_domain);
     }
@@ -376,8 +383,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
     // pause 后把「查 DB + 验密码」整体丢给 worker 线程池；回调在 worker
     // 线程触发，pause 期间独占 session（SPF/DNS/commit 回调同一约定）。
     // 登录者自己的延迟不变（bcrypt 该算多久还是多久），变的是别人不再陪等。
-    auto router = this->m_shardRouter;
-    auto auth_cache = this->m_authCache;
+    auto authenticator = this->authenticator_;
     auto worker = this->m_workerThreadPool;
     if (!worker) {
         send_tagged(session, tag, "NO", "Server not ready");
@@ -387,13 +393,13 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
     auto self = session->shared_from_this();
     worker->post(
         [self, tag, username = std::move(username), password = std::move(password),
-         router, auth_cache, ok_text, fail_text]() mutable {
+         authenticator, ok_text, fail_text]() mutable {
             // async CPS 链（仿 POP3/SMTP auth）：每步 async_query + 回调续作。
             // 底层 MySQL async_* 是默认同步包装（回调内联执行），链在 worker
             // 线程跑完；将来接真异步 DB，回调在 DB 线程触发，conn 由链内
             // shared ScopedConnection 保活，调用方结构无需改动。
             TraditionalImapsFsm<ConnectionType>::auth_user_async(
-                router, auth_cache, username, password,
+                authenticator, username, password,
                 [self, tag, username = username, ok_text, fail_text](
                     bool ok, uint64_t user_id, int shard) mutable {
                     if (!self || self->is_closed()) return;
@@ -716,7 +722,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
     TraditionalImapsFsm<ConnectionType>::get_mailboxes_async(
         conn, user_id,
         [self, tag = std::move(tag)](bool ok,
-            std::vector<std::tuple<uint64_t, std::string, int>> mailboxes) mutable {
+            std::vector<MailboxSummary> mailboxes) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
                 send_tagged(self, tag, "OK", "LIST completed");
@@ -725,8 +731,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
             }
             std::string response;
             for (const auto& mb : mailboxes) {
-                const std::string& name = std::get<1>(mb);
-                int box_type = std::get<2>(mb);
+                const std::string& name = mb.name;
+                int box_type = mb.box_type;
 
                 std::string encoded_name = encode_mailbox_name(name);
 
@@ -773,12 +779,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_lsub(
     TraditionalImapsFsm<ConnectionType>::get_mailboxes_async(
         conn, user_id,
         [self, tag = std::move(tag)](bool,
-            std::vector<std::tuple<uint64_t, std::string, int>> mailboxes) mutable {
+            std::vector<MailboxSummary> mailboxes) mutable {
             if (!self || self->is_closed()) return;
             std::string response;
             for (const auto& mb : mailboxes) {
-                const std::string& name = std::get<1>(mb);
-                int box_type = std::get<2>(mb);
+                const std::string& name = mb.name;
+                int box_type = mb.box_type;
                 std::string encoded_name = encode_mailbox_name(name);
 
                 if (box_type == 1) {
@@ -1045,7 +1051,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
     state->header_fields_not = header_fields_not;
     state->header_fields_filter = std::move(header_fields_filter);
     state->body_sections = std::move(body_sections);
-    auto* srv = self->get_server();
+    auto* srv = static_cast<MailServerBase*>(self->get_server());
     state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
 
     // 正文读取走 async：本地内联（行为与同步版一致），远程后端由装饰器
@@ -1169,7 +1175,8 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
                                             [](const imap_utils::ImapBodySection& s) {
                                                 return !s.path.empty();
                                             });
-        const bool have_tree = need_parts && ensure_mime_tree(mail_info.body_path, body_content, mime_tree);
+        auto metadata = mime_metadata_store_for(c.provider);
+        const bool have_tree = need_parts && ensure_mime_tree(metadata, mail_info.body_path, body_content, mime_tree);
         for (const auto& section : c.body_sections) {
             std::string part_content;
             const std::string* content = &body_content;
@@ -1190,7 +1197,8 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
     if (c.want_body_struct) {
         if (c.struct_sidecar_hit) {
             c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree, body_content) + " ";
-        } else if (ensure_mime_tree(mail_info.body_path, body_content, c.struct_tree)) {
+        } else if (auto metadata = mime_metadata_store_for(c.provider);
+                   ensure_mime_tree(metadata, mail_info.body_path, body_content, c.struct_tree)) {
             c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree, body_content) + " ";
         } else {
             c.cur += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
@@ -1242,10 +1250,11 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
             std::to_string(mail_info.mail_id)) + " ";
     }
 
-    // BODYSTRUCTURE 先试 sidecar（本地小文件，同步读即可）
+    // Metadata caching is an explicit provider capability; remote keys are never local paths.
     ctx->struct_sidecar_hit = false;
     if (ctx->want_body_struct) {
-        ctx->struct_sidecar_hit = load_mime_tree(mail_info.body_path, ctx->struct_tree) &&
+        auto metadata = mime_metadata_store_for(ctx->provider);
+        ctx->struct_sidecar_hit = load_mime_tree(metadata, mail_info.body_path, ctx->struct_tree) &&
                                   ctx->struct_tree.metadata_version >= kMimeMetadataVersion;
     }
     // rfc822 部件的 BODYSTRUCTURE 需要内嵌消息头（ENVELOPE），sidecar 只存结构
@@ -1718,7 +1727,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
                 LOG_IMAP_ERROR("Error sending STARTTLS response: {}", ec.message());
                 return;
             }
-            auto server = static_cast<ImapsServer*>(self->get_server());
+            auto server = static_cast<ImapsServer*>(static_cast<MailServerBase*>(self->get_server()));
             auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
             server->handoff_starttls(self->release_connection(), std::move(trace));
         }
@@ -2148,7 +2157,7 @@ std::vector<std::string> imap_search_tokens(const std::string& s) {
         } else {
             while (i < s.size() && s[i] != ' ' && s[i] != '\t') tok += s[i++];
         }
-        if (!tok.empty()) out.push_back(std::move(tok));
+        out.push_back(std::move(tok)); // 空引号串也是 HEADER 的合法 value
     }
     return out;
 }
@@ -2158,29 +2167,28 @@ struct ImapSearchHeaderKey {
     std::string value;   // 子串（匹配时忽略大小写）
 };
 
-// 提取 HEADER <field> <value> 判据（可多条，隐式 AND）。
-// 之前 SEARCH 完全忽略 HEADER 判据：无 flag 命中时 match 恒 true，
-// UID SEARCH HEADER Message-ID <x> 返回全箱 UID（2026-10-21 生产实测）。
-std::vector<ImapSearchHeaderKey> parse_search_header_keys(const std::string& args) {
-    std::vector<ImapSearchHeaderKey> keys;
+struct ImapSearchCriteria {
+    std::vector<ImapSearchHeaderKey> headers;
+    std::vector<std::string> keys; // 已消费 HEADER 参数，剩余的 flag/UID 判据（大写）
+};
+
+// 一次消费 HEADER <field> <value>，其参数不能再被识别为 flag 或 UID 范围。
+ImapSearchCriteria parse_search_criteria(const std::string& args) {
+    ImapSearchCriteria criteria;
     auto tokens = imap_search_tokens(args);
-    auto ieq = [](const std::string& a, const char* b) {
-        if (a.size() != std::char_traits<char>::length(b)) return false;
-        for (size_t k = 0; k < a.size(); ++k)
-            if (std::toupper(static_cast<unsigned char>(a[k])) !=
-                static_cast<unsigned char>(b[k])) return false;
-        return true;
-    };
     for (size_t i = 0; i < tokens.size(); ++i) {
-        if (!ieq(tokens[i], "HEADER")) continue;
-        if (i + 2 >= tokens.size()) break;   // 缺 field/value，判据不完整 → 忽略
-        ImapSearchHeaderKey key;
-        key.field = tokens[i + 1];
-        key.value = tokens[i + 2];
-        keys.push_back(std::move(key));
-        i += 2;
+        std::string key = tokens[i];
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        if (key == "HEADER") {
+            if (i + 2 >= tokens.size()) break;
+            criteria.headers.push_back({tokens[i + 1], tokens[i + 2]});
+            i += 2;
+        } else {
+            criteria.keys.push_back(std::move(key));
+        }
     }
-    return keys;
+    return criteria;
 }
 
 // 头字段抽取：header 块内所有同名行（含 folded 续行）合并为一个字符串。
@@ -2227,6 +2235,9 @@ std::string search_read_body(const std::shared_ptr<storage::IStorageProvider>& s
         storage::IoError err;
         std::string data;
         if (storage->read_all(body_path, data, err)) return data;
+        // A provider failure is not permission to interpret its opaque key as a local path.
+        LOG_FILE_IO_ERROR("Failed to read SEARCH body {}: {}", body_path, err.message);
+        return {};
     }
     std::ifstream in(body_path, std::ios::binary);
     if (!in.is_open()) return {};
@@ -2238,7 +2249,11 @@ std::string search_read_body(const std::shared_ptr<storage::IStorageProvider>& s
 bool mail_matches_header_keys(const std::shared_ptr<storage::IStorageProvider>& storage,
                               const MailboxMailInfo& m,
                               const std::vector<ImapSearchHeaderKey>& keys) {
-    const std::string body = search_read_body(storage, m.body_path);
+    // 旧版 GCC APPEND 把已移动的 body_path 写进 DB。只读兼容这些历史行，
+    // 用与 APPEND 相同的 provider key 寻址；不在 SEARCH 中修写生产数据。
+    const std::string body_path = !m.body_path.empty() ? m.body_path
+        : storage ? storage->build_mail_body_key(m.mail_id) : "mail/" + std::to_string(m.mail_id);
+    const std::string body = search_read_body(storage, body_path);
     size_t sep = body.find("\r\n\r\n");
     if (sep == std::string::npos) sep = body.find("\n\n");
     const std::string header_block =
@@ -2270,15 +2285,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         return;
     }
 
-    const std::string raw_args = session->get_last_command_args();
-
-    // 判据解析（不依赖 DB，先算）。flag 判据沿用既有语义；HEADER 判据从
-    // 原始参数分词提取（upper_args 的子串扫描会被含 "SEEN"/"UNSEEN" 字样的
-    // 头值污染，HEADER 命中率也因此错乱）。
-    const auto header_keys = parse_search_header_keys(raw_args);
-    std::string upper_args = raw_args;
-    std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
-    auto tokens = imap_search_tokens(upper_args);
+    const std::string raw_args = ctx->is_uid_command
+        ? ctx->uid_overridden_args : session->get_last_command_args();
+    const auto criteria = parse_search_criteria(raw_args);
+    const auto& header_keys = criteria.headers;
+    const auto& tokens = criteria.keys;
     auto has_token = [&](const char* t) {
         for (const auto& tok : tokens)
             if (tok == t) return true;
@@ -2305,7 +2316,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         [self, tag = std::move(tag), is_uid,
          search_unseen, search_seen, search_deleted,
          header_keys, storage, worker,
-         upper_args = std::move(upper_args)](
+         tokens](
             bool ok, std::vector<MailboxMailInfo> mails) mutable {
             if (!self || self->is_closed()) return;
             if (!ok) {
@@ -2319,36 +2330,21 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
             // 客户端"最后同步 UID"永远无法推进 → 每次轮询都全量重同步。
             bool has_uid_range = false;
             uint64_t uid_lo = 0, uid_hi = UINT64_MAX;
-            {
-                // 遍历所有 "UID " 出现，取后面跟数字或 * 的 token 作为 UID 集。
-                // 兼容 "UID SEARCH UID X:*"（第一个 "UID " 后是 SEARCH，跳过）和 "UID X:*"。
-                size_t search_pos = 0;
-                while (search_pos < upper_args.size()) {
-                    size_t p = upper_args.find("UID ", search_pos);
-                    if (p == std::string::npos) break;
-                    size_t q = p + 4;
-                    while (q < upper_args.size() && upper_args[q] == ' ') q++;
-                    size_t e = q;
-                    while (e < upper_args.size() &&
-                           (std::isalnum(static_cast<unsigned char>(upper_args[e])) ||
-                            upper_args[e] == ':' || upper_args[e] == '*'))
-                        e++;
-                    std::string tok = upper_args.substr(q, e - q);
-                    if (!tok.empty() && tok != "SEARCH" &&
-                        (tok[0] == '*' || std::isdigit(static_cast<unsigned char>(tok[0])))) {
-                        size_t colon = tok.find(':');
-                        if (colon != std::string::npos) {
-                            std::string a = tok.substr(0, colon), b = tok.substr(colon + 1);
-                            uid_lo = (a == "*") ? 0 : safe_stoull(a);
-                            uid_hi = (b == "*") ? UINT64_MAX : safe_stoull(b);
-                        } else if (tok != "*") {
-                            uid_lo = uid_hi = safe_stoull(tok);
-                        }
-                        has_uid_range = true;
-                        break;
-                    }
-                    search_pos = p + 4;
+            for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+                if (tokens[i] != "UID") continue;
+                const auto& tok = tokens[i + 1];
+                if (tok.empty() || (tok[0] != '*' &&
+                    !std::isdigit(static_cast<unsigned char>(tok[0])))) continue;
+                size_t colon = tok.find(':');
+                if (colon != std::string::npos) {
+                    std::string a = tok.substr(0, colon), b = tok.substr(colon + 1);
+                    uid_lo = (a == "*") ? 0 : safe_stoull(a);
+                    uid_hi = (b == "*") ? UINT64_MAX : safe_stoull(b);
+                } else if (tok != "*") {
+                    uid_lo = uid_hi = safe_stoull(tok);
                 }
+                has_uid_range = true;
+                break;
             }
 
             // 匹配谓词：flag/UID 判据与旧实现完全一致，HEADER 判据在末尾 AND。
@@ -2767,92 +2763,24 @@ void TraditionalImapsFsm<ConnectionType>::handle_timeout(
 // 线程发起（bcrypt 几十~几百 ms 纯 CPU，不许在 io 线程算）。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::auth_user_async(
-    const std::shared_ptr<router::IShardRouter>& shard_router,
-    const std::shared_ptr<AuthCache>& auth_cache,
-    const std::string& mail_address,
-    const std::string& password,
-    std::function<void(bool, uint64_t, int)> cb)
+    const std::shared_ptr<IAccountAuthenticator>& authenticator,
+    const std::string& mail_address, const std::string& password,
+    std::function<void(bool, uint64_t, int)> complete)
 {
-    if (!cb) return;
-    LOG_AUTH_INFO("IMAP AUTH attempt: mail_address=[{}]", mail_address);
-
-    int shard = 0;
-    if (shard_router) {
-        int r = shard_router->route(mail_address);
-        if (r >= 0) shard = r;
-    }
-
-    // 快路径：缓存命中（含 status!=1 的负缓存）同步回调
-    AuthCacheEntry ce;
-    if (auth_cache && auth_cache->lookup(mail_address, ce)) {
-        if (ce.status != 1) { cb(false, 0, shard); return; }
-        bool ok = verify_password_hash(password, ce.password_hash);
-        cb(ok, ce.user_id, ce.shard);
-        return;
-    }
-
-    if (!shard_router) { cb(false, 0, shard); return; }
-    auto db_pool = shard_router->get_db_pool(static_cast<size_t>(shard));
-    if (!db_pool) {
-        LOG_AUTH_ERROR("No database pool for shard {}", shard);
-        cb(false, 0, shard);
-        return;
-    }
-    // conn 用 shared 保活：真异步接入后回调在 DB 线程触发，链中捕获不悬垂
-    auto conn = db_pool->acquire_connection();
-    if (!conn->is_valid()) {
-        LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
-        cb(false, 0, shard);
-        return;
-    }
-
-    (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},
-        [auth_cache, mail_address, password, shard, conn,
-         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (!result || result->get_row_count() == 0) {
-                LOG_AUTH_WARN("User not found: {}", mail_address);
-                cb(false, 0, shard);
-                return;
-            }
-            int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
-            if (status != 1) {
-                LOG_AUTH_WARN("User account disabled: {}", mail_address);
-                cb(false, 0, shard);
-                return;
-            }
-            std::string stored = result->get_value(0, "password");
-            uint64_t user_id = safe_stoull(result->get_value(0, "id"));
-            AuthCacheEntry entry{stored, status, user_id, shard};
-            if (auth_cache) auth_cache->store(mail_address, entry);
-            if (!verify_password_hash(password, stored)) { cb(false, 0, shard); return; }
-            // 验密通过：MD5/明文历史行 → bcrypt 回写 + 刷缓存（已是 bcrypt 则直通），
-            // 再记 last_login，最后回调。见 common/password_rehash.h 的契约说明。
-            rehash_password_if_needed_async(conn, auth_cache, mail_address, password, stored, entry,
-                [conn, mail_address, user_id, shard, cb = std::move(cb)]() mutable {
-                    (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                        [conn, cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
-                });
+    if (!complete) return;
+    if (!authenticator) { complete(false, 0, 0); return; }
+    authenticator->login_async(mail_address, password,
+        [complete = std::move(complete)](AccountAuthResult result) {
+            complete(result.ok, result.user_id, result.shard);
         });
 }
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::get_mailboxes_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
-    std::function<void(bool, std::vector<std::tuple<uint64_t, std::string, int>>)> cb)
+    std::function<void(bool, std::vector<MailboxSummary>)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(false, {}); return; }
-    (*conn)->async_query(db::sql::build_imap_list_mailboxes(), {std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            std::vector<std::tuple<uint64_t, std::string, int>> mailboxes;
-            if (!result) { cb(false, std::move(mailboxes)); return; }
-            for (size_t i = 0; i < result->get_row_count(); ++i) {
-                uint64_t id = safe_stoull(result->get_value(i, "id"));
-                std::string name = result->get_value(i, "name");
-                int box_type = static_cast<int>(safe_stoull(result->get_value(i, "box_type")));
-                mailboxes.emplace_back(id, name, box_type);
-            }
-            cb(true, std::move(mailboxes));
-        });
+    m_mailboxRepository->get_mailboxes_async(std::move(conn), user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -2860,30 +2788,12 @@ void TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
     const std::string& mailbox_name, std::function<void(uint64_t)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(0); return; }
     std::string name_utf8 = mailbox_name;
     if (mailbox_name.find('&') != std::string::npos) {
-        std::string decoded = decode_imap_utf7(mailbox_name);
-        if (!decoded.empty()) name_utf8 = decoded;
+        auto decoded = decode_imap_utf7(mailbox_name);
+        if (!decoded.empty()) name_utf8 = std::move(decoded);
     }
-    (*conn)->async_query(db::sql::build_imap_get_mailbox_by_name(),
-        {std::to_string(user_id), name_utf8},
-        [conn, user_id, name_utf8, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0) {
-                cb(safe_stoull(result->get_value(0, "id")));
-                return;
-            }
-            // INBOX 兜底（box_type=1，中文名邮箱可能直接查不到）
-            std::string upper = name_utf8;
-            std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-            if (upper != "INBOX") { cb(0); return; }
-            (*conn)->async_query(db::sql::build_imap_get_inbox_id(),
-                {std::to_string(user_id)},
-                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> r2) mutable {
-                    if (r2 && r2->get_row_count() > 0) cb(safe_stoull(r2->get_value(0, "id")));
-                    else cb(0);
-                });
-        });
+    m_mailboxRepository->find_mailbox_id_async(std::move(conn), user_id, name_utf8, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -2891,28 +2801,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_mails_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(bool, std::vector<MailboxMailInfo>)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(false, {}); return; }
-    (*conn)->async_query(db::sql::build_imap_get_mailbox_mails(),
-        {std::to_string(mailbox_id), std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            std::vector<MailboxMailInfo> mails;
-            if (!result) { cb(false, std::move(mails)); return; }
-            for (size_t i = 0; i < result->get_row_count(); ++i) {
-                MailboxMailInfo info;
-                info.mail_id = safe_stoull(result->get_value(i, "id"));
-                info.sender = result->get_value(i, "sender");
-                info.recipient = result->get_value(i, "recipient");
-                info.subject = result->get_value(i, "subject");
-                info.body_path = result->get_value(i, "body_path");
-                info.is_starred = result->get_value(i, "is_starred") == "1";
-                info.is_deleted = result->get_value(i, "is_deleted") == "1";
-                info.is_important = result->get_value(i, "is_important") == "1";
-                info.status = result->get_value(i, "status").empty() ? 0 : static_cast<int>(safe_stoull(result->get_value(i, "status")));
-                info.send_time = static_cast<time_t>(safe_stoull(result->get_value(i, "send_time")));
-                mails.push_back(std::move(info));
-            }
-            cb(true, std::move(mails));
-        });
+    m_mailboxRepository->get_mailbox_mails_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -3023,7 +2912,8 @@ void TraditionalImapsFsm<ConnectionType>::create_mail_async(
         {std::to_string(mail_id),
          db::sql::clip_subject_for_db(subject.empty() ? "(无主题)" : subject),
          body_path, std::to_string(ts)},
-        [conn, storage, mail_id = static_cast<uint64_t>(mail_id), body_path = std::move(body_path),
+        // SQL 参数与回调捕获的求值顺序未指定，不能在同一调用中移动 body_path。
+        [conn, storage, mail_id = static_cast<uint64_t>(mail_id), body_path,
          cb = std::move(cb)](bool ok) mutable {
             if (ok) { cb(mail_id, std::move(body_path), ""); return; }
             // mails 行写失败：体文件已先落，必须删掉，不留孤儿
@@ -3174,11 +3064,12 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_stats_cached_async(
         }
     };
 
-    get_mailbox_count_async(conn, mailbox_id, user_id,
-        [conn, mailbox_id, user_id, finish = std::move(finish)](size_t exists) mutable {
-            get_mailbox_unseen_count_async(conn, mailbox_id, user_id,
-                [conn, mailbox_id, user_id, finish = std::move(finish), exists](size_t unseen) mutable {
-                    get_mailbox_uidnext_async(conn, mailbox_id, user_id,
+    auto repository = m_mailboxRepository;
+    repository->get_mailbox_count_async(conn, mailbox_id, user_id,
+        [repository, conn, mailbox_id, user_id, finish = std::move(finish)](size_t exists) mutable {
+            repository->get_mailbox_unseen_count_async(conn, mailbox_id, user_id,
+                [repository, conn, mailbox_id, user_id, finish = std::move(finish), exists](size_t unseen) mutable {
+                    repository->get_mailbox_uidnext_async(conn, mailbox_id, user_id,
                         [mailbox_id, finish = std::move(finish), exists, unseen](uint64_t uidnext) mutable {
                             MailboxCacheEntry entry;
                             entry.exists = exists;
@@ -3196,14 +3087,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_count_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(size_t)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(0); return; }
-    (*conn)->async_query(db::sql::build_imap_select_status_total(),
-        {std::to_string(mailbox_id), std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0)
-                cb(static_cast<size_t>(safe_stoull(result->get_value(0, "cnt"))));
-            else cb(0);
-        });
+    m_mailboxRepository->get_mailbox_count_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -3211,14 +3095,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_unseen_count_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(size_t)> cb)
 {
-    if (!conn || !conn->is_valid()) { if (cb) cb(0); return; }
-    (*conn)->async_query(db::sql::build_imap_mailbox_unseen_count(),
-        {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)},
-        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (result && result->get_row_count() > 0)
-                cb(static_cast<size_t>(safe_stoull(result->get_value(0, "cnt"))));
-            else cb(0);
-        });
+    m_mailboxRepository->get_mailbox_unseen_count_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 template <typename ConnectionType>
@@ -3226,23 +3103,7 @@ void TraditionalImapsFsm<ConnectionType>::get_mailbox_uidnext_async(
     std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
     std::function<void(uint64_t)> cb)
 {
-    (void)user_id;   // mailbox_id 是 mailboxes 主键，全局唯一，无需 user_id 过滤
-    if (!conn || !conn->is_valid()) { if (cb) cb(1); return; }
-    // 原子推进高水位：行锁串行化并发/跨实例读者，GREATEST 防 expunge 后回退；
-    // 推进后再读取（advance 是写，read 才是值）
-    (*conn)->async_execute(db::sql::build_imap_uidnext_advance(),
-        {std::to_string(mailbox_id), std::to_string(mailbox_id), std::to_string(mailbox_id)},
-        [conn, mailbox_id, cb = std::move(cb)](bool) mutable {
-            (*conn)->async_query(db::sql::build_imap_uidnext_read(),
-                {std::to_string(mailbox_id)},
-                // ⚠ 持 conn：外层回调返回后链上只剩此捕获撑住 ScopedConnection，
-                // 漏捕 = advance 查询完成瞬间连接带飞归池（2026-09-24 crash 根因）
-                [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-                    if (result && result->get_row_count() > 0)
-                        cb(safe_stoull(result->get_value(0, "uidnext")));
-                    else cb(1);
-                });
-        });
+    m_mailboxRepository->get_mailbox_uidnext_async(std::move(conn), mailbox_id, user_id, std::move(cb));
 }
 
 // ---------- 批量 flag 更新（STORE）：单条 IN SQL 拍平 N 循环 ----------

@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // MIME 解析单元测试 — 构造合法 MIME，验证：
 //   parse_mime_tree             （SMTP 收信时的预解析，写 sidecar 的数据源）
 //   build_bodystructure_tree    （IMAP BODYSTRUCTURE 生成，RFC 3501 §7.4.2）
@@ -419,7 +420,7 @@ static void test_attachment_structure_consumer() {
     expect_str(decoded[8][1][1].get<std::string>(), "pi\"c\\name.png", "quoted-pair filename survives wire escaping");
 
     // 老 sidecar 不含 disposition/RFC2231 名称，升级后必须从原 MIME 重建并回写。
-    const std::string path = "/tmp/mime_attachment_legacy.eml";
+    const std::string path = test_support::temp_path("mime_attachment_legacy.eml");
     { std::ofstream f(path);f << raw; }
     { std::ofstream f(path + ".mime");f << "{\"t\":\"multipart\",\"s\":\"mixed\",\"p\":[{\"t\":\"text\",\"s\":\"plain\"}]}"; }
     MimePart unavailable;
@@ -763,7 +764,7 @@ static void test_mime_tree_has_rfc822() {
 
 // 临时目录下造一个正文文件，返回其路径
 static std::string write_temp_body(const std::string& name, const std::string& raw) {
-    const auto dir = std::filesystem::temp_directory_path() / "mime_parser_test";
+    const auto dir = test_support::temp_root() / "mime_parser_test";
     std::filesystem::create_directories(dir);
     const auto path = (dir / name).string();
     std::filesystem::remove(path);
@@ -955,7 +956,7 @@ static void test_mmap_malformed_fallback_does_not_write() {
     expect_same_tree(from_string, from_mmap, "mmap parse == string parse (malformed)");
 
     // 兜底分支不得改动被映射的文件内容
-    const auto dir = std::filesystem::temp_directory_path() / "mime_parser_test";
+    const auto dir = test_support::temp_root() / "mime_parser_test";
     std::ifstream f((dir / "mmap_malformed.eml").string(), std::ios::binary);
     std::string after((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     expect_str(after, raw, "mapped file content unchanged after parse");
@@ -1007,7 +1008,7 @@ int main() {
     test_mmap_malformed_fallback_does_not_write();
     test_mmap_empty_file();
 
-    std::filesystem::remove_all(std::filesystem::temp_directory_path() / "mime_parser_test");
+    std::filesystem::remove_all(test_support::temp_root() / "mime_parser_test");
 
     std::printf("\n================================\n  Passed: %d  Failed: %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -1,8 +1,8 @@
 #include "mail_system/back/smtp_client/client_session.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/smtp_wire.h"
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
+#include <array>
+#include <stdexcept>
 #include <atomic>
 #include <cctype>
 #include <istream>
@@ -11,9 +11,7 @@
 #include <sstream>
 
 namespace mail_system::smtp {
-namespace asio = boost::asio;
-using asio::ip::tcp;
-using Error = boost::system::error_code;
+using Error = std::error_code;
 
 namespace {
 bool atom(std::string_view value) {
@@ -30,28 +28,21 @@ std::string upper(std::string value) {
 
 struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
     struct Connection {
-        explicit Connection(asio::any_io_executor ex) : socket(ex), resolver(ex), replies(64 * 1024) {}
-        std::string endpoint;
-        tcp::socket socket;
-        tcp::resolver resolver;
-        std::shared_ptr<asio::ssl::context> context;
-        std::unique_ptr<asio::ssl::stream<tcp::socket>> tls;
-        asio::streambuf replies;
-        tcp::socket& lowest() { return tls ? tls->next_layer() : socket; }
-        void close() {
-            resolver.cancel();
-            Error ignored;
-            lowest().close(ignored);
-        }
+        explicit Connection(std::shared_ptr<pr::net::IClientTransport> value) : transport(std::move(value)) {}
+        std::string endpoint, replies;
+        std::array<char, 4096> read_buffer{};
+        std::shared_ptr<pr::net::IClientTransport> transport;
+        bool tls = false;
+        void close() { transport->close(); }
     };
     struct Operation {
-        Operation(asio::any_io_executor ex, std::shared_ptr<Connection> conn, Complete cb)
-            : timer(ex), connection(std::move(conn)), complete(std::move(cb)) {}
+        Operation(const std::shared_ptr<pr::net::IExecutor>& ex, std::shared_ptr<Connection> conn, Complete cb)
+            : timer(ex->make_timer()), connection(std::move(conn)), complete(std::move(cb)) {}
         ~Operation() { cleanse(); }
         void cleanse() {
             if (secret_write && !wire.empty()) OPENSSL_cleanse(wire.data(), wire.size());
         }
-        asio::steady_timer timer;
+        std::shared_ptr<pr::net::ITimer> timer;
         std::shared_ptr<Connection> connection; // cancelled I/O 结束前持活 socket 和 buffer
         Complete complete;
         ConnectOptions options;
@@ -63,8 +54,12 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
         int reply_code = 0;
         bool done = false, body_started = false, secret_write = false;
     };
-    explicit Impl(asio::any_io_executor ex) : executor(asio::make_strand(ex)) {}
-    asio::any_io_executor executor;
+    explicit Impl(std::shared_ptr<pr::net::IClientTransport> value) : transport(std::move(value)) {
+        if (!transport || !(executor = transport->executor()))
+            throw std::invalid_argument("SMTP client requires a transport and executor");
+    }
+    std::shared_ptr<pr::net::IClientTransport> transport;
+    std::shared_ptr<pr::net::IExecutor> executor;
     std::shared_ptr<Connection> connection;
     std::shared_ptr<Operation> current;
     std::atomic<bool> open{false};
@@ -78,7 +73,7 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
                 std::string error = {}, bool reusable = false) {
         if (op->done) return;
         op->done = true;
-        op->timer.cancel();
+        op->timer->cancel();
         op->options.password.reset();
         op->result.outcome = outcome;
         op->result.code = code;
@@ -108,9 +103,9 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
         return false;
     }
     void deadline(const std::shared_ptr<Operation>& op, std::chrono::milliseconds timeout) {
-        op->timer.expires_after(timeout);
+        op->timer->expires_after(timeout);
         auto self = shared_from_this();
-        op->timer.async_wait([self, op](Error ec) {
+        op->timer->async_wait([self, op](Error ec) {
             if (!ec && !op->done) self->io_failed(op, "deadline exceeded");
         });
     }
@@ -128,37 +123,46 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
             if (ec) { self->io_failed(op, ec.message()); return; }
             self->read_reply(op, true);
         };
-        if (op->connection->tls) asio::async_write(*op->connection->tls, asio::buffer(op->wire), cb);
-        else asio::async_write(op->connection->socket, asio::buffer(op->wire), cb);
+        op->connection->transport->async_write(pr::net::buffer(static_cast<const std::string&>(op->wire)), std::move(cb));
     }
     void read_reply(const std::shared_ptr<Operation>& op, bool first = false) {
         if (first) { op->reply.clear(); op->reply_code = 0; op->reply_bytes = 0; }
-        auto self = shared_from_this();
-        auto cb = [self, op](Error ec, size_t count) {
-            if (op->done) return;
-            if (ec) { self->io_failed(op, ec.message()); return; }
-            std::string line(count, '\0');
-            std::istream input(&op->connection->replies);
-            input.read(line.data(), static_cast<std::streamsize>(count));
-            op->reply_bytes += count;
-            const bool bare = count == 5; // RFC reply-code CRLF（无文本）
-            if (count < 5 || op->reply_bytes > 64 * 1024 || line[0] < '2' || line[0] > '5' ||
-                !std::isdigit(static_cast<unsigned char>(line[1])) ||
-                !std::isdigit(static_cast<unsigned char>(line[2])) ||
-                (!bare && line[3] != ' ' && line[3] != '-')) {
-                self->protocol_failed(op, "malformed reply"); return;
+        auto& buffered = op->connection->replies;
+        const auto end = buffered.find("\r\n");
+        if (end == std::string::npos) {
+            if (buffered.size() + op->reply_bytes >= 64 * 1024) {
+                protocol_failed(op, "reply too large"); return;
             }
-            const int code = (line[0] - '0') * 100 + (line[1] - '0') * 10 + line[2] - '0';
-            if (op->reply_code && op->reply_code != code) {
-                self->protocol_failed(op, "inconsistent multiline reply"); return;
-            }
-            op->reply_code = code;
-            op->reply.push_back(bare ? "" : line.substr(4, count - 6));
-            if (!bare && line[3] == '-') { self->read_reply(op); return; }
-            self->on_reply(op, code);
-        };
-        if (op->connection->tls) asio::async_read_until(*op->connection->tls, op->connection->replies, "\r\n", cb);
-        else asio::async_read_until(op->connection->socket, op->connection->replies, "\r\n", cb);
+            auto self = shared_from_this();
+            op->connection->transport->async_read(pr::net::buffer(op->connection->read_buffer),
+                [self, op](Error error, size_t count) {
+                    if (op->done) return;
+                    if (error) { self->io_failed(op, error.message()); return; }
+                    if (!count) { self->io_failed(op, "empty read"); return; }
+                    op->connection->replies.append(op->connection->read_buffer.data(), count);
+                    self->read_reply(op);
+                });
+            return;
+        }
+        const auto count = end + 2;
+        std::string line = buffered.substr(0, count);
+        buffered.erase(0, count);
+        op->reply_bytes += count;
+        const bool bare = count == 5;
+        if (count < 5 || op->reply_bytes > 64 * 1024 || line[0] < '2' || line[0] > '5' ||
+            !std::isdigit(static_cast<unsigned char>(line[1])) ||
+            !std::isdigit(static_cast<unsigned char>(line[2])) ||
+            (!bare && line[3] != ' ' && line[3] != '-')) {
+            protocol_failed(op, "malformed reply"); return;
+        }
+        const int code = (line[0] - '0') * 100 + (line[1] - '0') * 10 + line[2] - '0';
+        if (op->reply_code && op->reply_code != code) {
+            protocol_failed(op, "inconsistent multiline reply"); return;
+        }
+        op->reply_code = code;
+        op->reply.push_back(bare ? "" : line.substr(4, count - 6));
+        if (!bare && line[3] == '-') { read_reply(op); return; }
+        on_reply(op, code);
     }
     bool capability(const std::shared_ptr<Operation>& op, const std::string& name) {
         for (const auto& line : op->reply) if (upper(line) == name) return true;
@@ -177,31 +181,17 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
     void ehlo(const std::shared_ptr<Operation>& op) { write(op, "ehlo", "EHLO " + op->options.helo + "\r\n"); }
     void handshake(const std::shared_ptr<Operation>& op, bool implicit) {
         op->stage = "tls";
-        auto conn = op->connection;
-        try {
-            conn->context = op->options.tls_context;
-            if (!conn->context) {
-                conn->context = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client);
-                conn->context->set_default_verify_paths();
-            }
-            conn->tls = std::make_unique<asio::ssl::stream<tcp::socket>>(std::move(conn->socket), *conn->context);
-            if (!SSL_set_min_proto_version(conn->tls->native_handle(), TLS1_2_VERSION)) {
-                protocol_failed(op, "cannot set minimum TLS version"); return;
-            }
-            conn->tls->set_verify_mode(asio::ssl::verify_peer);
-            const auto name = op->options.tls_server_name.empty() ? op->options.host : op->options.tls_server_name;
-            conn->tls->set_verify_callback(asio::ssl::host_name_verification(name));
-            if (!SSL_set_tlsext_host_name(conn->tls->native_handle(), name.c_str())) {
-                protocol_failed(op, "cannot set TLS server name"); return;
-            }
-            auto self = shared_from_this();
-            conn->tls->async_handshake(asio::ssl::stream_base::client, [self, op, implicit](Error ec) {
-                if (op->done) return;
-                if (ec) { self->io_failed(op, "TLS: " + ec.message()); return; }
-                if (implicit) { op->stage = "connect"; self->read_reply(op, true); }
-                else self->ehlo(op);
-            });
-        } catch (const std::exception& e) { io_failed(op, e.what()); }
+        auto config = op->options.tls_config;
+        if (!op->options.tls_server_name.empty()) config.server_name = op->options.tls_server_name;
+        else if (config.server_name.empty()) config.server_name = op->options.host;
+        auto self = shared_from_this();
+        op->connection->transport->async_start_tls(std::move(config), [self, op, implicit](Error error) {
+            if (op->done) return;
+            if (error) { self->io_failed(op, "TLS: " + error.message()); return; }
+            op->connection->tls = true;
+            if (implicit) { op->stage = "connect"; self->read_reply(op, true); }
+            else self->ehlo(op);
+        });
     }
     void on_reply(const std::shared_ptr<Operation>& op, int code) {
         const auto stage = op->stage;
@@ -261,7 +251,7 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
     void connect(ConnectOptions options, Complete cb) {
         if (!available(cb)) return;
         disconnect();
-        connection = std::make_shared<Connection>(executor);
+        connection = std::make_shared<Connection>(transport);
         auto op = std::make_shared<Operation>(executor, connection, std::move(cb));
         current = op;
         op->options = std::move(options);
@@ -275,18 +265,14 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
         }
         deadline(op, opts.timeout);
         auto self = shared_from_this();
-        op->connection->resolver.async_resolve(opts.host, std::to_string(opts.port),
-            [self, op](Error ec, tcp::resolver::results_type endpoints) {
-                if (op->done) return;
-                if (ec) { self->io_failed(op, ec.message()); return; }
-                asio::async_connect(op->connection->socket, endpoints, [self, op](Error ec, tcp::endpoint) {
-                    if (op->done) return;
-                    if (ec) { self->io_failed(op, ec.message()); return; }
-                    if (op->options.tls == TlsMode::Implicit) self->handshake(op, true);
-                    else self->read_reply(op, true);
-                });
-            });
+        op->connection->transport->async_connect(opts.host, opts.port, [self, op](Error error) {
+            if (op->done) return;
+            if (error) { self->io_failed(op, error.message()); return; }
+            if (op->options.tls == TlsMode::Implicit) self->handshake(op, true);
+            else self->read_reply(op, true);
+        });
     }
+
     void send(Message message, Complete cb) {
         if (!available(cb)) return;
         auto op = std::make_shared<Operation>(executor, connection, std::move(cb));
@@ -319,27 +305,27 @@ struct ClientSession::Impl : std::enable_shared_from_this<Impl> {
     }
 };
 
-ClientSession::ClientSession(asio::any_io_executor executor) : impl_(std::make_shared<Impl>(executor)) {}
+ClientSession::ClientSession(std::shared_ptr<pr::net::IClientTransport> transport) : impl_(std::make_shared<Impl>(std::move(transport))) {}
 ClientSession::~ClientSession() { close(); }
 void ClientSession::async_connect(ConnectOptions options, Complete cb) {
     auto impl = impl_;
-    asio::post(impl->executor, [impl, options = std::move(options), cb = std::move(cb)]() mutable {
+    impl->executor->post([impl, options = std::move(options), cb = std::move(cb)]() mutable {
         impl->connect(std::move(options), std::move(cb));
     });
 }
 void ClientSession::async_send(Message message, Complete cb) {
     auto impl = impl_;
-    asio::post(impl->executor, [impl, message = std::move(message), cb = std::move(cb)]() mutable {
+    impl->executor->post([impl, message = std::move(message), cb = std::move(cb)]() mutable {
         impl->send(std::move(message), std::move(cb));
     });
 }
 void ClientSession::async_quit(Complete cb) {
     auto impl = impl_;
-    asio::post(impl->executor, [impl, cb = std::move(cb)]() mutable { impl->quit(std::move(cb)); });
+    impl->executor->post([impl, cb = std::move(cb)]() mutable { impl->quit(std::move(cb)); });
 }
 void ClientSession::close() {
     auto impl = impl_;
-    asio::post(impl->executor, [impl] { impl->close(); });
+    impl->executor->post([impl] { impl->close(); });
 }
 bool ClientSession::is_open() const { return impl_->open.load(); }
 } // namespace mail_system::smtp

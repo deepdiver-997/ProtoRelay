@@ -2,9 +2,13 @@
 #define MAIL_SYSTEM_MARIADB_POOL_H
 
 #include "mail_system/back/db/db_pool.h"
+#include "framework/net/readiness_waiter.h"
 #include <memory>
 
 namespace mail_system {
+
+// Driver factory without Connector/C SDK types in the composition root.
+std::shared_ptr<DBService> make_mariadb_service(pr::net::ReadinessWaiterFactory waiters = {});
 
 // MariaDB 连接池工厂：复用引擎无关的 MySQLPool（它只依赖 IDBConnection/DBService），
 // 只换 DBService 为 MariaDBService。`achieve=mariadb` 时由 server_base 调用。

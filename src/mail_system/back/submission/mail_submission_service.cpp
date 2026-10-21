@@ -1,5 +1,7 @@
 #include "mail_system/back/submission/mail_submission_service.h"
-#include "framework/net/asio_executor.h"
+#include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/db/sql_queries.h"
+#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
@@ -131,7 +133,8 @@ struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation
     }
     void enqueue() {
         parse_mime_tree(request.raw, data->mime_root);
-        if (!save_mime_tree(data->body_path, data->mime_root))
+        auto metadata = mime_metadata_store_for(storage);
+        if (!save_mime_tree(metadata, data->body_path, data->mime_root))
             LOG_AT("SUBMISSION", warn, "MIME sidecar save failed mail_id={}", data->id);
         auto path = data->body_path;
         request.raw.clear();
@@ -148,7 +151,7 @@ struct MailSubmissionService::Operation : std::enable_shared_from_this<Operation
         }
         auto self = shared_from_this();
         admitted.ticket.async_wait(
-            std::make_shared<pr::net::AsioExecutor>(service->executors_()),
+            service->executors_(),
             std::chrono::milliseconds(service->config_.inbound_persist_wait_timeout_ms),
             [self](persist_storage::PersistResult r) {
                 if (r.timed_out) {

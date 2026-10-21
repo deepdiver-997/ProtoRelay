@@ -2,12 +2,11 @@
 // exposes no Asio context, work guard, native socket or TLS context.
 #undef NDEBUG
 #include "framework/tcp_server_base.h"
-#include "mail_system/back/router/i_shard_router.h"
 #include "manual_executor.h"
 #include <cassert>
 #include <cstring>
 
-#if defined(BOOST_ASIO_VERSION) || defined(BOOST_VERSION) || defined(SPDLOG_VER_MAJOR) || defined(FMT_VERSION)
+#if defined(MAIL_SYSTEM_APPLICATION_SERVER_CONFIG_H) || defined(MAIL_SYSTEM_I_SHARD_ROUTER_H) || defined(BOOST_ASIO_VERSION) || defined(BOOST_VERSION) || defined(SPDLOG_VER_MAJOR) || defined(FMT_VERSION)
 #error "A network backend leaked into the server interface"
 #endif
 
@@ -102,14 +101,6 @@ public:
 protected:
     void post_impl(std::function<void()> task) override { executor->post(std::move(task)); }
 };
-class Router final : public mail_system::router::IShardRouter {
-public:
-    int route(const std::string&) override { return -1; }
-    size_t shard_count() const override { return 0; }
-    const char* name() const override { return "test"; }
-    std::shared_ptr<DBPool> get_db_pool(size_t) override { return {}; }
-    std::shared_ptr<storage::IStorageProvider> get_storage(size_t) override { return {}; }
-};
 template<class Connection> struct Session {
     std::unique_ptr<Connection> connection;
     bool started = false, upgraded = false, tracks = false;
@@ -139,13 +130,12 @@ protected:
 };
 void server_contract() {
     auto runtime = std::make_shared<Runtime>();
-    auto router = std::make_shared<Router>();
-    mail_system::ServerConfig config;
+    pr::ServerConfig config;
     config.address = "127.0.0.1"; config.metrics_enabled = false; config.intrusion_detection_enabled = false;
     ListenerConfig listener(ListenerType::TCP, 143);
     listener.auth_policy = InboundAuthPolicy::ON; listener.advertise_starttls = false;
     config.listeners = {listener};
-    auto server = std::make_unique<Server>(config, runtime, runtime, router);
+    auto server = std::make_unique<Server>(config, runtime, runtime);
     server->start();
     auto wire = std::make_shared<Wire>();
     runtime->accept(wire); runtime->executor->drain();
@@ -169,12 +159,11 @@ void server_contract() {
 }
 void tls_accept_and_failure() {
     auto runtime = std::make_shared<Runtime>();
-    auto router = std::make_shared<Router>();
-    mail_system::ServerConfig config;
+    pr::ServerConfig config;
     config.address = "127.0.0.1"; config.metrics_enabled = false; config.intrusion_detection_enabled = false;
     config.listeners.emplace_back(ListenerType::SSL, 0);
     {
-        Server server(config, runtime, runtime, router); server.start();
+        Server server(config, runtime, runtime); server.start();
         assert(server.m_listener_configs.count(28143) == 1);
         auto wire = std::make_shared<Wire>(); wire->tls = true; wire->port = 28143;
         runtime->accept(wire); runtime->executor->drain();
@@ -182,7 +171,7 @@ void tls_accept_and_failure() {
         assert(server.received.type == ListenerType::SSL && server.received.port == 28143);
     }
     config.listeners.front() = ListenerConfig(ListenerType::TCP, 143);
-    Server server(config, runtime, runtime, router); server.start();
+    Server server(config, runtime, runtime); server.start();
     auto wire = std::make_shared<Wire>();
     runtime->accept(wire); runtime->executor->drain();
     runtime->last->fail_tls = true;

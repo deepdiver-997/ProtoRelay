@@ -24,3 +24,5 @@ foreach(contract logger_test std_thread_pool_test connection_interface_test serv
     add_test(NAME ${contract} COMMAND ${contract})
     set_tests_properties(${contract} PROPERTIES TIMEOUT 20)
 endforeach()
+
+add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${PR_SOURCE_ROOT} -P ${CMAKE_CURRENT_LIST_DIR}/check_dependency_boundaries.cmake)

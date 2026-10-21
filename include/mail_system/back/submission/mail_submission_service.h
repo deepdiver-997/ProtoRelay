@@ -1,11 +1,13 @@
 #pragma once
 #include "mail_system/back/common/account_policy.h"
-#include "mail_system/back/persist_storage/persistent_queue.h"
-#include <boost/asio/any_io_executor.hpp>
+#include "mail_system/back/server_config.h"
+#include "framework/net/executor.h"
 #include "mail_system/back/algorithm/snow.h"
 
+namespace mail_system::persist_storage { class PersistentQueue; }
+
 namespace mail_system::submission {
-using ExecutorProvider = std::function<boost::asio::any_io_executor()>;
+using ExecutorProvider = std::function<std::shared_ptr<pr::net::IExecutor>()>;
 struct Request {
     uint64_t user_id = 0;
     std::string sender, subject, message_id, raw;

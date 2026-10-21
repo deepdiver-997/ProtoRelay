@@ -96,6 +96,67 @@ INIT ──(CONNECT)──▶ NOT_AUTHENTICATED
 - `ENVELOPE` — date, subject, from, sender, reply-to, to, cc, bcc, in-reply-to, message-id
 - `BODY[]` — full message body (read from storage)
 
+## APPEND / SEARCH correctness (2026-10-21)
+
+### APPEND 完成后的 session 续读
+
+生产表现是客户端已收到 `OK [APPENDUID ...]`，同连接后续 SELECT、LOGOUT
+都没有处理日志。根因在 session 读链：imaplib 可以把 literal 和命令终结 CRLF
+分开放进 TLS record；APPEND 完成后启动的读只读到 `\r\n`，解析器把它作为空行
+忽略，而 `SessionBase` 认为已经分发过输入，等待不存在的响应完成回调继续读取。
+同理，literal 未收齐的一块数据也没有响应可用于推进下一次读取。
+
+`ImapsSession::handle_read()` 现在在忽略空行或 literal 尚未收齐时主动续读。
+`SessionBase::do_async_read()` 在连接 executor 上领取一个在途读标志，完成时释放，
+使空行、写完成和暂存响应 flush 的多个续读来源不会重叠读取同一 socket/SSL stream。
+既有 `pending_write_buf_` 排空冲刷仍保留；该冲刷的默认完成回调原本就会续读，
+并非这次“APPEND OK 之后挂死”的根因。
+
+回归 `imaps_fsm_test::append_success_then_select_responds` 从 MockConnection 的
+分块读取入口驱动完整 session，经过真实 LOGIN、异步 worker APPEND、SELECT、LOGOUT，
+不再直呼 `handle_read/process_read` 绕过读重武装。覆盖同段尾符、OK 后才到达的独立
+CRLF、literal 分片、CR/LF 分片和延迟写完成。`session_base_test` 另验证多次续读请求
+只发起一个底层读，以及读完成后可以正常发起下次读。
+
+### SEARCH HEADER 零命中与 APPEND 元数据路径
+
+只读核查阿里云 2026-10-21 的 sent-copy 探针：原始头为明文
+`Subject: sent-copy probe`，正文对象存在，但对应 `mails.body_path` 长度为 0。
+journal 中的参数实际是 `HEADER Subject sent-copy probe`（没有引号）。
+普通带引号多词值在修复前基线已能匹配；把该现象归因于拆词并不准确。
+
+真正的持久化问题在 `create_mail_async()`：同一 `async_execute` 调用既把 `body_path`
+放入 SQL 参数，又在回调捕获中 `std::move(body_path)`。C++17 不指定两个参数的求值先后，
+GCC-11 可先执行移动捕获，随后把空路径写进 SQL；macOS Clang 的顺序掩盖了该问题。
+现在回调复制路径，确保 SQL 参数、provider object key 和成功回调路径一致。
+SEARCH 读取历史空路径行时按 mail_id 调用同一个 provider 的 `build_mail_body_key()`
+定位正文（无 provider 时用原本的 `mail/<id>` 本地布局），不修改数据库。
+这是 SEARCH 的历史数据读取兼容；其他读路径及历史行修复不在本次数据写入范围内。
+
+判据消费另有独立缺陷：HEADER field/value 提取后仍参与 flag 和 UID 范围扫描，
+如值 `"UNSEEN"` 或 `"UID 9999:*"` 会附加不相关过滤；空引号值还会被分词器丢弃。
+现在只分词一次并消费 HEADER 的两个参数，剩余 token 才解释为 flag/UID 条件，
+保留空值（字段存在即命中）、多词、`\"` 和 `\\` 转义。UID SEARCH 使用 UID 子命令参数。
+HEADER 仍按字段名/内容大小写不敏感的子串匹配，多条 HEADER 隐式 AND。
+
+回归：`append_metadata_body_path` 断言 SQL path = storage key = callback path，
+在 gcc-11 上能捕获旧实现的求值顺序问题；`search_header_criteria` 覆盖多词命中/不命中、
+普通 SEARCH 与 UID SEARCH、引号/反斜杠转义、空值、字段缺失、flag/UID 参数隔离、
+多 HEADER 的 AND，以及正文存在但路径为空的历史数据。后者在 macOS 修复前也稳定失败。
+
+### 验证结果（2026-10-21）
+
+| 平台 / 构建 | 全量 `test/run_all_tests.sh --no-build` |
+|---|---|
+| macOS Clang / Debug | 44 通过，0 失败，0 跳过 |
+| macOS Clang / Release | 44 通过，0 失败，0 跳过 |
+| Ubuntu 22.04.5 amd64 / GCC 11.4 / Release | 43 通过，1 存量失败（`line_folder_test.cpp:158`），0 跳过 |
+
+构建均使用 `./build.sh <Debug|Release>`，无手工并行编译。macOS 与 Linux 的真实
+MariaDB 单测均实际执行并通过；Linux 使用容器内独立测试库。Linux 的唯一失败是
+本次任务预先确认的 LineFolder 存量问题，未改动该组件。修复前失败日志、构建日志与
+完整测试汇总保存在本地 `build/test-logs/imap-fix-20261021/`，逐个测试日志按平台存放。
+
 ## Database Schema Mapping
 
 The IMAP server uses the existing database schema **without any modifications**:

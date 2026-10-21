@@ -1,5 +1,7 @@
 # ProtoRelay Architecture
 
+> 2026-10-22 更新：框架/邮件基类、客户端传输、数据库等待及模块构建的最新边界见 [依赖边界与后续重构](dependency-boundaries.md)。
+
 Updated: 2026-10-20. For the latest framework changes, commit boundaries and validation,
 see [backend decoupling](backend-decoupling.md).
 
@@ -76,10 +78,12 @@ Current implementation status:
 
 `include/framework/` contains generic infrastructure plus transport/protocol component directories
 (`connection/`, `net/`, `log/`, `http/`). Session/FSM infrastructure is independent of
-mail protocol handlers; ServerBase/config still reference application router/cache types:
+mail protocol handlers; generic configuration/runtime live in the framework, while
+`MailServerBase` owns mail configuration, routing, caches, DNS and mail metrics:
 - `SessionBase<ConnectionType>` — manages one TCP/SSL connection lifecycle, async read/write, command buffering
 - `FsmBase<ConnectionType, State, Event>` — transition table + handler registry + dispatch loop
-- `ServerBase` — config, metrics, intrusion detection and lifecycle; requires injected pools/router
+- `ServerBase` — generic config, metrics, intrusion detection and lifecycle; requires injected runtimes
+- `MailServerBase` — application resources and mail-specific configuration/reload
 - `TcpServerBase<TcpSession, SslSession>` — transport-provider admission, typed session factories and STARTTLS handoff
 
 `IConnection`, `IExecutor`/`ITimer` and `IServerTransport` define the backend boundary.
@@ -91,7 +95,7 @@ Business code in `include/mail_system/back/` inherits from these:
 - `SmtpsSession` / `ImapsSession` : public `SessionBase`
 - `TraditionalSmtpsFsm` / `TraditionalImapsFsm` : public `FsmBase`
 - `SmtpsServer` / `ImapsServer` / `Pop3Server` : public `TcpServerBase`
-- `WebmailServer` : public framework `HttpServer`
+- `WebmailServer` : public `BasicHttpServer<MailServerBase>`; generic `HttpServer` uses framework `ServerBase`
 
 `mail_system::bootstrap::assemble` is the composition root. It selects concrete DB/storage/router
 implementations and creates or reuses caller-provided pools. Servers/providers do not stop shared pools.
@@ -407,6 +411,20 @@ async回调 (当前同步默认, 在async_query返回前触发):
 `drain_buffered_commands()` in its callback. Failing to do so leaves the session
 permanently stalled — `do_async_read` returns immediately because the buffer has
 data, but the while-loop refuses to consume it.
+
+IMAP also resumes reads after input that produces no reply: an incomplete APPEND
+literal or a standalone terminating CRLF (which can arrive after APPEND OK in a
+separate TLS record). `SessionBase` allows only one socket read in flight, so these
+requests and response/flush completions cannot overlap reads. Session regressions
+drive chunked connection input through LOGIN → APPEND → SELECT → LOGOUT.
+
+APPEND metadata copies its body key into the DB completion capture: moving that
+same string while also binding it as a SQL parameter in one call made GCC-11 store
+an empty `body_path` due to unspecified argument evaluation order. SEARCH HEADER
+can read those historical rows using the provider's mail_id key without writing
+the DB. Its parser consumes HEADER operands once, preserving quoted multiword,
+escaped and empty values; header content cannot become flag or UID criteria.
+See [IMAP correctness and regressions](../mail-system/architecture/imap-server-design.md#append--search-correctness-2026-10-21).
 
 ### 5.3 Outbound Delivery
 

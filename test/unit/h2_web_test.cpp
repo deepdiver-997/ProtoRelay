@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // h2_web_test —— 剧情优先单测：framework/http 纯函数层的不变量覆盖
 //   MessageProcessor（路由/防穿越/定长）
 //   h2_framer         （帧序列化↔解析往返）
@@ -25,7 +26,7 @@ void check(const char* name, bool cond) {
 }
 
 // ── fixture：静态文件根 ─────────────────────────────────────────
-const std::string kRoot = "/tmp/h2_web_test_root";
+const std::string kRoot = test_support::temp_path("h2_web_test_root");
 void make_fixture() {
     std::filesystem::remove_all(kRoot);
     std::filesystem::create_directories(kRoot + "/sub");

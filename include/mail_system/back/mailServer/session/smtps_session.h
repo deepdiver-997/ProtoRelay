@@ -5,6 +5,7 @@
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/session_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
@@ -33,8 +34,9 @@ class SmtpsSession : public pr::SessionBase<ConnectionType> {
     static constexpr size_t MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 public:
+    MailServerBase* get_server() const { return static_cast<MailServerBase*>(this->m_server); }
     SmtpsSession(
-        pr::ServerBase* server,
+        MailServerBase* server,
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm);
 

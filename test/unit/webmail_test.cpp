@@ -1,3 +1,4 @@
+#include "test_temp_dir.h"
 // 2026-10-18: browser resource IDs lost precision and message detail omitted unread state.
 // docs/bugfixes/2026-10-18-webmail-browser-contract.md
 // webmail_test — webmail MVP 单测（无 DB、无网络）
@@ -16,6 +17,7 @@
 #include "mail_system/back/webmail/mail_service.h"
 #include "mail_system/back/webmail/session_store.h"
 #include "mail_system/back/common/bcrypt.h"
+#include "mail_system/back/common/credential_stamp.h"
 #include "mail_system/back/common/mime_composer.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/router/static_shard_router.h"
@@ -631,7 +633,7 @@ static void fire_message_meta(test::MockDbConnection& conn,
 
 static void test_mail_api_get_message_flow() {
     namespace fs = std::filesystem;
-    const auto dir = (fs::temp_directory_path() /
+    const auto dir = (test_support::temp_root() /
                       ("webmail_test_" + std::to_string(::getpid()))).string();
     fs::remove_all(dir);
     MailApiFixture fx(dir);
@@ -1005,7 +1007,7 @@ static void test_resource_ids_are_lossless() {
 
 
 static void test_message_actions_contract() {
-    const auto dir = std::filesystem::temp_directory_path() / ("webmail-actions-" + std::to_string(getpid()));
+    const auto dir = test_support::temp_root() / ("webmail-actions-" + std::to_string(getpid()));
     std::filesystem::remove_all(dir);
     MailApiFixture fx(dir.string());
     MailActions actions(fx.shard, nullptr);
