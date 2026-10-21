@@ -1,4 +1,5 @@
 #include "test_temp_dir.h"
+#include "framework/net/asio_executor.h"
 // 2026-10-18: trusted submission owns a committed body until queue admission.
 // Exercise provider completion and rejection as consumers; no SMTP session or socket.
 // Negative auth callback evidence: docs/bugfixes/2026-10-18-webmail-shared-sessions.md.
@@ -112,7 +113,7 @@ struct Fixture {
         config.external_delivery_enabled = false;
         config.smtp_daily_send_limit = 0;
         service = std::make_shared<submission::MailSubmissionService>(
-            router, workers, policy, queue, [this] { return io.get_executor(); }, config, 3);
+            router, workers, policy, queue, [this] { return std::make_shared<pr::net::AsioExecutor>(io.get_executor()); }, config, 3);
         auto aliases = std::make_shared<AccountPolicy::AliasCache>(10, std::chrono::seconds(60));
         aliases->put("to@test.local", {});
         policy->set_recipient_caches(std::make_shared<AuthCache>(), aliases);

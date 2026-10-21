@@ -1,6 +1,7 @@
 #include "mail_system/back/webmail/smtp_submitter.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/mime_composer.h"
+#include <stdexcept>
 
 namespace mail_system::webmail {
 namespace {
@@ -20,12 +21,11 @@ SubmitResult adapt(smtp::Result result) {
 }
 } // namespace
 
-LoopbackSmtpSubmitter::LoopbackSmtpSubmitter(boost::asio::any_io_executor executor,
+LoopbackSmtpSubmitter::LoopbackSmtpSubmitter(smtp::TransportProvider transport_provider,
                                            uint16_t port, std::chrono::milliseconds timeout)
-    : LoopbackSmtpSubmitter([executor] { return executor; }, port, timeout) {}
-LoopbackSmtpSubmitter::LoopbackSmtpSubmitter(smtp::ExecutorProvider executor_provider,
-                                           uint16_t port, std::chrono::milliseconds timeout)
-    : executor_provider_(std::move(executor_provider)), port_(port), timeout_(timeout) {}
+    : transport_provider_(std::move(transport_provider)), port_(port), timeout_(timeout) {
+    if (!transport_provider_) throw std::invalid_argument("SMTP submitter requires a transport provider");
+}
 
 void LoopbackSmtpSubmitter::submit_async(SubmitRequest request, Complete complete) {
     // 业务边界仍要求真实邮箱/会话凭据；内核也为 null reverse-path 等场景服务。
@@ -37,7 +37,7 @@ void LoopbackSmtpSubmitter::submit_async(SubmitRequest request, Complete complet
         complete({SubmitStatus::ProtocolError, 0, "validation"}); return;
     }
     // provider 每次提交只取一次，socket/timer 后续固定在同一个 strand。
-    auto client = std::make_shared<smtp::ClientSession>(executor_provider_());
+    auto client = std::make_shared<smtp::ClientSession>(transport_provider_());
     smtp::ConnectOptions options;
     options.host = "127.0.0.1";
     options.port = port_;

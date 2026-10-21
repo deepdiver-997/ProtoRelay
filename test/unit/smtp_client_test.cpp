@@ -4,6 +4,8 @@
 #include <iostream>
 #include "smtp_test_peer.h"
 #include "mail_system/back/smtp_client/client_session.h"
+#include "framework/net/asio_client_transport.h"
+#include <openssl/pem.h>
 #include <openssl/x509v3.h>
 #include <thread>
 using namespace mail_system::smtp;
@@ -34,7 +36,7 @@ void test_reuse() {
     }
     steps.push_back({"QUIT\r\n", "221\r\n"});
     auto peer = std::make_shared<Peer>(io, steps); peer->start();
-    auto client = std::make_shared<ClientSession>(io.get_executor());
+    auto client = std::make_shared<ClientSession>(pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(io.get_executor())));
     int accepted = 0;
     client->async_connect(options(peer->port()), [&, client](Result r) {
         assert(r.outcome == Outcome::Ready && r.reusable);
@@ -54,7 +56,7 @@ void test_failure(std::vector<Step> tx, Outcome expected, std::string stage, int
     asio::io_context io;
     tx.insert(tx.begin(), {"EHLO client.test\r\n", "250 Ready\r\n"});
     auto peer = std::make_shared<Peer>(io, tx); peer->start();
-    ClientSession client(io.get_executor());
+    ClientSession client(pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(io.get_executor())));
     int calls = 0;
     client.async_connect(options(peer->port()), [&](Result r) {
         assert(r.outcome == Outcome::Ready);
@@ -69,7 +71,7 @@ void test_failure(std::vector<Step> tx, Outcome expected, std::string stage, int
 }
 struct TlsFixture {
     std::shared_ptr<asio::ssl::context> server = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
-    std::shared_ptr<asio::ssl::context> client = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client);
+    std::string ca_pem;
     TlsFixture() {
         // 测试证书/私钥只在进程内生成；SAN localhost，客户端显式信任该 CA。
         auto* generator = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
@@ -90,7 +92,10 @@ struct TlsFixture {
         assert(X509_sign(cert, key, EVP_sha256()) > 0);
         assert(SSL_CTX_use_certificate(server->native_handle(), cert) == 1);
         assert(SSL_CTX_use_PrivateKey(server->native_handle(), key) == 1);
-        assert(X509_STORE_add_cert(SSL_CTX_get_cert_store(client->native_handle()), cert) == 1);
+        BIO* pem = BIO_new(BIO_s_mem()); assert(pem);
+        assert(PEM_write_bio_X509(pem, cert) == 1);
+        char* bytes = nullptr; const auto size = BIO_get_mem_data(pem, &bytes);
+        ca_pem.assign(bytes, static_cast<size_t>(size)); BIO_free(pem);
         X509_free(cert); EVP_PKEY_free(key);
     }
 };
@@ -108,11 +113,11 @@ void test_tls(TlsFixture& fixture, TlsMode mode, bool trusted, bool hostname) {
     // QUIT 断连不应撤回已送达结果。
     steps.push_back({"QUIT\r\n", "", false, true});
     auto peer = std::make_shared<Peer>(io, steps, "220 TLS test\r\n", fixture.server, mode == TlsMode::Implicit);
-    peer->start(); ClientSession client(io.get_executor());
+    peer->start(); ClientSession client(pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(io.get_executor())));
     auto opts = options(peer->port()); opts.tls = mode;
     opts.tls_server_name = hostname ? "localhost" : "wrong.test";
-    if (trusted) opts.tls_context = fixture.client;
-    else opts.tls_context = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client);
+    opts.tls_config.use_system_ca = false;
+    if (trusted) opts.tls_config.ca_pem = fixture.ca_pem;
     opts.auth_user = "user"; opts.password = std::make_shared<Secret>("secret");
     int calls = 0;
     client.async_connect(std::move(opts), [&](Result r) {
@@ -134,7 +139,7 @@ void test_starttls_required() {
     asio::io_context io;
     auto peer = std::make_shared<Peer>(io, std::vector<Step>{
         {"EHLO client.test\r\n", "250-test.local\r\n250 AUTH PLAIN\r\n"}});
-    peer->start(); ClientSession client(io.get_executor());
+    peer->start(); ClientSession client(pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(io.get_executor())));
     auto opts = options(peer->port()); opts.tls = TlsMode::StartTlsRequired;
     opts.auth_user = "user"; opts.password = std::make_shared<Secret>("secret");
     int calls = 0;
@@ -148,7 +153,7 @@ void test_cancel_reconnect() {
     asio::io_context io;
     auto hang = std::make_shared<Peer>(io, std::vector<Step>{}, ""); hang->start();
     auto ready = std::make_shared<Peer>(io, std::vector<Step>{{"EHLO client.test\r\n", "250 OK\r\n"}}); ready->start();
-    ClientSession client(io.get_executor());
+    ClientSession client(pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(io.get_executor())));
     int cancelled = 0, busy = 0, connected = 0;
     client.async_connect(options(hang->port()), [&](Result r) {
         assert(r.outcome == Outcome::Cancelled); ++cancelled; hang->stop();

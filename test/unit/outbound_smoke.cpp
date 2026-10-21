@@ -6,6 +6,7 @@
 #include <iostream>
 #include "smtp_test_peer.h"
 #include "mail_system/back/mailServer/session/outbound_smtp_session.h"
+#include "framework/net/asio_client_transport.h"
 #include <boost/asio/thread_pool.hpp>
 using namespace mail_system;
 using namespace mail_system::outbound;
@@ -29,9 +30,11 @@ std::shared_ptr<OutboundSmtpSession> session(asio::io_context& io, asio::thread_
                                               asio::io_context* connection_io = nullptr) {
     auto selections = std::make_shared<std::atomic<int>>(0);
     return std::make_shared<OutboundSmtpSession>(
-        [&io, connection_io, selections]() -> asio::any_io_executor {
-            return connection_io && selections->fetch_add(1) > 0 ? connection_io->get_executor() : io.get_executor();
-        },
+        [&io, connection_io, selections]() {
+            selections->fetch_add(1);
+            auto executor = connection_io ? connection_io->get_executor() : io.get_executor();
+            return pr::net::make_asio_client_transport(std::make_shared<pr::net::AsioExecutor>(executor));
+        }, std::make_shared<pr::net::AsioExecutor>(io.get_executor()),
         [&worker](std::function<void()> job) { asio::post(worker, std::move(job)); },
         "127.0.0.1", port, "outbound.test");
 }

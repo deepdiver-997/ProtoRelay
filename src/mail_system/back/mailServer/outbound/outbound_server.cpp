@@ -13,11 +13,9 @@
 // ================================================================
 
 #include "mail_system/back/mailServer/outbound_server.h"
-#include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/router/i_shard_router.h"  // 解引用 m_shardRouter：server_base.h 已不再传递完整类型（泄漏清理）
 #include "mail_system/back/mailServer/outbound/dns_resolver.h"  // SyncDnsWrapper（MX 解析）
-#include <boost/asio/strand.hpp>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -25,21 +23,23 @@ namespace mail_system {
 namespace outbound {
 
 // ── 构造 / 析构 ────────────────────────────────────────────
-OutboundServer::OutboundServer(pr::ServerBase* server,
+OutboundServer::OutboundServer(mail_system::MailServerBase* server,
                                int max_per_mx,
                                int idle_timeout)
-    : io_pool_(std::static_pointer_cast<pr::IOThreadPool>(server->m_ioThreadPool))
+    : transports_(std::dynamic_pointer_cast<pr::net::IClientTransportProvider>(server->m_ioThreadPool))
+    , executors_(std::dynamic_pointer_cast<pr::net::IExecutorProvider>(server->m_ioThreadPool))
     , worker_pool_(server->m_workerThreadPool)
     , shard_router_(server->m_shardRouter)
     , dns_resolver_(server->get_dns_resolver())
     , max_sessions_per_mx_(max_per_mx)
     , idle_timeout_sec_(idle_timeout)
     , worker_id_("ob-" + std::to_string(reinterpret_cast<uintptr_t>(this)))
-    , scheduler_executor_(boost::asio::make_strand(
-          io_pool_->get_io_context()))
-    , evict_timer_(std::make_shared<boost::asio::steady_timer>(scheduler_executor_))
-    , retry_timer_(std::make_shared<boost::asio::steady_timer>(scheduler_executor_))
+    , scheduler_executor_(server->get_executor())
+    , evict_timer_(scheduler_executor_->make_timer())
+    , retry_timer_(scheduler_executor_->make_timer())
 {
+    if (!transports_ || !executors_)
+        throw std::invalid_argument("OutboundServer: runtime must provide client transports and executors");
     auto cfg = std::atomic_load(&server->m_config);
     helo_domain_ = cfg && !cfg->outbound_helo_domain.empty() && cfg->outbound_helo_domain != "outbound.local"
         ? cfg->outbound_helo_domain : server->m_domain;
@@ -101,7 +101,7 @@ void OutboundServer::stop() {
     // 取消定时器
     auto evict = evict_timer_;
     auto retry = retry_timer_;
-    boost::asio::post(scheduler_executor_, [evict, retry] { evict->cancel(); retry->cancel(); });
+    scheduler_executor_->post([evict, retry] { evict->cancel(); retry->cancel(); });
 
     std::unique_lock<std::shared_mutex> lk(mutex_);
     for (auto& [mx, sessions] : mx_sessions_)
@@ -317,7 +317,7 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
     }
 
     // 有数据，重置退避延迟
-    boost::asio::post(scheduler_executor_, [weak = weak_from_this()] {
+    scheduler_executor_->post([weak = weak_from_this()] {
         if (auto self = weak.lock()) self->retry_delay_sec_ = MIN_RETRY_DELAY_SEC;
     });
 
@@ -376,12 +376,12 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
 // ── 私有：退避重试（claim 返回空时） ─────────────────────────
 void OutboundServer::schedule_retry() {
     auto weak = weak_from_this();
-    boost::asio::post(scheduler_executor_, [weak] {
+    scheduler_executor_->post([weak] {
         auto self = weak.lock();
         if (!self || !self->running_.load()) return;
         self->retry_delay_sec_ = std::min(self->retry_delay_sec_ * 2, MAX_RETRY_DELAY_SEC);
         self->retry_timer_->expires_after(std::chrono::seconds(self->retry_delay_sec_));
-        self->retry_timer_->async_wait([weak](const boost::system::error_code& ec) {
+        self->retry_timer_->async_wait([weak](const std::error_code& ec) {
             auto self = weak.lock();
             if (ec || !self || !self->running_.load()) return;
             self->pending_count_.fetch_add(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
@@ -392,11 +392,11 @@ void OutboundServer::schedule_retry() {
 
 void OutboundServer::schedule_evict() {
     auto weak = weak_from_this();
-    boost::asio::post(scheduler_executor_, [weak] {
+    scheduler_executor_->post([weak] {
         auto self = weak.lock();
         if (!self || !self->running_.load()) return;
         self->evict_timer_->expires_after(std::chrono::seconds(30));
-        self->evict_timer_->async_wait([weak](const boost::system::error_code& ec) {
+        self->evict_timer_->async_wait([weak](const std::error_code& ec) {
             auto self = weak.lock();
             if (ec || !self || !self->running_.load()) return;
             self->evict_idle();
@@ -441,10 +441,10 @@ OutboundServer::SessionPtr OutboundServer::acquire_session(const std::string& mx
 }
 
 OutboundServer::SessionPtr OutboundServer::create_session(const std::string& mx, int port) {
-    auto pool = io_pool_;
+    auto transports = transports_;
     auto worker = worker_pool_;
     auto s = std::make_shared<OutboundSmtpSession>(
-        [pool] { return pool->get_io_context().get_executor(); },
+        [transports] { return transports->make_client_transport(); }, executors_->next_executor(),
         [worker](std::function<void()> job) { worker->post(std::move(job)); }, mx, port, helo_domain_, m_metrics);
     s->set_outbound_config(config_);
     if (completion_cb_) s->set_completion_cb(completion_cb_);

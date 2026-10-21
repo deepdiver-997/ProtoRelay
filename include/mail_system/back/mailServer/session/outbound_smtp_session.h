@@ -3,7 +3,6 @@
 #include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
 #include "mail_system/back/smtp_client/client_session.h"
-#include <boost/asio/steady_timer.hpp>
 #include <atomic>
 #include <queue>
 
@@ -17,7 +16,8 @@ class OutboundSmtpSession : public std::enable_shared_from_this<OutboundSmtpSess
 public:
     using CompletionCb = std::function<void(uint64_t, smtp::Result)>;
     using WorkerPost = std::function<void(std::function<void()>)>;
-    OutboundSmtpSession(smtp::ExecutorProvider executors, WorkerPost worker_post,
+    OutboundSmtpSession(smtp::TransportProvider transports, std::shared_ptr<pr::net::IExecutor> executor,
+                        WorkerPost worker_post,
                         std::string host, int port, std::string helo,
                         std::weak_ptr<pr::MetricsServer> metrics = {});
     void set_outbound_config(OutboundConfig config);
@@ -37,10 +37,10 @@ private:
     void complete(smtp::Result result);
     void idle();
     void quit();
-    smtp::ExecutorProvider executors_;
+    smtp::TransportProvider transports_;
     WorkerPost worker_post_;
-    boost::asio::any_io_executor executor_;
-    boost::asio::steady_timer timer_;
+    std::shared_ptr<pr::net::IExecutor> executor_;
+    std::shared_ptr<pr::net::ITimer> timer_;
     std::string host_, helo_;
     int port_;
     OutboundConfig config_;

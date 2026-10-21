@@ -2,7 +2,6 @@
 
 #include "mail_system/back/webmail/session_password.h"
 #include "mail_system/back/smtp_client/client_session.h"
-#include <boost/asio/any_io_executor.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -39,15 +38,12 @@ public:
 // 固定 loopback 提交策略；连接/协议由公共 SMTP 内核负责。
 class LoopbackSmtpSubmitter final : public ISmtpSubmitter {
 public:
-    explicit LoopbackSmtpSubmitter(boost::asio::any_io_executor executor,
-                                  uint16_t port = 587,
-                                  std::chrono::milliseconds timeout = std::chrono::seconds(30));
-    explicit LoopbackSmtpSubmitter(smtp::ExecutorProvider executor_provider,
+    explicit LoopbackSmtpSubmitter(smtp::TransportProvider transport_provider,
                                   uint16_t port = 587,
                                   std::chrono::milliseconds timeout = std::chrono::seconds(30));
     void submit_async(SubmitRequest request, Complete complete) override;
 private:
-    smtp::ExecutorProvider executor_provider_;
+    smtp::TransportProvider transport_provider_;
     uint16_t port_;
     std::chrono::milliseconds timeout_;
 };

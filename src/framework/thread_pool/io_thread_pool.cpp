@@ -1,3 +1,4 @@
+#include "framework/net/asio_client_transport.h"
 #include "framework/net/asio_server_transport.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/io_context_registry.h"
@@ -12,6 +13,10 @@ std::unique_ptr<net::IServerTransport> IOThreadPool::make_server_transport(const
 
 std::shared_ptr<net::IExecutor> IOThreadPool::next_executor() {
     return std::make_shared<net::AsioExecutor>(get_io_context().get_executor());
+}
+
+std::shared_ptr<net::IClientTransport> IOThreadPool::make_client_transport() {
+    return net::make_asio_client_transport(std::make_shared<net::AsioExecutor>(get_io_context().get_executor()));
 }
 
 IOThreadPool::IOThreadPool(size_t thread_count)

@@ -1,7 +1,6 @@
 #pragma once
 
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/ssl/context.hpp>
+#include "framework/net/client_transport.h"
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -13,7 +12,7 @@
 
 namespace mail_system::smtp {
 
-using ExecutorProvider = std::function<boost::asio::any_io_executor()>;
+using TransportProvider = std::function<std::shared_ptr<pr::net::IClientTransport>()>;
 
 enum class TlsMode { None, Implicit, StartTlsRequired };
 enum class Outcome { Ready, Accepted, Rejected, TemporaryFailure, AuthFailed,
@@ -37,8 +36,8 @@ struct ConnectOptions {
     uint16_t port = 25;
     std::string helo = "localhost";
     TlsMode tls = TlsMode::None;
-    // TLS 始终验证证书链和主机名；可注入私有 CA context，默认使用系统 CA。
-    std::shared_ptr<boost::asio::ssl::context> tls_context;
+    // TLS 始终验证证书链和主机名；私有 CA 通过数据配置注入。
+    pr::net::ClientTlsConfig tls_config;
     std::string tls_server_name; // 空时使用 host
     std::string auth_user;
     SecretPtr password; // 非空则要求服务器通告 AUTH PLAIN
@@ -57,7 +56,7 @@ struct Message {
 class ClientSession {
 public:
     using Complete = std::function<void(Result)>;
-    explicit ClientSession(boost::asio::any_io_executor executor);
+    explicit ClientSession(std::shared_ptr<pr::net::IClientTransport> transport);
     ~ClientSession();
     ClientSession(const ClientSession&) = delete;
     ClientSession& operator=(const ClientSession&) = delete;
