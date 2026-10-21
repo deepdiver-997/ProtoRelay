@@ -5,6 +5,7 @@
 // Negative auth callback evidence: docs/bugfixes/2026-10-18-webmail-shared-sessions.md.
 #undef NDEBUG
 #include "mail_system/back/storage/mail_object_key_layout.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 #include "no_mail_layout_storage.h"
 #include "mail_system/back/submission/mail_submission_service.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"

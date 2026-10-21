@@ -953,7 +953,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
 
     session->set_paused(true);
     provider->async_open_read(smtp_session->get_mail()->body_path,
-        [session, cfg](std::unique_ptr<storage::IReadStream> stream,
+        [session, cfg](std::unique_ptr<pr::IReadStream> stream,
                        const storage::IoError& read_err) {
             session->set_paused(false);
             try {
@@ -984,7 +984,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session,
-    std::unique_ptr<storage::IReadStream> body_read)
+    std::unique_ptr<pr::IReadStream> body_read)
 {
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (!smtp_session || !smtp_session->get_mail() || !body_read || body_read->empty()) {
