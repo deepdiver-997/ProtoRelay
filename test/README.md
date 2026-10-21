@@ -78,11 +78,16 @@ test/
 │   ├── imaps_test.cpp           # IMAP 服务器
 │   └── mail_server_combined.cpp # 合并服务器
 ├── scripts/                     # 测试脚本
-│   ├── integration_test.sh      # 集成测试
-│   ├── setup_test_env.py        # 测试环境初始化
-│   ├── cl.py                    # SMTP 压力测试器
-│   ├── test_auth.sh             # SMTP AUTH 测试
-│   ├── test_ports.sh            # 端口连通性测试
+│   ├── integration_test.sh      # 集成测试（起服务 + e2e）
+│   ├── setup_test_env.py        # 测试环境初始化（支持 PROTORELAY_TEST_TMP_ROOT / _PORT_BASE 隔离）
+│   ├── cleanup_test_env.sh      # 由 setup_test_env.py 生成的清理脚本
+│   ├── coverage.sh              # 覆盖率构建 + 报告（CI 调用；配 coverage_report.py）
+│   ├── webmail_send_smoke.py    # Webmail 发信/MIME 闭环冒烟
+│   ├── webmail_ui_fixture.py    # Playwright UI 夹具（真实 webmailServer + 随机账号）
+│   ├── webmail_single_login_migration_test.py
+│   ├── cl.py                    # SMTP TLS/AUTH 冒烟（压测请用 bench/ 的 smtp_client）
+│   ├── test_auth.sh             # SMTP AUTH 手工测试
+│   ├── test_ports.sh            # 端口连通性手工探测（生产端口，本地勿对线上跑）
 │   └── cleanup.sh               # 数据清理
 ├── config/                      # 测试配置
 │   ├── smtps_test.json
@@ -91,6 +96,8 @@ test/
 │   └── hash_tool.cpp            # bcrypt 密码哈希工具
 └── README.md
 ```
+
+> 多 agent 并行开发（每个 agent 独立 worktree / 构建目录 / 端口段 / 测试库）见 [`tools/agents/README.md`](../tools/agents/README.md)。
 
 ## Mock 模型与并发测试写法
 

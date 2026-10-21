@@ -23,7 +23,7 @@ Examples:
   ./link.sh smtps_test.cpp.o
   ./link.sh smtp_test.o -o smtpsServer
   ./link.sh smtps_test.cpp.o --compiler g++-13
-  ./link.sh obj/CMakeFiles/smtpsServer_obj.dir/test/smtps_test.cpp.o \
+  ./link.sh obj/CMakeFiles/smtpsServer_obj.dir/test/server/smtps_test.cpp.o \
       --obj-root obj -o smtpsServer --compiler g++-13
     ./link.sh smtps_test.cpp.o --pie
   ./link.sh smtps_test.cpp.o --dry-run

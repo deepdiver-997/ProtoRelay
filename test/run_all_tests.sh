@@ -8,8 +8,9 @@
 #
 # 环境变量：
 #   RUN_DB_TESTS=0   跳过依赖真实 MySQL 的测试（默认 1 = 包含；本机已配 db_config 时应保持 1）
+#   TEST_LOG_DIR     单测日志目录（默认 build/test-logs，随构建目录隔离，多 worktree 并行不互相覆盖）
 #
-# 退出码：0 = 全部通过；1 = 有失败/构建失败。失败详情在 /tmp/<test>.log。
+# 退出码：0 = 全部通过；1 = 有失败/构建失败。失败详情在 $TEST_LOG_DIR/<test>.log。
 # 范围说明：本脚本覆盖 C++ 单测（test/unit）；e2e/bench/fuzz 不在其中
 # （e2e 需起真实服务+DB，见 test/e2e；bench 见 test/bench）。
 
@@ -36,6 +37,8 @@ fi
 
 RUN_DB_TESTS="${RUN_DB_TESTS:-1}"
 SKIP_DB_RE='^(mariadb_async_test)$'
+LOG_DIR="${TEST_LOG_DIR:-build/test-logs}"
+mkdir -p "$LOG_DIR"
 
 pass=0; fail=0; skip=0
 failed_tests=()
@@ -49,12 +52,12 @@ for t in build/*_test; do
         skip=$((skip+1))
         continue
     fi
-    if "$t" > "/tmp/${name}.log" 2>&1; then
+    if "$t" > "$LOG_DIR/${name}.log" 2>&1; then
         echo "PASS  $name"
         pass=$((pass+1))
     else
         rc=$?
-        echo "FAIL  $name (exit $rc; log: /tmp/${name}.log)"
+        echo "FAIL  $name (exit $rc; log: $LOG_DIR/${name}.log)"
         fail=$((fail+1))
         failed_tests+=("$name")
     fi

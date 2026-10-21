@@ -14,7 +14,7 @@
     ├── smtps_real.json         # real 模式: use_database=true
     └── imaps_real.json         # real 模式: use_database=true
 
-运行时目录（/tmp/protorelay_test/，重启自动清除）:
+运行时目录（默认 /tmp/protorelay_test/，重启自动清除）:
     ├── mail/                   # 邮件落盘
     ├── attachments/            # 附件落盘
     └── logs/                   # 日志
@@ -22,6 +22,11 @@
 用法:
   python3 test/scripts/setup_test_env.py          # 生成所有
   python3 test/scripts/setup_test_env.py --clean  # 清理
+
+环境变量（多 agent worktree 并行时由 tools/agents/new-worktree.sh 设置，单人使用无需理会）:
+  PROTORELAY_TEST_TMP_ROOT   运行时目录根（默认 /tmp/protorelay_test）
+  PROTORELAY_TEST_PORT_BASE  监听端口基准：SMTP tcp/ssl/submission = base+0/+1/+2，
+                             IMAP tcp/ssl = base+3/+4（默认 2525/8465/8587 与 1414/8993）
 """
 import json
 import os
@@ -32,18 +37,31 @@ import argparse
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEST_DIR    = os.path.join(PROJECT_DIR, "test")
 CONFIG_DIR  = os.path.join(TEST_DIR, "config")
-TMP_ROOT    = "/tmp/protorelay_test"
+DEFAULT_TMP_ROOT = "/tmp/protorelay_test"
+TMP_ROOT    = os.environ.get("PROTORELAY_TEST_TMP_ROOT") or DEFAULT_TMP_ROOT
 
-# ── 端口（高端口避免 sudo）────
-SMTP_PORTS = [
-    {"type": "tcp", "port": 2525, "auth_policy": "off"},
-    {"type": "ssl", "port": 8465, "auth_policy": "on"},
-    {"type": "tcp", "port": 8587, "auth_policy": "on"},
-]
-IMAP_PORTS = [
-    {"type": "tcp", "port": 1414, "auth_policy": "off"},
-    {"type": "ssl", "port": 8993, "auth_policy": "on"},
-]
+# ── 端口（高端口避免 sudo；PROTORELAY_TEST_PORT_BASE 可整体平移到独占端口段）────
+def _ports():
+    base = os.environ.get("PROTORELAY_TEST_PORT_BASE")
+    if base:
+        b = int(base)
+        smtp = [b, b + 1, b + 2]
+        imap = [b + 3, b + 4]
+    else:
+        smtp = [2525, 8465, 8587]
+        imap = [1414, 8993]
+    smtp_ports = [
+        {"type": "tcp", "port": smtp[0], "auth_policy": "off"},
+        {"type": "ssl", "port": smtp[1], "auth_policy": "on"},
+        {"type": "tcp", "port": smtp[2], "auth_policy": "on"},
+    ]
+    imap_ports = [
+        {"type": "tcp", "port": imap[0], "auth_policy": "off"},
+        {"type": "ssl", "port": imap[1], "auth_policy": "on"},
+    ]
+    return smtp_ports, imap_ports
+
+SMTP_PORTS, IMAP_PORTS = _ports()
 
 # ── 测试账号（硬编码，不会删）────
 TEST_USER     = "test2@test.local"
@@ -177,19 +195,26 @@ def setup():
     gen_config("imapsConfig.json", "imaps_real.json", lambda c: make_real(c, "imap"))
 
     # 4. 清理脚本
+    # 内容不依赖生成时的机器路径/环境：目录由脚本自身位置推导，TMP_ROOT 运行时读环境变量，
+    # 这样被跟踪的 cleanup_test_env.sh 在任何检出、任何 worktree 里重新生成都是同一份。
     cleanup_sh = os.path.join(TEST_DIR, "scripts", "cleanup_test_env.sh")
     with open(cleanup_sh, "w") as f:
-        f.write("#!/bin/bash\nset -e\n")
-        f.write("# 清理测试环境\n")
-        f.write(f'rm -rf "{TMP_ROOT}"\n')
-        f.write(f'rm -rf "{CONFIG_DIR}/crt" "{CONFIG_DIR}/dkim" "{CONFIG_DIR}/sql_init" "{CONFIG_DIR}/sql"\n')
-        f.write(f'rm -f "{CONFIG_DIR}/create_tables.sql"\n')
-        f.write(f'rm -f "{CONFIG_DIR}/smtps_mock.json" "{CONFIG_DIR}/smtps_real.json"\n')
-        f.write(f'rm -f "{CONFIG_DIR}/imaps_mock.json" "{CONFIG_DIR}/imaps_real.json"\n')
-        f.write(f'rm -f "{CONFIG_DIR}/db_config.json" "{CONFIG_DIR}/router_config.json"\n')
-        f.write('pkill -f "smtpsServer.*test/config" 2>/dev/null || true\n')
-        f.write('pkill -f "imapsServer.*test/config" 2>/dev/null || true\n')
-        f.write('echo "Test environment cleaned."\n')
+        f.write(f'''#!/bin/bash
+# 清理测试环境（由 test/scripts/setup_test_env.py 生成，请勿手改）
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+CONFIG_DIR="${{SCRIPT_DIR}}/../config"
+TMP_ROOT="${{PROTORELAY_TEST_TMP_ROOT:-{DEFAULT_TMP_ROOT}}}"
+rm -rf "${{TMP_ROOT}}"
+rm -rf "${{CONFIG_DIR}}/crt" "${{CONFIG_DIR}}/dkim" "${{CONFIG_DIR}}/sql_init" "${{CONFIG_DIR}}/sql"
+rm -f "${{CONFIG_DIR}}/create_tables.sql"
+rm -f "${{CONFIG_DIR}}/smtps_mock.json" "${{CONFIG_DIR}}/smtps_real.json"
+rm -f "${{CONFIG_DIR}}/imaps_mock.json" "${{CONFIG_DIR}}/imaps_real.json"
+rm -f "${{CONFIG_DIR}}/db_config.json" "${{CONFIG_DIR}}/router_config.json"
+pkill -f "smtpsServer.*test/config" 2>/dev/null || true
+pkill -f "imapsServer.*test/config" 2>/dev/null || true
+echo "Test environment cleaned."
+''')
     os.chmod(cleanup_sh, 0o755)
     print(f"\n[OK] test/scripts/cleanup_test_env.sh")
 
@@ -200,6 +225,7 @@ def setup():
   Mock 模式: smtps_mock.json / imaps_mock.json (无 DB)
   Real 模式: smtps_real.json / imaps_real.json (真实 DB)
   运行时目录: {TMP_ROOT} (重启自动清除)
+  监听端口: SMTP {[p["port"] for p in SMTP_PORTS]}  IMAP {[p["port"] for p in IMAP_PORTS]}
   测试账号: {TEST_USER} / {TEST_PASSWORD}
 
 启动 Mock:
