@@ -7,6 +7,10 @@ set -e  # 任何命令失败则停止
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${SCRIPT_DIR}/artifacts}"
+# Resolve overrides before entering BUILD_DIR; relative paths otherwise nest on
+# each subsequent configure/build invocation.
+case "$BUILD_DIR" in /*) ;; *) BUILD_DIR="${SCRIPT_DIR}/${BUILD_DIR}" ;; esac
+case "$ARTIFACT_DIR" in /*) ;; *) ARTIFACT_DIR="${SCRIPT_DIR}/${ARTIFACT_DIR}" ;; esac
 EXTRA_CMAKE_ARGS_STR="${EXTRA_CMAKE_ARGS:-}"
 GENERATOR="${CMAKE_GENERATOR:-}"
 USE_BOOST_LEGACY_FIND="${USE_BOOST_LEGACY_FIND:-ON}"
