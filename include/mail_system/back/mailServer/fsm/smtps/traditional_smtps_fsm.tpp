@@ -987,7 +987,8 @@ void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
     }
     parse_mime_tree(body_read->view(), smtp_session->get_mail()->mime_root);
     auto* ctx = static_cast<SmtpsContext*>(smtp_session->get_context());
-    auto provider = ctx ? session->get_server()->m_shardRouter->get_storage(
+    auto router = smtp_session->get_server()->get_shard_router();
+    auto provider = ctx && router ? router->get_storage(
                               static_cast<size_t>(ctx->shard_index)) : nullptr;
     auto metadata = mime_metadata_store_for(provider);
     save_mime_tree(metadata, smtp_session->get_mail()->body_path,
