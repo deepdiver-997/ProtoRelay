@@ -56,7 +56,8 @@ int main() {
     {
         LineFolder f;
         std::string in = "Subject: hello\r\nFrom: a@b.c\r\n\r\nbody line\r\n";
-        std::string out = f.feed(in) + f.flush();
+        std::string out = f.feed(in);
+        out += f.flush();
         assert(out == in);
         std::cout << "  [PASS] passthrough_short_lines\n";
     }
@@ -65,7 +66,8 @@ int main() {
     {
         LineFolder f;
         std::string line = repeat("A", 6000);
-        std::string out = f.feed(line + "\r\n") + f.flush();
+        std::string out = f.feed(line + "\r\n");
+        out += f.flush();
         assert(out.find("\r\n ") != std::string::npos);   // 确实发生了折叠
         assert(unfold(out) == line + "\r\n");
         check_line_lengths("long_ascii", out);
@@ -76,7 +78,8 @@ int main() {
     {
         LineFolder f;
         std::string line = repeat("\xe4\xb8\xad", 800);   // 2400 字节
-        std::string out = f.feed(line + "\r\n") + f.flush();
+        std::string out = f.feed(line + "\r\n");
+        out += f.flush();
         check_line_lengths("long_utf8", out);
         assert(unfold(out) == line + "\r\n");
         // 每行起始字节都不是 UTF-8 续字节（10xxxxxx）
@@ -94,7 +97,8 @@ int main() {
     {
         std::string line = repeat("B", 5000);
         LineFolder whole;
-        std::string expect = whole.feed(line + "\r\nmore\r\n") + whole.flush();
+        std::string expect = whole.feed(line + "\r\nmore\r\n");
+        expect += whole.flush();
 
         LineFolder piecewise;
         std::string got;
@@ -125,7 +129,8 @@ int main() {
         LineFolder f;
         std::string long_subject = "Subject: " + repeat("x", 5000);
         std::string in = "From: a@b.c\r\n" + long_subject + "\r\nTo: t@x.y\r\n\r\n" + repeat("z", 100) + "\r\n..stuffed\r\n";
-        std::string out = f.feed(in) + f.flush();
+        std::string out = f.feed(in);
+        out += f.flush();
         assert(out.substr(0, 13) == "From: a@b.c\r\n");
         assert(out.find("\r\n ") != std::string::npos);
         assert(out.find("\r\n.stuffed\r\n") != std::string::npos);  // "..stuffed" 还原为 ".stuffed"
@@ -145,7 +150,8 @@ int main() {
     // 8. 去点填充基础：'.' 起始行剥一个前导点，普通行不动
     {
         LineFolder f;
-        std::string out = f.feed("a\r\n..b\r\n.c\r\nd\r\n") + f.flush();
+        std::string out = f.feed("a\r\n..b\r\n.c\r\nd\r\n");
+        out += f.flush();
         assert(out == "a\r\n.b\r\nc\r\nd\r\n");
         std::cout << "  [PASS] unstuff_basic\n";
     }
@@ -154,7 +160,11 @@ int main() {
     //    （这是 2026-09-25 旧非流式实现的跨块 bug 场景）
     {
         LineFolder f;
-        std::string out = f.feed("x\r\n..") + f.feed("y\r\nz\r\n") + f.flush();
+        // Stateful calls must be sequenced explicitly: operator+ does not
+        // guarantee the order in which chunks are fed or the folder is flushed.
+        std::string out = f.feed("x\r\n..");
+        out += f.feed("y\r\nz\r\n");
+        out += f.flush();
         assert(out == "x\r\n.y\r\nz\r\n");
         std::cout << "  [PASS] unstuff_chunk_boundary\n";
     }
@@ -172,7 +182,8 @@ int main() {
     // 11. 单点行（stuffed 空行）还原为空行
     {
         LineFolder f;
-        std::string out = f.feed("a\r\n.\r\nb\r\n") + f.flush();
+        std::string out = f.feed("a\r\n.\r\nb\r\n");
+        out += f.flush();
         assert(out == "a\r\n\r\nb\r\n");
         std::cout << "  [PASS] unstuff_single_dot_line\n";
     }
