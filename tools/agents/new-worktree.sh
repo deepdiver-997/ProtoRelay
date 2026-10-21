@@ -107,8 +107,12 @@ for example in smtpsConfig imapsConfig; do
     fi
 done
 if [ ! -f "${WT}/config/crt/server.crt" ] || [ ! -f "${WT}/config/crt/server.key" ]; then
-    log "没有 TLS 证书，生成自签证书"
-    bash "${HUB}/scripts/generate_server_cert.sh" -o "${WT}/config/crt" -f >/dev/null
+    if [ -x "${HUB}/scripts/generate_server_cert.sh" ]; then
+        log "没有 TLS 证书，生成自签证书"
+        bash "${HUB}/scripts/generate_server_cert.sh" -o "${WT}/config/crt" -f >/dev/null
+    else
+        warn "worktree 缺 TLS 证书且项目里没有 scripts/generate_server_cert.sh —— 跳过（按项目策略自行补）"
+    fi
 fi
 
 # ---- 3. 资源分配 ----

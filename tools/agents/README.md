@@ -215,7 +215,7 @@ KEY=VALUE 格式，bash 直接 source；项目内覆盖机器级，都缺失则�
    与创作权，本项目是端口段/库名；机器级参数放全局母本那份 agents.env）。
 3. 把本仓库 `AGENTS.md` 第 6 节（资源上限）原样插进新项目的 AGENTS.md：并行模式的存在、
    有人监管可直接在 hub、无人监管必须并行模式 + 人工设定经验证的磁盘预算、编译并行度用默认、不无限制吃资源
-   （现成段落：`~/.agent-parallel/docs/agents-md-资源上限.md`）。
+   （现成段落：`~/.agent-parallel/docs/agents-md-resource-limits.zh.md`）。
 4. 人工执行一次 `budget.sh set <GB>`（全设备只需要一次，账本是共享的）。
 5. 跑一遍 `new-worktree.sh demo → build.sh Release → remove-worktree.sh demo` 验证管道。
 

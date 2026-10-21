@@ -60,15 +60,18 @@ PY
 }
 
 build_prompt() { # $1=name $2=worktree $3=run目录 $4=任务文件 → stdout
+    # 完成标准里的构建/测试命令可在 agents.env 里按项目改写
+    local build_cmd="${BUILD_CMD:-./build.sh Release}"
+    local test_cmd="${TEST_CMD:-bash test/run_all_tests.sh --no-build}"
     local criteria
     if [ "${SPAWN_LIGHT:-0}" = "1" ]; then
         criteria='- 以任务自身的要求为完成标准（本 run 为轻任务，不强制全量构建/单测）
 - 把最终报告写到：'"$3"'/report.md'
     else
-        criteria='- ./build.sh Release 绿（排队全局构建锁是正常现象）
-- 与任务相关的单测绿：bash test/run_all_tests.sh --no-build（日志在 build/test-logs/）
-- 所有改动已提交到 feat/'"$1"'
-- 把最终报告写到：'"$3"'/report.md，小节：结果 / 做了什么 / 提交列表 / 测试结果 / 遗留问题'
+        criteria="- ${build_cmd} 绿（排队全局构建锁是正常现象）
+- 与任务相关的单测绿：${test_cmd}
+- 所有改动已提交到 feat/$1
+- 把最终报告写到：$3/report.md，小节：结果 / 做了什么 / 提交列表 / 测试结果 / 遗留问题"
     fi
     cat <<EOF
 你是本仓库的一个无头 agent 会话（同一时刻只做这一个任务）。
