@@ -1,5 +1,5 @@
 #pragma once
-#include "framework/server_config.h"
+#include "mail_system/back/server_config.h"
 namespace mail_system::submission {
 inline outbound::OutboundConfig outbound_config(const ServerConfig &cfg) {
     outbound::OutboundConfig out;

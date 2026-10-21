@@ -46,7 +46,7 @@ namespace {
 // ====================================================================
 template <typename ConnectionType>
 ImapsSession<ConnectionType>::ImapsSession(
-    pr::ServerBase* server,
+    MailServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm)
     : pr::SessionBase<ConnectionType>(std::move(connection), server)

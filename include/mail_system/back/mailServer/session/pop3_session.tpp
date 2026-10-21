@@ -8,7 +8,7 @@ namespace mail_system {
 
 template <typename ConnectionType>
 Pop3Session<ConnectionType>::Pop3Session(
-    pr::ServerBase* server,
+    MailServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalPop3Fsm<ConnectionType>> fsm)
     : pr::SessionBase<ConnectionType>(std::move(connection), server)

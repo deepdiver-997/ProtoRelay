@@ -2,6 +2,7 @@
 #define IMAPS_SERVER_H
 
 #include "framework/tcp_server_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include "mail_system/back/mailServer/session/imaps_session.h"
@@ -10,7 +11,7 @@
 namespace mail_system {
 
 class ImapsServer : public pr::TcpServerBase<ImapsSession<pr::TcpConnection>,
-                                          ImapsSession<pr::SslConnection>> {
+                                          ImapsSession<pr::SslConnection>, MailServerBase> {
 public:
     ImapsServer(const ServerConfig& config,
          std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,

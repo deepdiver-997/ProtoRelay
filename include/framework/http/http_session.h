@@ -13,7 +13,7 @@
 #include "framework/thread_pool/thread_pool_base.h"
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
-#include "mail_system/back/common/logger.h"
+#include "framework/log/log_macros.h"
 #include "framework/http/http_types.hpp"
 #include "framework/http/http_fsm.h"
 #include <atomic>

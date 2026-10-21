@@ -14,13 +14,10 @@
 
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/worker_thread_pool.h"
-#include "framework/db/db_pool.h"
-#include "mail_system/back/router/static_shard_router.h"
-#include "mail_system/back/storage/i_storage_provider.h"
 #include "framework/tcp_server_base.h"
 #include "framework/net/asio_connection.h"
 
-using namespace mail_system;
+using namespace pr;
 
 namespace {
 
@@ -67,12 +64,9 @@ struct HandoffTestServer : pr::TcpServerBase<FakeTcpSession, RecordingSslSession
 
 ServerConfig make_cfg() {
     ServerConfig cfg;
-    cfg.use_database                = false;
-    cfg.storage.provider            = "null";
     cfg.io_thread_count             = 0;
     cfg.worker_thread_count         = 0;
     cfg.metrics_enabled             = false;
-    cfg.system_domain               = "test.local";
     cfg.intrusion_detection_enabled = false;
     cfg.log_level                   = "off";
     cfg.log_to_file                 = false;
@@ -81,22 +75,17 @@ ServerConfig make_cfg() {
     return cfg;
 }
 
-// 纯 DI：pr::ServerBase 三件套缺一不可。本测试不触碰 DB/存储，显式传最小 null-object。
+// Generic transport tests inject only the IO and worker runtimes.
 struct DiResources {
     std::shared_ptr<pr::IOThreadPool> io;
     std::shared_ptr<pr::WorkerThreadPool> worker;
-    std::shared_ptr<mail_system::router::IShardRouter> router;
 };
 static DiResources make_resources() {
     auto io = std::make_shared<pr::IOThreadPool>(1);
     io->start();
     auto worker = std::make_shared<pr::WorkerThreadPool>(1);
     worker->start();
-    auto router = std::make_shared<mail_system::router::StaticShardRouter>(
-        std::vector<std::pair<std::string, int>>{}, 0,
-        std::vector<std::shared_ptr<pr::DBPool>>{},
-        std::vector<std::shared_ptr<mail_system::storage::IStorageProvider>>{});
-    return {io, worker, router};
+    return {io, worker};
 }
 
 } // namespace
@@ -109,7 +98,7 @@ int main() {
     // 用例 1：端口在 m_listener_configs 里 → 完整透传监听器配置
     {
         auto di = make_resources();
-        HandoffTestServer server(make_cfg(), di.io, di.worker, di.router);
+        HandoffTestServer server(make_cfg(), di.io, di.worker);
         tcp::acceptor acc(io, tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
         uint16_t port = acc.local_endpoint().port();
 
@@ -135,7 +124,7 @@ int main() {
     // 用例 2：端口不在表里（如测试外接）→ 安全回退默认配置，不崩
     {
         auto di = make_resources();
-        HandoffTestServer server(make_cfg(), di.io, di.worker, di.router);
+        HandoffTestServer server(make_cfg(), di.io, di.worker);
         tcp::acceptor acc(io, tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
         (void)acc.local_endpoint().port();
 

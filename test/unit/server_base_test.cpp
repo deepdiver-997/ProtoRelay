@@ -24,7 +24,7 @@
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "framework/metrics_server.h"
 #include "framework/net/dns_resolver.h"
-#include "framework/server_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "framework/server_config.h"
 #include "framework/session_base.h"
 #include "framework/connection/tcp_connection.h"
@@ -53,12 +53,12 @@ std::filesystem::path tmp_dir() {
 }
 
 // pr::ServerBase 是抽象基类：实现纯虚接口的最小具体子类
-struct TestServerBase : pr::ServerBase {
+struct TestServerBase : MailServerBase {
     TestServerBase(const ServerConfig& c,
                    std::shared_ptr<pr::ThreadPoolBase> io,
                    std::shared_ptr<pr::ThreadPoolBase> worker,
                    std::shared_ptr<router::IShardRouter> router)
-        : pr::ServerBase(c, io, worker, router) {}
+        : MailServerBase(c, io, worker, router) {}
     void start() override {}
     bool should_reject_connection(std::string& reason, const std::string&) const override {
         reason.clear();
@@ -149,6 +149,19 @@ int main() {
     auto dir = tmp_dir();
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
+
+    // Mail reload must publish one snapshot to protocol and generic session code.
+    {
+        TestServerBase server(make_cfg(), io_pool, wk_pool, null_router);
+        auto path = dir / "snapshot.json";
+        { std::ofstream out(path); out << R"({"read_timeout":17,"log_level":"off"})"; }
+        expect_true(server.reload_config(path.string()), "mail reload succeeds");
+        pr::ServerBase& generic = server;
+        expect_true(generic.config_snapshot()->read_timeout == 17,
+                    "generic sessions see the published mail configuration");
+        expect_true(generic.config_snapshot().get() == std::atomic_load(&server.m_config).get(),
+                    "mail and framework share the same configuration snapshot");
+    }
 
     // 1. 构造 + 生命周期状态
     {

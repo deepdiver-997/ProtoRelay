@@ -2,6 +2,7 @@
 #define POP3_SERVER_H
 
 #include "framework/tcp_server_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h"
 #include "mail_system/back/mailServer/session/pop3_session.h"
 #include "framework/net/executor.h"
@@ -9,7 +10,7 @@
 namespace mail_system {
 
 class Pop3Server : public pr::TcpServerBase<Pop3Session<pr::TcpConnection>,
-                                         Pop3Session<pr::SslConnection>> {
+                                         Pop3Session<pr::SslConnection>, MailServerBase> {
 public:
     Pop3Server(const ServerConfig& config,
          std::shared_ptr<pr::ThreadPoolBase> ioThreadPool,

@@ -2,7 +2,7 @@
 #define TRADITIONAL_POP3_FSM_TPP
 
 #include "mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm.h"
-#include "framework/server_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/password_rehash.h"
@@ -532,7 +532,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
     std::string pwd = std::move(password);
     std::string new_session_id = std::to_string(
         algorithm::get_snowflake_generator().next_id());
-    auto* srv = session->get_server();
+    auto* srv = static_cast<MailServerBase*>(session->get_server());
 
     auto finish_fail = [self, srv](const std::string& reply, const std::string& metric_label) {
         if (!self || self->is_closed()) return;
@@ -782,7 +782,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
     auto router = m_shardRouter;
     auto worker = m_workerThreadPool;
     int shard = ctx->shard_index;
-    auto* srv = session->get_server();
+    auto* srv = static_cast<MailServerBase*>(session->get_server());
     if (!worker) {
         session->set_paused(false);
         send_line(session, "-ERR Server not ready");
@@ -860,7 +860,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_dele(
     }
     ctx->deleted.insert(target_id);
     send_line(session, "+OK message " + std::to_string(n) + " deleted");
-    if (auto* srv = session->get_server()) {
+    if (auto* srv = static_cast<MailServerBase*>(session->get_server())) {
         if (auto m = srv->get_metrics().lock()) {
             m->inc_counter("protorelay_pop3_dele_total", {}, 1);
         }

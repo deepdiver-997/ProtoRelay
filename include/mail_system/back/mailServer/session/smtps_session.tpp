@@ -6,7 +6,7 @@ namespace mail_system {
 
 template <typename ConnectionType>
 SmtpsSession<ConnectionType>::SmtpsSession(
-    pr::ServerBase* server,
+    MailServerBase* server,
     std::unique_ptr<ConnectionType> connection,
     std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm
 ) : pr::SessionBase<ConnectionType>(std::move(connection), server)
@@ -212,7 +212,7 @@ void SmtpsSession<ConnectionType>::handle_write_failure() {
         LOG_SESSION_WARN("Mail {} write failed after processing started, submitting delete task", this->get_mail()->id);
         if (persistent_queue_) {
             auto mail_ptr = this->get_mail();
-            this->m_server->m_workerThreadPool->submit([this, mail_ptr]() {
+            this->get_server()->m_workerThreadPool->submit([this, mail_ptr]() {
                 persistent_queue_->delete_task(mail_ptr);
             });
         }
@@ -263,12 +263,12 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     this->get_mail()->subject = "(无主题)";
     this->get_mail()->persist_status = persist_storage::PersistStatus::PENDING;
 
-    auto storage_provider = this->m_server->m_shardRouter->get_storage(
+    auto storage_provider = this->get_server()->m_shardRouter->get_storage(
         static_cast<size_t>(this->context_.shard_index));
     if (storage_provider) {
         this->get_mail()->body_path = storage_provider->build_mail_body_key(this->get_mail()->id);
     } else {
-        auto cfg = std::atomic_load(&this->m_server->m_config);
+        auto cfg = std::atomic_load(&this->get_server()->m_config);
         std::string body_path = cfg->mail_storage_path;
         if (!body_path.empty() && body_path.back() != '/' && body_path.back() != '\\') {
             body_path.push_back('/');
@@ -419,9 +419,9 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
     }
 
     if (!mail_ptr->body_path.empty()) {
-        if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
+        if (this->get_server()->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
             storage::IoError error;
-            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(mail_ptr->body_path, error)) {
+            if (this->get_server()->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(mail_ptr->body_path, error)) {
                 LOG_SESSION_INFO("Deleted mail body file: {}", mail_ptr->body_path);
             } else {
                 LOG_SESSION_WARN("Failed to delete mail body file: {}, error={}", mail_ptr->body_path, error.message);
@@ -435,9 +435,9 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
 
     for (const auto& att : mail_ptr->attachments) {
         if (!att.filepath.empty()) {
-            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
+            if (this->get_server()->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
                 storage::IoError error;
-                if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(att.filepath, error)) {
+                if (this->get_server()->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(att.filepath, error)) {
                     LOG_SESSION_INFO("Deleted attachment file: {}", att.filepath);
                 } else {
                     LOG_SESSION_WARN("Failed to delete attachment file: {}, error={}", att.filepath, error.message);

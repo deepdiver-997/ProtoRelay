@@ -30,12 +30,12 @@ using namespace mail_system;
 
 // ========== 测试夹具 ==========
 
-struct TestServer : pr::ServerBase {
+struct TestServer : MailServerBase {
     TestServer(const ServerConfig& c,
                std::shared_ptr<pr::ThreadPoolBase> io,
                std::shared_ptr<pr::ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : pr::ServerBase(c, io, w, std::move(r)) {}
+        : MailServerBase(c, io, w, std::move(r)) {}
     void start() override {}
     bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };

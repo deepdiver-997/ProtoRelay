@@ -5,7 +5,6 @@
 #include "framework/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
-#include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/sql_queries.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
@@ -18,7 +17,6 @@
 #include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
-#include <boost/asio/ssl.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>

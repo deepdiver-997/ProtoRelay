@@ -5,6 +5,7 @@
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/session_base.h"
+#include "mail_system/back/mailServer/mail_server_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include <algorithm>
@@ -21,8 +22,9 @@ namespace mail_system {
 template <typename ConnectionType>
 class ImapsSession : public pr::SessionBase<ConnectionType> {
 public:
+    MailServerBase* get_server() const { return static_cast<MailServerBase*>(this->m_server); }
     ImapsSession(
-        pr::ServerBase* server,
+        MailServerBase* server,
         std::unique_ptr<ConnectionType> connection,
         std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm);
 

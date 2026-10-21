@@ -373,7 +373,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
 {
     // 自动补 @domain（兼容只传本地部分的客户端）
     if (!username.empty() && username.find('@') == std::string::npos) {
-        auto config = std::atomic_load(&session->get_server()->m_config);
+        auto config = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
         username += "@" + config->system_domain;
         LOG_IMAP_DEBUG("Auto-domain applied: {}@{}", username, config->system_domain);
     }
@@ -1052,7 +1052,7 @@ void TraditionalImapsFsm<ConnectionType>::fetch_from_mails(
     state->header_fields_not = header_fields_not;
     state->header_fields_filter = std::move(header_fields_filter);
     state->body_sections = std::move(body_sections);
-    auto* srv = self->get_server();
+    auto* srv = static_cast<MailServerBase*>(self->get_server());
     state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
 
     // 正文读取走 async：本地内联（行为与同步版一致），远程后端由装饰器
@@ -1725,7 +1725,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
                 LOG_IMAP_ERROR("Error sending STARTTLS response: {}", ec.message());
                 return;
             }
-            auto server = static_cast<ImapsServer*>(self->get_server());
+            auto server = static_cast<ImapsServer*>(static_cast<MailServerBase*>(self->get_server()));
             auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
             server->handoff_starttls(self->release_connection(), std::move(trace));
         }

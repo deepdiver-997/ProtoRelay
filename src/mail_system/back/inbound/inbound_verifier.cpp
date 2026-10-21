@@ -3,7 +3,7 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/common/account_policy.h"
-#include "framework/server_config.h"
+#include "mail_system/back/server_config.h"
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
