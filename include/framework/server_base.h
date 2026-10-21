@@ -63,11 +63,10 @@ public:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::string m_configFilePath;
-    std::shared_ptr<Config> m_config;
     // A single virtual snapshot keeps sessions on their application's current
     // immutable configuration without exposing application types to the framework.
     virtual std::shared_ptr<const Config> config_snapshot() const {
-        return std::atomic_load(&m_config);
+        return std::atomic_load(&framework_config_);
     }
 
     // ── 连接计数 ──────────────────────────────────────────────
@@ -124,6 +123,11 @@ protected:
     std::shared_ptr<MetricsServer> m_metricsServer;
 
     std::atomic<ServerState> m_state{ServerState::Stopped};
+
+private:
+    // Framework clients use config_snapshot(); applications may override it to
+    // publish their richer configuration without exposing a stale sliced copy.
+    std::shared_ptr<Config> framework_config_;
 };
 
 } // namespace pr

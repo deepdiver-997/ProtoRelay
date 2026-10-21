@@ -16,6 +16,7 @@ public:
     MailServerBase(const Config& config, std::shared_ptr<pr::ThreadPoolBase> io,
                    std::shared_ptr<pr::ThreadPoolBase> workers,
                    std::shared_ptr<router::IShardRouter> router);
+    ~MailServerBase() override;
     std::shared_ptr<const pr::ServerConfig> config_snapshot() const override {
         return std::atomic_load(&m_config);
     }

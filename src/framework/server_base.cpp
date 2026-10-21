@@ -20,7 +20,7 @@ ServerBase::ServerBase(const Config& config,
                        std::shared_ptr<ThreadPoolBase> workerThreadPool)
     : m_ioThreadPool(std::move(ioThreadPool)),
       m_workerThreadPool(std::move(workerThreadPool)),
-      m_config(std::make_shared<Config>(config)) {
+      framework_config_(std::make_shared<Config>(config)) {
     if (!m_ioThreadPool || !m_workerThreadPool)
         throw std::invalid_argument("ServerBase: IO and worker runtimes are required");
     if (!m_ioThreadPool->is_running() || !m_workerThreadPool->is_running())
@@ -139,7 +139,7 @@ bool ServerBase::reload_config(const std::string& json_file) {
     m_configFilePath = json_file;
     Config replacement = *config_snapshot();
     if (!replacement.loadFromFile(json_file) || !validate_reload_structure(replacement)) return false;
-    std::atomic_store(&m_config, std::make_shared<Config>(std::move(replacement)));
+    std::atomic_store(&framework_config_, std::make_shared<Config>(std::move(replacement)));
     Logger::get_instance().set_level(Logger::string_to_level(config_snapshot()->log_level));
     LOG_SERVER_INFO("Config reloaded: log_level={}", config_snapshot()->log_level);
     return true;

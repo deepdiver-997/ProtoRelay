@@ -11,6 +11,13 @@ MailServerBase::MailServerBase(const Config& config, std::shared_ptr<pr::ThreadP
     if (!m_shardRouter) throw std::invalid_argument("MailServerBase: shard router is required");
 }
 
+MailServerBase::~MailServerBase() {
+    // Metrics render/reload callbacks reference mail members. Quiesce them while
+    // those members still exist, even for a paused or maintenance-only server.
+    // Shared application runtimes remain owned by the composition root.
+    try { stop_metrics_server(); } catch (...) {}
+}
+
 void MailServerBase::increment_mails_accepted() {
     mails_accepted_total_.fetch_add(1, std::memory_order_relaxed);
     push_metric_counter("protorelay_mails_accepted_total", {}, 1);

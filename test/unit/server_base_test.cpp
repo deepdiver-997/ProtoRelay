@@ -24,6 +24,7 @@
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "framework/metrics_server.h"
 #include "framework/net/dns_resolver.h"
+#include "framework/net/server_transport.h"
 #include "mail_system/back/mailServer/mail_server_base.h"
 #include "framework/server_config.h"
 #include "framework/session_base.h"
@@ -67,6 +68,44 @@ struct TestServerBase : MailServerBase {
     // 暴露 protected 启动方法供测试调
     using pr::ServerBase::start_metrics_server;
     using pr::ServerBase::stop_metrics_server;
+};
+
+// Deterministic lifecycle probe: no sockets or IO threads are created.
+struct MetricsStopProbeTransport : pr::net::IServerTransport {
+    std::shared_ptr<bool> stopped;
+    std::vector<pr::ListenerConfig> configured;
+    MetricsStopProbeTransport(std::shared_ptr<bool> state, std::vector<pr::ListenerConfig> listeners)
+        : stopped(std::move(state)), configured(std::move(listeners)) {}
+    const std::vector<pr::ListenerConfig>& listeners() const override { return configured; }
+    void start(AcceptHandler) override {}
+    void stop() override { *stopped = true; }
+    void configure_tls(const pr::net::TlsConfig&) override {}
+    std::unique_ptr<pr::IConnection> upgrade_tls(std::unique_ptr<pr::IConnection> connection) override {
+        return connection;
+    }
+};
+struct MetricsStopProbeRuntime : pr::ThreadPoolBase, pr::net::IServerTransportProvider {
+    std::shared_ptr<bool> stopped = std::make_shared<bool>(false);
+    void start() override {}
+    void stop(bool = true) override {}
+    size_t thread_count() const override { return 1; }
+    bool is_running() const override { return true; }
+    void post_impl(std::function<void()> task) override { task(); }
+    std::unique_ptr<pr::net::IServerTransport> make_server_transport(
+            const pr::net::ServerTransportConfig& config) override {
+        return std::make_unique<MetricsStopProbeTransport>(stopped, config.listeners);
+    }
+};
+struct MetricsLifetimeRouter : router::IShardRouter {
+    std::shared_ptr<bool> stopped, released_after_stop;
+    MetricsLifetimeRouter(std::shared_ptr<bool> stop, std::shared_ptr<bool> released)
+        : stopped(std::move(stop)), released_after_stop(std::move(released)) {}
+    ~MetricsLifetimeRouter() override { *released_after_stop = *stopped; }
+    int route(const std::string&) override { return -1; }
+    size_t shard_count() const override { return 0; }
+    const char* name() const override { return "lifetime-probe"; }
+    std::shared_ptr<pr::DBPool> get_db_pool(size_t) override { return {}; }
+    std::shared_ptr<pr::storage::IStorageProvider> get_storage(size_t) override { return {}; }
 };
 
 // 手写 HTTP GET：拼 HTTP/1.1 请求 + 解析 body。不用 libcurl。
@@ -161,6 +200,24 @@ int main() {
                     "generic sessions see the published mail configuration");
         expect_true(generic.config_snapshot().get() == std::atomic_load(&server.m_config).get(),
                     "mail and framework share the same configuration snapshot");
+    }
+
+    // The mail layer must quiesce metrics before releasing router/config state,
+    // including a server whose lifecycle is still Paused.
+    {
+        auto runtime = std::make_shared<MetricsStopProbeRuntime>();
+        auto released_after_stop = std::make_shared<bool>(false);
+        auto cfg = make_cfg();
+        cfg.metrics_enabled = true;
+        {
+            auto router = std::make_shared<MetricsLifetimeRouter>(runtime->stopped, released_after_stop);
+            TestServerBase server(cfg, runtime, wk_pool, std::move(router));
+            server.start_metrics_server();
+            expect_true(!*runtime->stopped, "metrics started while server paused");
+        }
+        expect_true(*runtime->stopped && *released_after_stop,
+                    "metrics stopped before mail router destruction");
+        expect_true(runtime->is_running() && wk_pool->is_running(), "shared runtimes remain running");
     }
 
     // 1. 构造 + 生命周期状态
