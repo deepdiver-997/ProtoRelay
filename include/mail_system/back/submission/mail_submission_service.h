@@ -1,8 +1,10 @@
 #pragma once
 #include "mail_system/back/common/account_policy.h"
-#include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/server_config.h"
 #include "framework/net/executor.h"
 #include "mail_system/back/algorithm/snow.h"
+
+namespace mail_system::persist_storage { class PersistentQueue; }
 
 namespace mail_system::submission {
 using ExecutorProvider = std::function<std::shared_ptr<pr::net::IExecutor>()>;

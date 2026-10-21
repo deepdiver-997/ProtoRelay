@@ -1,4 +1,7 @@
 #include "mail_system/back/submission/mail_submission_service.h"
+#include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/db/sql_queries.h"
+#include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/algorithm/smtp_utils.h"

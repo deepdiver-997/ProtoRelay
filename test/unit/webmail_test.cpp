@@ -17,6 +17,7 @@
 #include "mail_system/back/webmail/mail_service.h"
 #include "mail_system/back/webmail/session_store.h"
 #include "mail_system/back/common/bcrypt.h"
+#include "mail_system/back/common/credential_stamp.h"
 #include "mail_system/back/common/mime_composer.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/router/static_shard_router.h"

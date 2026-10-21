@@ -11,6 +11,10 @@ function(protorelay_module target)
     target_compile_features(${target} PUBLIC cxx_std_17)
     target_compile_definitions(${target} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=$<BOOL:${ENABLE_INBOUND_DEDUP_CHECK}>)
     target_link_libraries(${target} PUBLIC protorelay_logging nlohmann_json::nlohmann_json Threads::Threads)
+    if(ENABLE_TSAN)
+        target_compile_options(${target} PRIVATE -fsanitize=thread -g -O1)
+        target_link_options(${target} PUBLIC -fsanitize=thread)
+    endif()
     if(ENABLE_ASAN OR ENABLE_ASAN_SERVER)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
         target_link_options(${target} PUBLIC -fsanitize=address,undefined)
@@ -20,6 +24,7 @@ endfunction()
 protorelay_module(protorelay_framework
     src/framework/server_base.cpp
     src/framework/session_base_inst.cpp)
+protorelay_module(protorelay_readiness src/framework/net/poll_readiness_waiter.cpp)
 protorelay_module(protorelay_runtime
     ${WORKER_SRCS}
     src/framework/thread_pool/io_thread_pool.cpp
@@ -68,7 +73,7 @@ if(HAVE_MARIADB)
     protorelay_module(protorelay_db_mariadb
         src/mail_system/back/db/mariadb_pool.cpp src/mail_system/back/db/mariadb_service.cpp)
     target_include_directories(protorelay_db_mariadb SYSTEM PRIVATE ${MARIADB_INCLUDE_DIR})
-    target_link_libraries(protorelay_db_mariadb PRIVATE protorelay_runtime protorelay_db_mysql ${CMAKE_DL_LIBS})
+    target_link_libraries(protorelay_db_mariadb PRIVATE protorelay_readiness protorelay_db_mysql ${CMAKE_DL_LIBS})
 endif()
 
 protorelay_module(protorelay_smtp_client src/mail_system/back/smtp_client/client_session.cpp)
@@ -80,6 +85,8 @@ protorelay_module(protorelay_mail_core
     src/mail_system/back/db/sql_queries.cpp src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp src/mail_system/back/common/bcrypt.cpp
     src/mail_system/back/common/account_policy.cpp
+    src/mail_system/back/common/account_authentication.cpp
+    src/mail_system/back/repository/mailbox_repository.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp

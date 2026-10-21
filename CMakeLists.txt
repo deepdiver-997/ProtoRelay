@@ -328,7 +328,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # ===== 公共源文件 =====
-set(ASIO_NETWORK_SRCS src/framework/net/asio_connection.cpp src/framework/net/asio_server_transport.cpp src/framework/net/asio_client_transport.cpp)
+set(ASIO_NETWORK_SRCS src/framework/net/asio_connection.cpp src/framework/net/asio_server_transport.cpp src/framework/net/asio_client_transport.cpp src/framework/net/asio_readiness_waiter.cpp)
 add_library(protorelay_asio STATIC ${ASIO_NETWORK_SRCS})
 target_include_directories(protorelay_asio PUBLIC "${CMAKE_SOURCE_DIR}/include")
 target_include_directories(protorelay_asio SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
@@ -340,6 +340,12 @@ elseif(OPENSSL_LIBRARIES)
     target_link_libraries(protorelay_asio PUBLIC ${OPENSSL_LIBRARIES})
 endif()
 list(APPEND LINK_LIBRARIES protorelay_asio)
+if(ENABLE_TSAN)
+    foreach(_adapter protorelay_logging protorelay_asio)
+        target_compile_options(${_adapter} PRIVATE -fsanitize=thread -g -O1)
+        target_link_options(${_adapter} PUBLIC -fsanitize=thread)
+    endforeach()
+endif()
 
 set(COMMON_SRCS
     src/mail_system/back/cli/help_text.cpp
@@ -348,6 +354,7 @@ set(COMMON_SRCS
     src/mail_system/back/db/mysql_service.cpp
     src/mail_system/back/db/sql_queries.cpp
     src/framework/server_base.cpp
+    src/framework/net/poll_readiness_waiter.cpp
     src/mail_system/back/bootstrap.cpp
     src/mail_system/back/mailServer/mail_server_base.cpp
     ${WORKER_SRCS}
@@ -366,6 +373,8 @@ set(COMMON_SRCS
     src/mail_system/back/smtp_client/client_session.cpp
     src/mail_system/back/common/bcrypt.cpp
     src/mail_system/back/common/account_policy.cpp
+    src/mail_system/back/common/account_authentication.cpp
+    src/mail_system/back/repository/mailbox_repository.cpp
     src/mail_system/back/submission/mail_submission_service.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
@@ -786,10 +795,28 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(thread_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(thread_pool_test)
 
+    add_executable(readiness_waiter_test test/unit/readiness_waiter_test.cpp)
+    target_include_directories(readiness_waiter_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(readiness_waiter_test)
+    target_link_libraries(readiness_waiter_test PRIVATE protorelay_readiness protorelay_asio)
+    add_executable(async_db_adapter_test test/unit/async_db_adapter_test.cpp)
+    target_include_directories(async_db_adapter_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+    target_link_libraries(async_db_adapter_test PRIVATE Threads::Threads)
+
+    add_executable(account_authentication_test test/unit/account_authentication_test.cpp)
+    target_include_directories(account_authentication_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(account_authentication_test)
+    target_link_libraries(account_authentication_test PRIVATE protorelay_mail_core)
+    add_executable(mailbox_repository_test
+        src/mail_system/back/repository/mailbox_repository.cpp
+        src/mail_system/back/db/sql_queries.cpp test/unit/mailbox_repository_test.cpp)
+    target_include_directories(mailbox_repository_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(mailbox_repository_test)
+
     add_executable(smtp_client_contract_test
         src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_contract_test.cpp)
     target_include_directories(smtp_client_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
-    target_link_libraries(smtp_client_contract_test PRIVATE protorelay_logging OpenSSL::Crypto)
+    target_link_libraries(smtp_client_contract_test PRIVATE protorelay_logging OpenSSL::Crypto nlohmann_json::nlohmann_json)
     add_executable(storage_boundary_test test/unit/storage_boundary_test.cpp)
     target_include_directories(storage_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
     target_link_libraries(storage_boundary_test PRIVATE Threads::Threads)
@@ -1047,6 +1074,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
     if(ENABLE_ASAN)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
+            readiness_waiter_test async_db_adapter_test account_authentication_test
+            mailbox_repository_test smtp_client_contract_test storage_boundary_test
             logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test

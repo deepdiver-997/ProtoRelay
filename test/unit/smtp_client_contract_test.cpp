@@ -1,6 +1,7 @@
 // The SMTP state machine runs against an injected transport with no Asio types.
 #undef NDEBUG
 #include "mail_system/back/smtp_client/client_session.h"
+#include "mail_system/back/submission/mail_submission_service.h"
 #include "manual_executor.h"
 #include <algorithm>
 #include <cassert>
