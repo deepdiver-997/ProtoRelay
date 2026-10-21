@@ -8,6 +8,7 @@
 #include <cassert>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <filesystem>
 #include <cstdlib>
 #include "mail_system/back/mailServer/imaps_server.h"
@@ -1262,13 +1263,15 @@ struct MutationProtocolFixture {
     std::shared_ptr<TestServer> server;
     std::shared_ptr<Fsm::MailboxListCache> lists = std::make_shared<Fsm::MailboxListCache>(8, std::chrono::seconds(60));
     std::shared_ptr<Fsm::MailboxStatsCache> stats = std::make_shared<Fsm::MailboxStatsCache>(8, std::chrono::seconds(60));
-    explicit MutationProtocolFixture(FsmTestFixture& fx, std::shared_ptr<storage::IStorageProvider> provider = nullptr) {
+    explicit MutationProtocolFixture(FsmTestFixture& fx, std::shared_ptr<storage::IStorageProvider> provider = nullptr,
+                                     std::shared_ptr<pr::ThreadPoolBase> worker = nullptr) {
+        if (!worker) worker = fx.worker_pool;
         auto shards = std::make_shared<router::StaticShardRouter>(
             std::vector<std::pair<std::string, int>>{}, 0,
             std::vector<std::shared_ptr<DBPool>>{pool},
             std::vector<std::shared_ptr<storage::IStorageProvider>>{std::move(provider)});
-        server = std::make_shared<TestServer>(fx.cfg, fx.io_pool, fx.worker_pool, shards);
-        fsm = std::make_shared<Fsm>(fx.io_pool, fx.worker_pool, shards);
+        server = std::make_shared<TestServer>(fx.cfg, fx.io_pool, worker, shards);
+        fsm = std::make_shared<Fsm>(fx.io_pool, worker, shards);
         fsm->set_mailbox_repository(reads);
         fsm->set_mutation_repository(mutations);
         fsm->set_mailbox_list_cache(lists);
@@ -1300,18 +1303,35 @@ struct MutationProtocolFixture {
     }
 };
 TEST(search_missing_layout_returns_no_and_resumes) {
+    struct ManualWorkers final : pr::ThreadPoolBase {
+        std::vector<std::function<void()>> tasks;
+        void start() override {}
+        void stop(bool = true) override {}
+        size_t thread_count() const override { return 1; }
+        bool is_running() const override { return true; }
+        void post_impl(std::function<void()> task) override { tasks.push_back(std::move(task)); }
+    };
     auto generic = std::make_shared<test::NoMailLayoutStorage>();
-    MutationProtocolFixture fixture(fx, generic);
+    auto workers = std::make_shared<ManualWorkers>();
+    MutationProtocolFixture fixture(fx, generic, workers);
     fixture.fsm->invalidate_mailbox_list(41, 7);
     auto h = fixture.make_session();
-    h.session->handle_read("K1 SEARCH HEADER Subject probe\r\nK2 NOOP\r\n");
-    h.session->process_read();
-    for (int waited = 0; waited < 2000 && !HAS(h.conn->written(), "K2 OK"); waited += 5) {
-        h.conn->pump_executor(); std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    // handle_read accepts one extracted command, not a whole TCP read. Feed the
+    // connection so NOOP remains in the actual session buffer while SEARCH pauses.
+    h.conn->set_read_data("K1 SEARCH HEADER Subject probe\r\nK2 NOOP\r\n");
+    h.session->do_async_read(); h.conn->pump_executor();
+    assert(workers->tasks.size() == 1 && h.session->is_paused() && h.session->has_buffered_input());
+    assert(h.conn->written().empty());
+    auto search = std::move(workers->tasks.front()); workers->tasks.clear();
+    search(); // A Worker completion outside the connection owner must only post.
+    assert(h.conn->written().empty() && h.session->is_paused() && h.session->has_buffered_input());
     h.conn->pump_executor();
-    assert(HAS(h.conn->written(), "K1 NO Cannot read message object") && HAS(h.conn->written(), "K2 OK"));
-    assert(!HAS(h.conn->written(), "* SEARCH") && !h.session->is_paused() && !generic->io_calls);
+    const auto written = h.conn->written();
+    const auto failed_search = written.find("K1 NO Cannot read message object\r\n");
+    const auto resumed_noop = written.find("K2 OK NOOP completed\r\n");
+    assert(failed_search != std::string::npos && resumed_noop != std::string::npos && failed_search < resumed_noop);
+    assert(!HAS(written, "* SEARCH") && !h.session->is_paused() && !h.session->has_buffered_input() && !generic->io_calls);
+    assert(!h.session->is_closed() && h.conn->has_pending_read());
     std::cout << "  [PASS] SEARCH missing layout completes on owner and resumes buffered commands" << std::endl;
 }
 TEST(mutation_repository_store_and_expunge_injection) {
