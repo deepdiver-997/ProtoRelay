@@ -677,6 +677,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     target_include_directories(mime_parser_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mime_parser_test)
+    # 测试直接 include traditional_imaps_fsm.tpp，模板在本 TU 实例化；模板体里
+    # 的 build_mail_body_key 定义在 protorelay_mail_storage，必须显式链接
+    # （COMMON_SRCS 路径的目标自带该 .cpp，不走那条路的目标要补这条依赖）。
+    target_link_libraries(mime_parser_test PRIVATE protorelay_mail_storage)
 
     add_executable(mail_body_writer_test test/unit/mail_body_writer_test.cpp)
     target_include_directories(mail_body_writer_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
