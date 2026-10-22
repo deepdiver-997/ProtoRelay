@@ -117,7 +117,7 @@ private:
     void exit_thread();
     void run_iteration(int timeout_ms);
     void drain_wake_pipe();
-    void drain_tasks();
+    void drain_tasks(bool everything);
     void drain_graves();
     void drain_graves_locked(); // graves_mutex_ held
     void shutdown_drain();
@@ -189,8 +189,7 @@ using NativeLoopPtr = std::shared_ptr<NativeLoop>;
 class NativeRuntime final : public ThreadPoolBase,
                             public IExecutorProvider,
                             public IServerTransportProvider,
-                            public IClientTransportProvider,
-                            public std::enable_shared_from_this<NativeRuntime> {
+                            public IClientTransportProvider {
 public:
     // backend: nullopt honors PROTORELAY_NATIVE_POLLER (default per platform).
     explicit NativeRuntime(size_t io_threads, std::optional<PollerBackend> backend = std::nullopt);

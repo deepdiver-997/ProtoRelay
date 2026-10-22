@@ -50,9 +50,9 @@ void serialized_execution(PollerBackend backend) {
     constexpr int kTasks = 500;
     std::atomic<int> completed{0};
     std::atomic<std::thread::id> seen{std::thread::id{}};
-    std::vector<std::future<void>> done;
     auto poster = [&] {
         auto executor = runtime.next_executor();
+        std::vector<std::future<void>> done; // per-thread: no shared vector races
         for (int i = 0; i < kTasks; ++i) {
             auto task = std::make_shared<std::promise<void>>();
             done.push_back(task->get_future());
@@ -62,11 +62,11 @@ void serialized_execution(PollerBackend backend) {
                 task->set_value();
             });
         }
+        for (auto& future : done) assert(ready_within(future, std::chrono::seconds(5)));
     };
     std::thread first(poster), second(poster);
     first.join();
     second.join();
-    for (auto& future : done) assert(ready_within(future, std::chrono::seconds(5)));
     assert(completed.load() == 2 * kTasks);
     // Every task observed the same thread: the loop serializes its executor.
     const std::thread::id one = seen.load();
@@ -185,11 +185,20 @@ void runtime_stop_completes_pending(PollerBackend backend) {
     for (int i = 0; i < 16; ++i)
         executor->post([&ran] { ran.fetch_add(1); });
 
-    auto timer = std::static_pointer_cast<NativeTimer>(executor->make_timer());
-    timer->expires_after(std::chrono::milliseconds(10000));
+    // Arm a long timer ON the executor (timers mutate on their executor).
     std::promise<std::error_code> wait_outcome;
     auto outcome = wait_outcome.get_future();
-    timer->async_wait([&](const std::error_code& error) { wait_outcome.set_value(error); });
+    std::promise<void> armed;
+    auto armed_future = armed.get_future();
+    executor->post([&] {
+        auto timer = executor->make_timer();
+        timer->expires_after(std::chrono::milliseconds(10000));
+        timer->async_wait([&wait_outcome, timer](const std::error_code& error) {
+            wait_outcome.set_value(error); // handler holds the timer alive
+        });
+        armed.set_value();
+    });
+    assert(ready_within(armed_future, std::chrono::seconds(5)));
 
     runtime.stop(true);
     assert(ran.load() == 16);

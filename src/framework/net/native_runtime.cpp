@@ -66,7 +66,8 @@ std::shared_ptr<ITimer> NativeLoop::make_timer() {
 bool NativeLoop::add_fd(int fd, unsigned interest, std::shared_ptr<LoopEntry> entry) {
     assert_loop_thread("add_fd");
     if (fd < 0 || !entry || entries_.count(fd)) return false;
-    if (!poller_->add(fd, interest)) return false;
+    const bool registered = poller_->add(fd, interest);
+    if (!registered) return false;
     entries_.emplace(fd, std::move(entry));
     return true;
 }
@@ -182,7 +183,11 @@ void NativeLoop::stop(bool wait_for_tasks) {
 }
 
 void NativeLoop::run_iteration(int timeout_ms) {
-    const int effective = std::min(timeout_ms, next_wait_timeout());
+    // Block until the earlier of the caller's cap and the next timer deadline
+    // (-1 = no bound); an empty wheel must not turn a finite cap into forever.
+    const int timer_wait = next_wait_timeout();
+    int effective = timer_wait;
+    if (timeout_ms >= 0 && (effective < 0 || timeout_ms < effective)) effective = timeout_ms;
     std::vector<PollEvent> events;
     poller_->wait(effective, events);
 
@@ -212,7 +217,7 @@ void NativeLoop::run_iteration(int timeout_ms) {
         }
     }
     fire_due_timers();
-    drain_tasks();
+    drain_tasks(false);
     drain_graves();
 }
 
@@ -245,25 +250,39 @@ void NativeLoop::loop_post_due(ITimer::Handler handler) {
     post([handler = std::move(handler)] { handler(std::error_code{}); });
 }
 
-void NativeLoop::drain_tasks() {
+void NativeLoop::drain_tasks(bool everything) {
+    // Normal iteration drains the SNAPSHOT of tasks queued when the drain
+    // starts; a task posted during the drain waits for the NEXT iteration.
+    // This is lossless: its post() wrote a wake byte that this iteration did
+    // not consume, so the blocked wait still wakes. Draining fewer tasks than
+    // were queued WOULD lose wakeups (their bytes are already gone from the
+    // pipe), and draining everything would let self-posting tasks starve IO
+    // and timers. Shutdown (everything=true) keeps draining until the queue
+    // is truly empty.
     for (;;) {
-        Task task;
+        std::deque<Task> batch;
         {
             std::lock_guard<std::mutex> lock(tasks_mutex_);
             if (tasks_.empty()) return;
-            task = std::move(tasks_.front());
-            tasks_.pop_front();
+            // Snapshot: everything queued NOW. Tasks posted during the run
+            // stay queued and woke the poll with their own bytes.
+            batch.swap(tasks_);
         }
-        if (!task) continue;
-        try {
-            task();
-        } catch (const std::exception& error) {
-            exceptions_.fetch_add(1, std::memory_order_relaxed);
-            LOG_NETWORK_ERROR("Native loop task threw: {}", error.what());
-        } catch (...) {
-            exceptions_.fetch_add(1, std::memory_order_relaxed);
-            LOG_NETWORK_ERROR("Native loop task threw a non-standard exception");
+        while (!batch.empty()) {
+            Task task = std::move(batch.front());
+            batch.pop_front();
+            if (!task) continue;
+            try {
+                task();
+            } catch (const std::exception& error) {
+                exceptions_.fetch_add(1, std::memory_order_relaxed);
+                LOG_NETWORK_ERROR("Native loop task threw: {}", error.what());
+            } catch (...) {
+                exceptions_.fetch_add(1, std::memory_order_relaxed);
+                LOG_NETWORK_ERROR("Native loop task threw a non-standard exception");
+            }
         }
+        if (!everything) return;
     }
 }
 
@@ -330,7 +349,7 @@ void NativeLoop::shutdown_drain() {
         // shutdown): keep alternating until both queues are exhausted so every
         // pending operation completes before the thread leaves.
         for (;;) {
-            drain_tasks();
+            drain_tasks(true);
             drain_graves();
             {
                 std::lock_guard<std::mutex> tasks_lock(tasks_mutex_);
@@ -485,7 +504,11 @@ NativeLoopPtr NativeRuntime::loop_for(size_t index) const {
 }
 
 std::unique_ptr<IServerTransport> NativeRuntime::make_server_transport(const ServerTransportConfig& config) {
-    return make_native_server_transport(config, std::static_pointer_cast<NativeRuntime>(shared_from_this()));
+    std::lock_guard<std::mutex> lock(lifecycle_);
+    ensure_loops();
+    // The transport only needs the loops (shared_ptr); it stays usable even if
+    // the runtime object itself is released first.
+    return make_native_server_transport(config, loops_);
 }
 
 std::shared_ptr<IClientTransport> NativeRuntime::make_client_transport() {

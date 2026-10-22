@@ -3,6 +3,7 @@
 #include "framework/net/native/poller.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <chrono>
 #include <cstddef>
 #include <unordered_map>

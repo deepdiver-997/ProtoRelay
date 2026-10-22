@@ -8,6 +8,7 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <fcntl.h>
 #include <cstring>
 #include <netinet/in.h>
 #include <stdexcept>
@@ -52,6 +53,12 @@ void open_listen_socket(ListenerState& state, const sockaddr_storage& address,
                         socklen_t address_length) {
     const int fd = ::socket(address.ss_family, SOCK_STREAM, 0);
     if (fd < 0) throw std::system_error(last_error(), "native listener socket");
+    // The accept drain loop keeps accepting until EAGAIN: a blocking listener
+    // socket would park the whole event loop on the second call.
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    const int fd_flags = ::fcntl(fd, F_GETFD, 0);
+    if (fd_flags >= 0) ::fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
     const int one = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     sockaddr_storage bound = address;
@@ -144,9 +151,9 @@ void close_listener(const std::shared_ptr<ListenerState>& state) {
 class NativeServerTransport final : public net::IServerTransport {
 public:
     NativeServerTransport(const net::ServerTransportConfig& config,
-                          std::shared_ptr<NativeRuntime> runtime)
-        : runtime_(std::move(runtime)) {
-        if (!runtime_) throw std::invalid_argument("native server transport requires a runtime");
+                          const std::vector<NativeLoopPtr>& loops) {
+        if (loops.empty())
+            throw std::invalid_argument("native server transport requires a runtime loop");
         sockaddr_storage address{};
         const socklen_t address_length = parse_bind_address(config.address, address);
         if (address_length == 0)
@@ -162,8 +169,7 @@ public:
                                         "native backend v1 does not implement TLS listeners");
             auto state = std::make_shared<ListenerState>();
             state->config = listener;
-            state->loop = std::static_pointer_cast<NativeLoop>(runtime_->next_executor());
-            if (!state->loop) throw std::runtime_error("native runtime provided no loop");
+            state->loop = loops[listener_slot_++ % loops.size()];
             open_listen_socket(*state, address, address_length);
             bound_listeners_.push_back(state->config);
             listeners_.push_back(std::move(state));
@@ -216,7 +222,7 @@ public:
     }
 
 private:
-    std::shared_ptr<NativeRuntime> runtime_;
+    size_t listener_slot_ = 0;
     std::vector<std::shared_ptr<ListenerState>> listeners_;
     std::vector<ListenerConfig> bound_listeners_;
     std::mutex lifecycle_;
@@ -226,8 +232,8 @@ private:
 } // namespace
 
 std::unique_ptr<net::IServerTransport> make_native_server_transport(
-    const net::ServerTransportConfig& config, const std::shared_ptr<NativeRuntime>& runtime) {
-    return std::make_unique<NativeServerTransport>(config, runtime);
+    const net::ServerTransportConfig& config, const std::vector<NativeLoopPtr>& loops) {
+    return std::make_unique<NativeServerTransport>(config, loops);
 }
 
 } // namespace pr::net::native

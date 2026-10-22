@@ -6,6 +6,7 @@
 #include "framework/net/native/poller.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <chrono>
 #include <cstring>
 #include <unordered_set>
@@ -63,9 +64,7 @@ public:
         append(changes, fd, EVFILT_WRITE, EV_DELETE, 0);
         // Removal is best effort; ENOENT for a never-registered filter is fine
         // and the registration entry is dropped regardless.
-        std::vector<struct kevent> outcomes(changes.size());
-        ::kevent(descriptor_, changes.data(), static_cast<int>(changes.size()),
-                 outcomes.data(), static_cast<int>(outcomes.size()), nullptr);
+        apply(std::move(changes), &fd);
     }
 
     void wait(int timeout_ms, std::vector<PollEvent>& out) override {
@@ -129,18 +128,25 @@ private:
 
     // Applies a change batch. `delete_fd` tolerates ENOENT outcomes for deletes
     // of a filter that was not registered (mod() removing one of two filters).
+    // The zero timeout matters: with changes but a NULL timeout, kevent blocks
+    // after processing until the output buffer fills — and successful EV_DELETE
+    // changes produce no output at all, so a pure removal would park the loop.
     bool apply(std::vector<struct kevent>&& changes, const int* delete_fd) {
         if (changes.empty()) return true;
+        static constexpr timespec zero_timeout{0, 0};
         std::vector<struct kevent> outcomes(changes.size());
         const int applied = ::kevent(descriptor_, changes.data(),
                                      static_cast<int>(changes.size()),
-                                     outcomes.data(), static_cast<int>(outcomes.size()), nullptr);
+                                     outcomes.data(), static_cast<int>(outcomes.size()),
+                                     const_cast<timespec*>(&zero_timeout));
         if (applied < 0) return false;
         for (int i = 0; i < applied; ++i) {
-            if (!(outcomes[i].flags & EV_ERROR)) continue;
+            // macOS quirk: a SUCCESSFUL EV_RECEIPT comes back with EV_ERROR set
+            // and data == 0; the errno only lives in `data`, so data 0 is fine.
+            const int code = static_cast<int>(outcomes[i].data);
+            if (!(outcomes[i].flags & EV_ERROR) || code == 0) continue;
             const bool tolerated_delete = delete_fd != nullptr &&
-                static_cast<int>(outcomes[i].ident) == *delete_fd &&
-                static_cast<int>(outcomes[i].data) == ENOENT;
+                static_cast<int>(outcomes[i].ident) == *delete_fd && code == ENOENT;
             if (!tolerated_delete) return false;
         }
         return true;

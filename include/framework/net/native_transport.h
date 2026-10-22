@@ -16,10 +16,12 @@ namespace pr::net::native {
 
 class NativeRuntime;
 
-// Binds (and, on start, accepts) the configured plain-TCP listeners on the
-// runtime's loops. Port 0 is replaced by the actually bound port.
+// Binds (and, on start, accepts) the configured plain-TCP listeners round-robin
+// on the given loops (as provided by a NativeRuntime). Port 0 is replaced by
+// the actually bound port. The transport keeps the loops alive; the runtime
+// object itself may be released independently.
 std::unique_ptr<net::IServerTransport> make_native_server_transport(
-    const net::ServerTransportConfig& config, const std::shared_ptr<NativeRuntime>& runtime);
+    const net::ServerTransportConfig& config, const std::vector<NativeLoopPtr>& loops);
 
 // Minimal client connection factory (plain TCP, numeric or resolved hosts).
 std::shared_ptr<net::IClientTransport> make_native_client_transport(
