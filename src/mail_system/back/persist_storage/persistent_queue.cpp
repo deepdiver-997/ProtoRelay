@@ -144,15 +144,26 @@ bool PersistentQueue::submit_mails(std::vector<mail*>& mail_list) {
     return false;
 }
 
-void PersistentQueue::delete_task(mail* mail_data) {
-    if (!mail_data) return;
+void PersistentQueue::delete_task(const mail& mail_data) {
+    // 调用线程快照分片与 id：投递后的工作阶段只持有仓库句柄和普通值，
+    // 不解引用调用方（session）的 mail，消除 mail 先释放、任务后执行的竞态。
+    const int shard = shard_from_mail(&mail_data);
+    const auto mail_id = mail_data.id;
     std::shared_ptr<repository::IPersistenceRepository> persistence_repository;
     { std::lock_guard<std::mutex> lock(submission_mutex_); persistence_repository = repository_; }
+    auto erase_metadata = [persistence_repository, shard, mail_id]() {
+        try {
+            const auto result = persistence_repository->erase_metadata({shard, {mail_id}, false});
+            if (!result.ok) LOG_PERSISTENT_QUEUE_WARN("Metadata delete failed mail_id={}: {}", mail_id, result.error);
+        } catch (const std::exception& error) {
+            LOG_PERSISTENT_QUEUE_ERROR("Metadata delete exception mail_id={}: {}", mail_id, error.what());
+        }
+    };
     try {
-        const auto result = persistence_repository->erase_metadata({shard_from_mail(mail_data), {mail_data->id}, false});
-        if (!result.ok) LOG_PERSISTENT_QUEUE_WARN("Metadata delete failed mail_id={}: {}", mail_data->id, result.error);
+        if (!worker_pool_) throw std::runtime_error("Persistence Worker is unavailable");
+        worker_pool_->post(std::move(erase_metadata));
     } catch (const std::exception& error) {
-        LOG_PERSISTENT_QUEUE_ERROR("Metadata delete exception mail_id={}: {}", mail_data->id, error.what());
+        LOG_PERSISTENT_QUEUE_WARN("Deferred metadata delete not scheduled mail_id={}: {}", mail_id, error.what());
     }
 }
 

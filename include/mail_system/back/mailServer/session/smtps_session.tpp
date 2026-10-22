@@ -213,10 +213,10 @@ void SmtpsSession<ConnectionType>::handle_write_failure() {
     } else {
         LOG_SESSION_WARN("Mail {} write failed after processing started, submitting delete task", this->get_mail()->id);
         if (persistent_queue_) {
-            auto mail_ptr = this->get_mail();
-            this->get_server()->m_workerThreadPool->submit([this, mail_ptr]() {
-                persistent_queue_->delete_task(mail_ptr);
-            });
+            // 队列在本次调用内同步快照分片/id 后自行投递异步擦除；这里不得把
+            // mail* 捕获进工作线程 lambda：session 复位（mail_ = nullptr）可能
+            // 先于任务执行，池线程延迟解引用即 use-after-free（ASan 实证）。
+            persistent_queue_->delete_task(*this->get_mail());
         }
     }
 }

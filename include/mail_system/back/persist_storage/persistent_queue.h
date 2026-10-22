@@ -50,7 +50,11 @@ public:
     // ---- 公开接口 ----
     SubmitOwnedMailResult submit_owned_mail(std::unique_ptr<mail> mail_data);
     bool submit_mails(std::vector<mail*>& mail_list);
-    void delete_task(mail* mail_data);
+    // 已取消/写入失败邮件的元数据擦除（异步、值语义）：分片与 id 在调用线程从
+    // mail_data 快照后投递到持久化工作池，工作阶段只持有仓库句柄和普通值，
+    // 不再解引用调用方（session）持有的 mail —— 调用返回后 mail 即可释放。
+    // 此前接收 mail* 并在池线程延迟解引用的版本存在 use-after-free 竞态。
+    void delete_task(const mail& mail_data);
     void delete_multi_tasks(std::vector<mail*>& mail_list);
 
     size_t queue_size() const;
