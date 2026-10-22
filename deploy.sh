@@ -96,13 +96,16 @@ echo "  Uploaded to obj.new/ (incremental via --link-dest)"
 # --exclude webServer_obj：webServer_obj 树里有一份 COMMON_SRCS 拷贝 + 自己的
 # main，release -O3 下靠内联退化成弱符号才没炸；-O1/ASan 构建下是强符号，
 # 必为 multiple definition（gold 实测）。imaps/smtps 二进制永远不需要它。
+# 重构后对象树互补而非自包含：smtps 树含框架/会话实例（imaps 链接也依赖它），
+# 故只需排除其它入口（*_test.cpp.o 带 main、webServer 树、老 combined 单体入口）。
+# 新增共享编译单元时注意 --exclude 是"路径含子串"匹配，别用宽泛前缀。
 echo "[4/6] Linking binaries on server (link extra: ${LINK_EXTRA:-none})..."
 if [ "$DEPLOY_SMTP" = "1" ]; then
     ssh_strict "cd '$TARGET_DIR' && \
         LINK_EXTRA_FLAGS='$LINK_EXTRA' bash link.sh obj.new/CMakeFiles/smtpsServer_obj.dir/test/server/smtps_test.cpp.o \
             --obj-root obj.new \
             -o smtpsServer.new --compiler g++-13 \
-            --exclude imaps_test --exclude mail_server --exclude webServer_obj 2>&1 | tail -1"
+            --exclude imaps_test --exclude webServer_obj --exclude mail_server_combined 2>&1 | tail -1"
 else
     echo "  DEPLOY_SMTP=0: skip smtpsServer (现役不动)"
 fi
@@ -110,7 +113,7 @@ ssh_strict "cd '$TARGET_DIR' && \
     LINK_EXTRA_FLAGS='$LINK_EXTRA' bash link.sh obj.new/CMakeFiles/imapsServer_obj.dir/test/server/imaps_test.cpp.o \
         --obj-root obj.new \
         -o imapsServer.new --compiler g++-13 \
-        --exclude smtps_test --exclude mail_server --exclude webServer_obj 2>&1 | tail -1"
+        --exclude smtps_test --exclude webServer_obj --exclude mail_server_combined 2>&1 | tail -1"
 
 # 产物校验：链接曾经静默失败过，这里必须挡住
 if [ "$DEPLOY_SMTP" = "1" ]; then
