@@ -78,6 +78,8 @@ struct ImapContext {
     std::string selected_mailbox_name;        // 邮箱名称，如 "INBOX"
     uint64_t selected_mailbox_id = 0;         // mailboxes.id
     uint64_t uid_validity = 0;               // UIDVALIDITY 值
+    size_t announced_exists = 0;              // 已通过未打标签 EXISTS 宣告的邮件数
+                                              // （SELECT/EXAMINE 初始化，NOOP 据此补发新邮件 EXISTS）
 
     // 读写模式
     bool read_only = false;                   // true = EXAMINE, false = SELECT
@@ -114,6 +116,7 @@ struct ImapContext {
         selected_mailbox_name.clear();
         selected_mailbox_id = 0;
         uid_validity = 0;
+        announced_exists = 0;
         read_only = false;
         idle_mode = false;
         sasl_plain_state = 0;

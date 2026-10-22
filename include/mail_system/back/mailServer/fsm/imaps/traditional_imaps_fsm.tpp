@@ -118,6 +118,10 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     this->add_transition(ImapState::SELECTED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
     this->add_transition(ImapState::SELECTED, ImapEvent::CHECK, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::CAPABILITY, ImapState::SELECTED);
+    // RFC 3501 §6：SELECTED 态可用 AUTHENTICATED 态全部命令，STATUS 也不例外
+    //（§6.3.10 仅要求不得用于"当前选中的邮箱"，见 handle_status 里的拒绝逻辑）。
+    // 缺注册导致选中邮箱后 STATUS 落 BAD，Thunderbird 等客户端轮询其他邮箱状态即挂。
+    this->add_transition(ImapState::SELECTED, ImapEvent::IMAP_STATUS, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::NOOP, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::APPEND, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::IDLE, ImapState::SELECTED);
@@ -182,6 +186,7 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     this->add_handler(ImapState::SELECTED, ImapEvent::CHECK, [this](auto session) { handle_check(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::APPEND, [this](auto session) { handle_append(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::IMAP_STATUS, [this](auto session) { handle_status(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
@@ -599,6 +604,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
                     uint64_t uidnext = stats.uidnext;
 
                     self->set_current_state(static_cast<int>(ImapState::SELECTED));
+                    // SELECT 响应宣告了 "* count EXISTS"，NOOP 的增量宣告以此为基准
+                    ctx->announced_exists = count;
 
                     // Build SELECT response (RFC 3501: [READ-WRITE]/[READ-ONLY] on tagged OK)
                     std::string response;
@@ -680,6 +687,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
                     uint64_t uidnext = stats.uidnext;
 
                     self->set_current_state(static_cast<int>(ImapState::SELECTED));
+                    // EXAMINE 响应同样宣告 "* count EXISTS"（见 handle_select）
+                    ctx->announced_exists = count;
 
                     std::string response;
                     response += "* " + std::to_string(count) + " EXISTS\r\n";
@@ -836,6 +845,26 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
         size_t end = mailbox_name.find('"', 1);
         if (end != std::string::npos) {
             mailbox_name = mailbox_name.substr(1, end - 1);
+        }
+    }
+
+    // RFC 3501 §6.3.10：STATUS 不得用于当前选中的邮箱（否则扰动 \Recent 语义），
+    // 对其回 tagged NO；其他邮箱照常。名字比较走 decode 后的形态，与
+    // handle_select 存进 ctx->selected_mailbox_name 的口径一致；INBOX 大小写不敏感。
+    if (ctx && ctx->mailbox_selected) {
+        std::string decoded = decode_mailbox_name(mailbox_name);
+        auto ieq = [](const std::string& a, const std::string& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (std::toupper(static_cast<unsigned char>(a[i])) !=
+                    std::toupper(static_cast<unsigned char>(b[i]))) return false;
+            return true;
+        };
+        const bool same = decoded == ctx->selected_mailbox_name ||
+                          (ieq(decoded, "INBOX") && ieq(ctx->selected_mailbox_name, "INBOX"));
+        if (same) {
+            send_tagged(session, tag, "NO", "STATUS not allowed on the selected mailbox");
+            return;
         }
     }
 
@@ -1607,6 +1636,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
                             std::string response;
                             for (auto seq : expunged_seqs)
                                 response += "* " + std::to_string(seq) + " EXPUNGE\r\n";
+                            // 客户端收到 EXPUNGE 后认知计数已下降，NOOP 的 EXISTS
+                            // 高水位同步下调，否则删信后新到达邮件数不超过旧高水位
+                            // 时 NOOP 永远补不出 EXISTS。
+                            if (auto* ctx2 = static_cast<ImapContext*>(self->get_context())) {
+                                const size_t gone = expunged_seqs.size();
+                                ctx2->announced_exists =
+                                    ctx2->announced_exists > gone ? ctx2->announced_exists - gone : 0;
+                            }
                             response += tag + " OK EXPUNGE completed\r\n";
                             self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
                             self->drain_buffered_commands();
@@ -1630,6 +1667,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
             ctx->selected_mailbox_name.clear();
             ctx->selected_mailbox_id = 0;
             ctx->read_only = false;
+            ctx->announced_exists = 0;
         }
         session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
         send_tagged(session, tag, "OK", "CLOSE completed");
@@ -1674,6 +1712,37 @@ void TraditionalImapsFsm<ConnectionType>::handle_noop(
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
+
+    // RFC 3501 §6.1.2/§7.3.1：NOOP 的意义之一是让客户端拿走 pending 的未打标签
+    // 响应（尤其新邮件 "* N EXISTS"）。SELECTED 态下查一次邮件数，比已宣告的
+    // 多则先补 EXISTS 再回 tagged OK —— 这是 IDLE 推送之外客户端发现 SMTP 新
+    // 投递的传统轮询路径。AUTHENTICATED 态无可宣告，保持同步 OK。
+    if (ctx && ctx->mailbox_selected &&
+        static_cast<ImapState>(session->get_current_state()) == ImapState::SELECTED) {
+        auto conn = this->acquire_connection(ctx->shard_index);
+        if (conn->is_valid()) {
+            session->set_paused(true);
+            auto self = session->shared_from_this();
+            uint64_t user_id = ctx->user_id;
+            uint64_t mailbox_id = ctx->selected_mailbox_id;
+            this->get_mailbox_stats_cached_async(
+                conn, user_id, mailbox_id,
+                [self, tag = std::move(tag)](MailboxCacheEntry stats, bool, bool) {
+                    if (!self || self->is_closed()) return;
+                    auto* ctx2 = static_cast<ImapContext*>(self->get_context());
+                    std::string response;
+                    // EXISTS 只增不减（删减由 EXPUNGE 响应宣告），故只补"变多"的差值
+                    if (ctx2 && stats.exists > ctx2->announced_exists) {
+                        ctx2->announced_exists = stats.exists;
+                        response += "* " + std::to_string(stats.exists) + " EXISTS\r\n";
+                    }
+                    response += tag + " OK NOOP completed\r\n";
+                    self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
+                    self->drain_buffered_commands();
+                });
+            return;
+        }
+    }
     send_tagged(session, tag, "OK", "NOOP completed");
 }
 
@@ -2093,6 +2162,9 @@ struct ImapSearchCriteria {
 };
 
 // 一次消费 HEADER <field> <value>，其参数不能再被识别为 flag 或 UID 范围。
+// RFC 3501 §6.4.4 的 shorthand（SUBJECT/FROM/TO/CC/BCC <string>）语义上就是
+// 对应头字段的 HEADER 判据，这里同样转成 headers 复用既有匹配机制，避免
+// "SUBJECT <string>" 落进 keys 被静默忽略 → SEARCH 返回整箱。
 ImapSearchCriteria parse_search_criteria(const std::string& args) {
     ImapSearchCriteria criteria;
     auto tokens = imap_search_tokens(args);
@@ -2104,6 +2176,12 @@ ImapSearchCriteria parse_search_criteria(const std::string& args) {
             if (i + 2 >= tokens.size()) break;
             criteria.headers.push_back({tokens[i + 1], tokens[i + 2]});
             i += 2;
+        } else if (key == "SUBJECT" || key == "FROM" ||
+                   key == "TO" || key == "CC" || key == "BCC") {
+            if (i + 1 >= tokens.size()) break;
+            // collect_header_field 匹配时忽略字段名大小写，直接存大写键名即可
+            criteria.headers.push_back({key, tokens[i + 1]});
+            i += 1;
         } else {
             criteria.keys.push_back(std::move(key));
         }

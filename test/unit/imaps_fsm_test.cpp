@@ -2323,6 +2323,227 @@ TEST(append_literal_excess_not_swallowed) {
     std::cout << "  [PASS] append_literal_excess_not_swallowed (next command dispatched)" << std::endl;
 }
 
+// ========== 2026-10-22 三缺陷回归（SELECTED STATUS / SEARCH SUBJECT / NOOP EXISTS） ==========
+
+// SELECTED 态 STATUS 其他邮箱 → OK 且计数正确（修复前 SELECTED 态未注册 → BAD）
+TEST(status_in_selected_other_mailbox_ok) {
+    MutationProtocolFixture fixture(fx);
+    // 覆写 (41,77) 的统计缓存条目，让断言拿到非零的正确计数
+    MailboxCacheEntry stats77;
+    stats77.exists = 3; stats77.unseen = 1; stats77.uidnext = 42;
+    fixture.stats->put(mbox_cache_key(41, 77), stats77);
+    auto h = fixture.make_session();   // SELECTED，选中 INBOX(id=7)
+    h.session->handle_read("ST1 STATUS Archive (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)\r\n");
+    h.session->process_read();
+    h.conn->pump_executor();
+    auto w = h.conn->written();
+    assert(HAS(w, "* STATUS"));
+    assert(HAS(w, "MESSAGES 3"));
+    assert(HAS(w, "UNSEEN 1"));
+    assert(HAS(w, "UIDNEXT 42"));
+    assert(HAS(w, "UIDVALIDITY 77"));   // find_mailbox_id → 77
+    assert(HAS(w, "ST1 OK STATUS completed"));
+    assert(h.session->get_current_state() == static_cast<int>(ImapState::SELECTED));
+    std::cout << "  [PASS] status_in_selected_other_mailbox_ok" << std::endl;
+}
+
+// STATUS 当前选中的邮箱 → tagged NO（RFC 3501 §6.3.10；INBOX 大小写不敏感）
+TEST(status_on_selected_mailbox_rejected) {
+    MutationProtocolFixture fixture(fx);
+    auto h = fixture.make_session();   // 选中 INBOX
+    h.session->handle_read("ST2 STATUS INBOX (MESSAGES)\r\n");
+    h.session->process_read();
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "ST2 NO STATUS not allowed on the selected mailbox"));
+
+    h.conn->clear_written();
+    h.session->handle_read("ST3 STATUS inbox\r\n");
+    h.session->process_read();
+    h.conn->pump_executor();
+    assert(HAS(h.conn->written(), "ST3 NO"));
+    std::cout << "  [PASS] status_on_selected_mailbox_rejected (INBOX case-insensitive)" << std::endl;
+}
+
+// SEARCH SUBJECT/FROM shorthand：只返回匹配邮件（修复前判据被静默忽略 → 返回整箱）
+TEST(search_subject_shorthand_criteria) {
+    auto io = std::make_shared<pr::IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<pr::WorkerThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(false);
+    namespace st = mail_system::storage;
+    std::filesystem::create_directories(test_support::temp_path("imaps_search_subject"));
+    auto storage = std::make_shared<st::LocalFileStorageProvider>(
+        test_support::temp_path("imaps_search_subject/"), test_support::temp_path("imaps_search_subject/"));
+    auto router2 = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<st::IStorageProvider>>{storage});
+    ServerConfig cfg2;
+    cfg2.perf_mode = true; cfg2.apply_perf_mode();
+    cfg2.use_database = false; cfg2.system_domain = "test.local";
+    cfg2.storage.local.mail_path = test_support::temp_path("imaps_search_subject");
+    cfg2.storage.local.attachment_path = test_support::temp_path("imaps_search_subject");
+    auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
+    auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
+
+    // 两封：3001 匹配 breakfast/alice 且未读；3002 匹配 dinner/bob 且已读
+    const char* bodies[2] = {
+        "From: alice@example.com\r\nSubject: breakfast menu\r\n\r\nb1\r\n",
+        "From: bob@example.com\r\nSubject: dinner plans\r\n\r\nb2\r\n",
+    };
+    std::vector<std::map<std::string, std::string>> rows;
+    for (int i = 0; i < 2; ++i) {
+        auto bp = test_support::temp_path("imaps_search_subject/mail_") + std::to_string(3001 + i);
+        { std::ofstream f(bp, std::ios::binary); f << bodies[i]; }
+        rows.push_back({{"id", std::to_string(3001 + i)}, {"sender", "a@t.local"},
+            {"recipient", "b@t.local"}, {"subject", "s"}, {"body_path", bp},
+            {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
+            {"status", i == 0 ? "1" : "0"}, {"send_time", "1700000000"}});
+    }
+    auto run_search = [&](const std::string& line) {
+        db->mock_conn()->push_sync_result(
+            std::make_shared<test::MockDbResult>(rows));
+        auto conn_u = std::make_unique<MockConnection>();
+        auto* conn_ptr = conn_u.get();
+        conn_ptr->set_deferred_read(true);
+        auto session = std::make_shared<ImapsSession<MockConnection>>(
+            server2.get(), std::move(conn_u), fsm2);
+        auto* c = static_cast<ImapContext*>(session->get_context());
+        c->is_authenticated = true; c->user_id = 1; c->mailbox_selected = true;
+        c->selected_mailbox_id = 1; c->current_tag = "S";
+        session->set_current_state(static_cast<int>(ImapState::SELECTED));
+        session->handle_read(line);
+        session->process_read();
+        for (int waited = 0; waited < 2000 && conn_ptr->written().find(
+                "OK SEARCH completed") == std::string::npos; waited += 5) {
+            conn_ptr->pump_executor();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        conn_ptr->pump_executor();
+        auto w = conn_ptr->written();
+        finish_session(session);
+        return w;
+    };
+
+    // SUBJECT 命中：只返回 3002（修复前返回整箱 3001+3002）
+    auto w = run_search("S1 UID SEARCH SUBJECT \"dinner\"\r\n");
+    assert(w.find("* SEARCH 3002\r\n") != std::string::npos);
+    assert(w.find("3001") == std::string::npos);
+
+    // 无引号单 token 值同样消费参数
+    w = run_search("S2 UID SEARCH SUBJECT breakfast\r\n");
+    assert(w.find("* SEARCH 3001\r\n") != std::string::npos);
+    assert(w.find("3002") == std::string::npos);
+
+    // 无命中 → 空结果
+    w = run_search("S3 UID SEARCH SUBJECT \"lunch\"\r\n");
+    assert(w.find("* SEARCH\r\n") != std::string::npos);
+
+    // FROM 是同款 shorthand，走同一条 HEADER 机制
+    w = run_search("S4 UID SEARCH FROM \"alice@\"\r\n");
+    assert(w.find("* SEARCH 3001\r\n") != std::string::npos);
+    assert(w.find("3002") == std::string::npos);
+
+    // 与既有 flag 判据 AND 组合：SUBJECT 命中但已读 → 排除
+    w = run_search("S5 UID SEARCH SUBJECT \"dinner\" UNSEEN\r\n");
+    assert(w.find("* SEARCH\r\n") != std::string::npos);
+    // 既有 UNSEEN 判据不回归（shorthand 改动没有污染 keys 解析）
+    w = run_search("S6 UID SEARCH UNSEEN\r\n");
+    assert(w.find("* SEARCH 3001\r\n") != std::string::npos);
+    assert(w.find("3002") == std::string::npos);
+
+    std::filesystem::remove_all(test_support::temp_path("imaps_search_subject"));
+    io->stop(); wk->stop();
+    std::cout << "  [PASS] search_subject_shorthand_criteria (SUBJECT/FROM hit/miss/AND-composed)" << std::endl;
+}
+
+// Bug: NOOP 不回 EXISTS —— 邮件数可变的 mailbox 读仓储（模拟 SMTP 新投递）
+class GrowingMailboxRepository final : public repository::IMailboxRepository {
+public:
+    std::atomic<size_t> exists{3};
+    std::vector<MailboxMailInfo> mails;   // EXPUNGE 据此计算 \Deleted 序号
+    void get_mailboxes_async(Lease, uint64_t, ListCallback cb) override { cb(true, {}); }
+    void find_mailbox_id_async(Lease, uint64_t, const std::string&, std::function<void(uint64_t)> cb) override { cb(9); }
+    void get_mailbox_mails_async(Lease, uint64_t, uint64_t, MessagesCallback cb) override { cb(true, mails); }
+    void get_mailbox_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(exists.load()); }
+    void get_mailbox_unseen_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(0); }
+    void get_mailbox_uidnext_async(Lease, uint64_t, uint64_t, std::function<void(uint64_t)> cb) override { cb(100); }
+};
+TEST(noop_announces_new_mail_in_selected) {
+    MutationProtocolFixture fixture(fx);
+    auto reads = std::make_shared<GrowingMailboxRepository>();
+    fixture.fsm->set_mailbox_repository(reads);
+    fixture.fsm->set_mailbox_stats_cache(nullptr);   // NOOP 直查仓储，计数即时可见
+    auto h = fixture.make_session();
+    auto pump_wait = [&](const std::string& needle) {
+        for (int waited = 0; waited < 2000; waited += 5) {
+            h.conn->pump_executor();
+            if (h.conn->written().find(needle) != std::string::npos) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        h.conn->pump_executor();
+        return h.conn->written().find(needle) != std::string::npos;
+    };
+    auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+
+    // SELECT 基准：宣告 "* 3 EXISTS"，高水位 = 3
+    h.session->handle_read("N1 SELECT INBOX\r\n");
+    h.session->process_read();
+    assert(pump_wait("N1 OK [READ-WRITE] SELECT completed"));
+    assert(HAS(h.conn->written(), "* 3 EXISTS"));
+    assert(ctx->announced_exists == 3);
+
+    // 两封新邮件入箱 → NOOP 先补 "* 5 EXISTS" 再回 tagged OK
+    h.conn->clear_written();
+    reads->exists = 5;
+    h.session->handle_read("N2 NOOP\r\n");
+    h.session->process_read();
+    assert(pump_wait("N2 OK NOOP completed"));
+    {
+        auto w = h.conn->written();
+        const auto e = w.find("* 5 EXISTS\r\n");
+        const auto t = w.find("N2 OK NOOP completed");
+        assert(e != std::string::npos && t != std::string::npos && e < t);
+    }
+
+    // 计数无变化 → 只有 tagged OK，不重复宣告
+    h.conn->clear_written();
+    h.session->handle_read("N3 NOOP\r\n");
+    h.session->process_read();
+    assert(pump_wait("N3 OK NOOP completed"));
+    assert(!HAS(h.conn->written(), "EXISTS"));
+
+    // EXPUNGE 删两封 → 客户端认知 5-2=3，服务端高水位同步下调
+    MailboxMailInfo deleted1, deleted2, live;
+    deleted1.is_deleted = true; deleted2.is_deleted = true;
+    reads->mails = {deleted1, deleted2, live};
+    h.conn->clear_written();
+    h.session->handle_read("N4 EXPUNGE\r\n");
+    h.session->process_read();
+    assert(fixture.mutations->expunges == 1);
+    fixture.mutations->finish_expunge({true});
+    assert(pump_wait("N4 OK EXPUNGE completed"));
+    assert(HAS(h.conn->written(), "* 1 EXPUNGE"));
+    assert(HAS(h.conn->written(), "* 2 EXPUNGE"));
+    assert(ctx->announced_exists == 3);
+
+    // 高水位下调后，"没有超过旧高水位(5)"的新邮件也能被 NOOP 宣告：
+    // 5-2+1=4；若无 EXPUNGE 下调（高水位停在 5），这里会漏报
+    h.conn->clear_written();
+    reads->exists = 4;
+    h.session->handle_read("N5 NOOP\r\n");
+    h.session->process_read();
+    assert(pump_wait("N5 OK NOOP completed"));
+    {
+        auto w = h.conn->written();
+        const auto e = w.find("* 4 EXISTS\r\n");
+        const auto t = w.find("N5 OK NOOP completed");
+        assert(e != std::string::npos && t != std::string::npos && e < t);
+    }
+    std::cout << "  [PASS] noop_announces_new_mail_in_selected (EXISTS before tagged OK, expunge lowers watermark)" << std::endl;
+}
+
 int main() {
     std::cout << "IMAP FSM Test Suite\n==================\n";
 
@@ -2419,6 +2640,12 @@ int main() {
         test_append_fail_then_select_responds(fx);
         test_append_literal_excess_not_swallowed(fx);
         test_append_success_then_select_responds(fx);
+
+        // ── 2026-10-22 三缺陷回归（SELECTED STATUS / SEARCH SUBJECT / NOOP EXISTS）──
+        test_status_in_selected_other_mailbox_ok(fx);
+        test_status_on_selected_mailbox_rejected(fx);
+        test_search_subject_shorthand_criteria(fx);
+        test_noop_announces_new_mail_in_selected(fx);
 
         // ── IDLE/DONE ──
         test_idle_initiated(fx);
