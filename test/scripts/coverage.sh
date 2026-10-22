@@ -109,8 +109,10 @@ else
     (cd "$BUILD_DIR" && ctest --output-on-failure)
     # --ignore-errors negative：负计数永远是插桩竞态产物而非有效覆盖率信号
     # （编译侧已用 -fprofile-update=atomic 修复根因，这里兜底防 CI 再红）
+    # --ignore-errors inconsistent：lcov 2.x 对模板/lambda 的函数级与行级覆盖
+    # 不一致（如 http_fsm.tpp 的 init_handlers lambda）会判 fatal，属报告噪声
     lcov --capture --directory "$BUILD_DIR" --output-file "$COV_DIR/base.info" --quiet \
-        --ignore-errors negative
+        --ignore-errors negative,inconsistent
     # --ignore-errors unused：lcov 2.0 把"某个 exclude 模式没匹配到任何文件"当错误
     # 直接中断。模式是否命中随环境漂移（如本机无 .venv、build_info.h 不产生插桩
     # 数据），列表保留是为将来兜底，命中不到不应判失败。

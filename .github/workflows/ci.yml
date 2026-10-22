@@ -8,7 +8,7 @@ on:
 
 jobs:
   backend-contracts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install core dependencies
@@ -26,7 +26,7 @@ jobs:
           if find build -name '*.o.d' -exec grep -lE '/(boost|spdlog|fmt|openssl)/' {} + | grep .; then exit 1; fi
 
   webmail-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,7 +43,7 @@ jobs:
 
   # ---- 单元测试 (Debug 构建全部单测 + 运行 ctest) ----
   unit-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         worker: [STD, BOOST]
@@ -70,7 +70,7 @@ jobs:
 
   # No development headers/libraries for spdlog or fmt are installed here.
   optional-logging:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         logging: [STANDARD, NONE]
@@ -99,7 +99,7 @@ jobs:
 
   # ---- 完整构建 (确认所有 target 能编译) ----
   full-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -119,7 +119,7 @@ jobs:
 
   # ---- Fuzz 冒烟（MIME 解析器，30 秒有界运行，发现崩溃即红） ----
   fuzz-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -150,7 +150,7 @@ jobs:
 
   # ---- ASan+UBSan 单测（string_view 越界、空指针 UB 在这层暴露） ----
   asan-unit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -173,7 +173,7 @@ jobs:
 
   # ---- 覆盖率（gcc + lcov，HTML 报告上传为 artifact）----
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
