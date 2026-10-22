@@ -363,13 +363,14 @@ void ImapsSession<ConnectionType>::process_read() {
 
     if (!session->command_parsed_) return;
 
-    // IDLE DONE
+    // IDLE DONE：交回 FSM 的 handle_done 统一收口（注销 IDLE 推送注册 +
+    // 重新 arm 看门狗 + 回 OK）。此前这里内联置 idle_mode=false 并直接
+    // send_tagged，handle_done（含 rearm）在生产路径不可达。
     if (session->idle_done_received_) {
         session->idle_done_received_ = false;
         session->command_parsed_ = false;
-        session->context_.idle_mode = false;
         auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
-        fsm->send_tagged(self, session->context_.current_tag, "OK", "IDLE terminated");
+        fsm->process_event(self, ImapEvent::DONE, session->context_.current_tag);
         return;
     }
 

@@ -79,7 +79,11 @@ struct ImapContext {
     uint64_t selected_mailbox_id = 0;         // mailboxes.id
     uint64_t uid_validity = 0;               // UIDVALIDITY 值
     size_t announced_exists = 0;              // 已通过未打标签 EXISTS 宣告的邮件数
-                                              // （SELECT/EXAMINE 初始化，NOOP 据此补发新邮件 EXISTS）
+                                              // SELECT/EXAMINE 时初始化为当时条数，之后由
+                                              // NOOP（增量宣告）与 IDLE 推送共用此基线：
+                                              // 只在计数变大时补发 "* N EXISTS"，防止重复
+                                              // 宣告。缩小（他会话 EXPUNGE）不回退基线，
+                                              // 客户端靠 NOOP/重 SELECT 重同步。
 
     // 读写模式
     bool read_only = false;                   // true = EXAMINE, false = SELECT

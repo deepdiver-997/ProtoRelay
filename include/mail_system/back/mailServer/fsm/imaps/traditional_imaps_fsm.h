@@ -301,6 +301,13 @@ public:
     void send_continuation(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                            const std::string& message);
 
+    // IDLE 推送：本地投递通知入口（IdlePushRegistry 的 NotifyFn 调用）。
+    // 可从任意线程进入（SMTP io 线程 / persistence worker）：内部把真正的
+    // 查库与写连接 post 到会话自己的 executor，绝不跨线程直写连接。仅在会话
+    // 仍处 IDLE 且邮箱未变时，重查邮件数并与 announced_exists 比较，变大才
+    // 补发 untagged `* N EXISTS`。
+    void push_exists_on_delivery(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+
 private:
     // 初始化
     void init_transition_table();

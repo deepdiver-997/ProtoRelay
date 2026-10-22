@@ -4,6 +4,7 @@
 #include <exception>
 #include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/mailServer/imaps_server.h"
+#include "mail_system/back/mailServer/idle_push_registry.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/common/safe_parse.h"
@@ -101,6 +102,8 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
     this->add_transition(ImapState::AUTHENTICATED, ImapEvent::NOOP, ImapState::AUTHENTICATED);
     this->add_transition(ImapState::AUTHENTICATED, ImapEvent::IDLE, ImapState::AUTHENTICATED);
+    // DONE 走 FSM 收口（同 IDLE：无 transition 则 dispatch 直接 BAD，handler 不可达）
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::DONE, ImapState::AUTHENTICATED);
     this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, ImapState::LOGOUT);
 
     // SELECTED
@@ -125,6 +128,7 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     this->add_transition(ImapState::SELECTED, ImapEvent::NOOP, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::APPEND, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::IDLE, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::DONE, ImapState::SELECTED);
     this->add_transition(ImapState::SELECTED, ImapEvent::LOGOUT, ImapState::LOGOUT);
 
     // ERROR / TIMEOUT everywhere (remain in current state)
@@ -168,6 +172,10 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CLOSE, [this](auto session) { handle_close(session); });
     this->add_handler(ImapState::AUTHENTICATED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
     this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
+    // DONE 走 FSM 统一收口（注销 IDLE 推送注册 + 重新 arm 看门狗 + 回 OK）。
+    // 之前 DONE 无 handler，生产路径由 ImapsSession::process_read 内联处理，
+    // handle_done 实际不可达：rearm 从未在真实 DONE 上发生（2026-10-22 IDLE
+    // 推送改造时收口，见 imaps_session.tpp process_read）。
     this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
     this->add_handler(ImapState::AUTHENTICATED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
     this->add_handler(ImapState::AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
@@ -189,6 +197,8 @@ void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     this->add_handler(ImapState::SELECTED, ImapEvent::IMAP_STATUS, [this](auto session) { handle_status(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::DONE, [this](auto session) { handle_done(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::DONE, [this](auto session) { handle_done(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
     this->add_handler(ImapState::SELECTED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
@@ -604,7 +614,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
                     uint64_t uidnext = stats.uidnext;
 
                     self->set_current_state(static_cast<int>(ImapState::SELECTED));
-                    // SELECT 响应宣告了 "* count EXISTS"，NOOP 的增量宣告以此为基准
+                    // EXISTS 基线：SELECT 响应宣告了 "* count EXISTS"，NOOP 的增量
+                    // 宣告与 IDLE 推送都以此为界，只补发增量
                     ctx->announced_exists = count;
 
                     // Build SELECT response (RFC 3501: [READ-WRITE]/[READ-ONLY] on tagged OK)
@@ -687,7 +698,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
                     uint64_t uidnext = stats.uidnext;
 
                     self->set_current_state(static_cast<int>(ImapState::SELECTED));
-                    // EXAMINE 响应同样宣告 "* count EXISTS"（见 handle_select）
+                    // EXISTS 基线：EXAMINE 同样宣告 "* count EXISTS"（见 handle_select）
                     ctx->announced_exists = count;
 
                     std::string response;
@@ -1667,7 +1678,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
             ctx->selected_mailbox_name.clear();
             ctx->selected_mailbox_id = 0;
             ctx->read_only = false;
-            ctx->announced_exists = 0;
+            ctx->announced_exists = 0;   // 离开选中态：EXISTS 基线一并作废
         }
         session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
         send_tagged(session, tag, "OK", "CLOSE completed");
@@ -2688,21 +2699,83 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
 
     // RFC 2177: send continuation
     session->do_async_write("+ idling\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
+        [this](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
            const std::error_code& ec) mutable {
             if (ec) {
                 LOG_IMAP_ERROR("Error sending IDLE continuation: {}", ec.message());
                 return;
             }
             // Continue reading — DONE command will be sent by client
-            // NOTE: IDLE push notifications require a background polling
-            // mechanism that is beyond the current scope. The IMAP server
-            // accepts IDLE/DONE correctly; new-mail notifications (untagged
-            // EXISTS) will be sent when the client exits IDLE and issues
-            // a NOOP or re-selects the mailbox.
             s->do_async_read();
+
+            // 注册 IDLE 推送：投递事件 → 本会话 executor 上比对邮件数 →
+            // 变大才写 untagged EXISTS。仅已选中邮箱的会话可注册（RFC 2177
+            // 允许 authenticated 未选中态 IDLE，但那种会话没有推送目标）。
+            // NotifyFn 只弱捕获会话（注册表不持有强引用）；裸 this 依赖的
+            // 不变量：ImapsSession 持有 FSM shared_ptr，会话活着则 FSM 活着。
+            auto* ctx = static_cast<ImapContext*>(s->get_context());
+            if (!ctx || !ctx->mailbox_selected ||
+                ctx->selected_mailbox_id == 0 || ctx->username.empty()) {
+                return;
+            }
+            auto weak = std::weak_ptr<pr::SessionBase<ConnectionType>>(s);
+            auto* fsm = this;
+            IdlePushRegistry::instance().register_watcher(
+                ctx->username, s,
+                [fsm, weak] {
+                    auto self = weak.lock();
+                    if (!self) return;   // 会话已死：注册表条目由 notify 清理
+                    fsm->push_exists_on_delivery(std::move(self));
+                });
         }
     );
+}
+
+// IDLE 推送：投递通知 → 会话 executor 上重查邮件数 → 变大才补发 untagged EXISTS。
+// 线程模型（三段，全部经 executor 搬运，与 SEARCH 完成路径同款）：
+//   通知线程（SMTP io / persistence worker）只 post，不碰连接；
+//   会话 executor：取 DB 租约、发起 count 查询（真仓储的回调来自 DB 线程）；
+//   count 回调（DB 线程）再 post 回会话 executor：比对 announced_exists，
+//   变大才写 `* N EXISTS`（格式与 handle_select 一致）并更新基线。
+// 缩小（其他会话 EXPUNGE）不推不回退基线——EXPUNGE 推送属 MVP 后续工作。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::push_exists_on_delivery(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
+{
+    session->get_connection().executor()->post(
+        [this, self = std::move(session)]() mutable {
+            if (self->is_closed()) return;
+            auto* ctx = static_cast<ImapContext*>(self->get_context());
+            if (!ctx || !ctx->idle_mode || !ctx->mailbox_selected ||
+                ctx->selected_mailbox_id == 0) {
+                return;
+            }
+            const uint64_t user_id = ctx->user_id;
+            const uint64_t mailbox_id = ctx->selected_mailbox_id;
+            const int shard = ctx->shard_index;
+            auto conn = this->acquire_connection(shard);
+            // 不预检租约有效性：真仓储对无效租约有 cb(0) 兜底（0 不会大于
+            // 基线，自然不推）；单测注入的假仓储则不看租约。
+            this->get_mailbox_count_async(std::move(conn), mailbox_id, user_id,
+                [this, self, mailbox_id](size_t count) {
+                    self->get_connection().executor()->post(
+                        [self, mailbox_id, count]() mutable {
+                            if (self->is_closed()) return;
+                            auto* ctx = static_cast<ImapContext*>(self->get_context());
+                            if (!ctx || !ctx->idle_mode ||
+                                ctx->selected_mailbox_id != mailbox_id) {
+                                return;   // 已 DONE / 已切换邮箱：静默丢弃
+                            }
+                            if (count <= ctx->announced_exists) return;
+                            ctx->announced_exists = count;
+                            self->do_async_write("* " + std::to_string(count) + " EXISTS\r\n",
+                                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
+                                   const std::error_code& ec) {
+                                    if (!ec) s->do_async_read();
+                                });
+                        });
+                });
+        });
 }
 
 // ---------- DONE ----------
@@ -2712,6 +2785,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_done(
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     if (!ctx) return;
+
+    // 先摘注册（IDLE 推送只服务 idle 态会话；在途的通知任务进会话 executor
+    // 后被下方 idle_mode=false 拦截，双保险）。
+    if (!ctx->username.empty()) {
+        IdlePushRegistry::instance().unregister_watcher(ctx->username, session.get());
+    }
 
     ctx->idle_mode = false;
     session->rearm(session->config_read_timeout());   // 离开 IDLE，重新 arm
