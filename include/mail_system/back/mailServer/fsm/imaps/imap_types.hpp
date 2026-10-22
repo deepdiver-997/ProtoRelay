@@ -84,6 +84,11 @@ struct ImapContext {
 
     // IDLE
     bool idle_mode = false;                   // 是否处于 IDLE 状态
+    // 已向客户端宣告的 EXISTS 数（SELECT/EXAMINE 时置为当时邮件数）。IDLE 推送
+    // 用它做基线：投递通知到达后重查计数，只在变大时补发 untagged EXISTS，
+    // 防止重复宣告。缩小的情形（其他会话 EXPUNGE）MVP 不推也不回退基线，
+    // 客户端靠 NOOP/重 SELECT 重同步（后续做 EXPUNGE 推送时再收口）。
+    size_t announced_exists = 0;
 
     // SASL PLAIN（AUTHENTICATE）：0=非进行中 1=已发 "+ " 等待续行 2=续行已到待 FSM 消费。
     // 续行（base64 响应或 "*" 中止）不是 IMAP 命令，由 session handle_read 拦截后
@@ -116,6 +121,7 @@ struct ImapContext {
         uid_validity = 0;
         read_only = false;
         idle_mode = false;
+        announced_exists = 0;
         sasl_plain_state = 0;
         sasl_plain_response.clear();
         awaiting_literal = false;

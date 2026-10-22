@@ -1164,12 +1164,206 @@ TEST(idle_with_done) {
     h.conn->clear_written();
     fx.fsm->process_event(h.session, ImapEvent::DONE, "I001");
     h.conn->pump_executor();
-    // handle_done 写入 "I001 OK IDLE terminated"
-    assert(!w.empty());
+    // handle_done（DONE handler，2026-10-22 注册）写入 "I001 OK IDLE terminated"
+    // 并重新 arm 看门狗。此前本用例断言的是 clear_written 之前捕获的旧缓冲
+    //（实际空断言），顺手修正为断言真实 DONE 响应。
+    auto w2 = h.conn->written();
+    assert(HAS(w2, "I001 OK IDLE terminated"));
+    // DONE 后 IDLE 推送注册已注销
+    assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 0);
     // 测试结束：关闭连接，释放 deferred read handler（否则其捕获 shared_from_this
     // 的 handler 与 session 形成引用环，session 永不析构 → LSan 泄漏）
     h.session->close();
-    std::cout << "  [PASS] idle_with_done (response: " << w.substr(0, 60) << ")" << std::endl;
+    std::cout << "  [PASS] idle_with_done (response: " << w2.substr(0, 60) << ")" << std::endl;
+}
+
+// ========== IDLE push（本地投递 → untagged EXISTS，2026-10-22） ==========
+// 仿 mailbox_repository_injection：假 mailbox 仓储控制 EXISTS 计数，模拟
+// SMTP 投递提交后 mail_mailbox 行落库对计数的影响。注册表直接
+// notify_account(account)（与 smtps DATA_END 持久化成功钩子同一入口）。
+class IdlePushMailboxRepository final : public repository::IMailboxRepository {
+public:
+    std::atomic<size_t> exists{3};
+    void get_mailboxes_async(Lease, uint64_t, ListCallback cb) override { cb(true, {}); }
+    void find_mailbox_id_async(Lease, uint64_t, const std::string&, std::function<void(uint64_t)> cb) override { cb(77); }
+    void get_mailbox_mails_async(Lease, uint64_t, uint64_t, MessagesCallback cb) override { cb(true, {}); }
+    void get_mailbox_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(exists.load()); }
+    void get_mailbox_unseen_count_async(Lease, uint64_t, uint64_t, std::function<void(size_t)> cb) override { cb(0); }
+    void get_mailbox_uidnext_async(Lease, uint64_t, uint64_t, std::function<void(uint64_t)> cb) override { cb(1); }
+};
+
+// 独立 router/FSM：带 MockDbPool（真实 SELECT 有租约有效性预检），仓储注入假读取。
+struct IdlePushFixture {
+    std::shared_ptr<test::MockDbPool> pool = std::make_shared<test::MockDbPool>();
+    std::shared_ptr<router::StaticShardRouter> shards;
+    std::shared_ptr<TestServer> server;
+    std::shared_ptr<TraditionalImapsFsm<MockConnection>> fsm;
+    std::shared_ptr<IdlePushMailboxRepository> reads = std::make_shared<IdlePushMailboxRepository>();
+
+    explicit IdlePushFixture(FsmTestFixture& fx) {
+        shards = std::make_shared<router::StaticShardRouter>(
+            std::vector<std::pair<std::string, int>>{}, 0,
+            std::vector<std::shared_ptr<DBPool>>{pool},
+            std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+        server = std::make_shared<TestServer>(fx.cfg, fx.io_pool, fx.worker_pool, shards);
+        fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(fx.io_pool, fx.worker_pool, shards);
+        fsm->set_mailbox_repository(reads);
+    }
+
+    // 已认证 + 已选中 INBOX（user_id 41 / mailbox_id 77），SELECT 基线取当前计数
+    FsmTestFixture::Handle make_session() {
+        auto connection = std::make_unique<MockConnection>();
+        auto* raw = connection.get();
+        raw->set_deferred_read(true);   // IDLE 长等待：防 read→EOF→close
+        auto session = std::make_shared<ImapsSession<MockConnection>>(server.get(), std::move(connection), fsm);
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        ctx->is_authenticated = true;
+        ctx->username = "user0@test.local";
+        ctx->user_id = 41;
+        ctx->shard_index = 0;
+        ctx->mailbox_selected = true;
+        ctx->selected_mailbox_name = "INBOX";
+        ctx->selected_mailbox_id = 77;
+        ctx->announced_exists = reads->exists.load();   // SELECT 完成时写入的基线
+        session->set_current_state(static_cast<int>(ImapState::SELECTED));
+        return {raw, session};
+    }
+};
+
+TEST(idle_push_exists_on_delivery) {
+    IdlePushRegistry::instance().reset();
+    {
+        IdlePushFixture ifx(fx);
+        auto h = ifx.make_session();
+        ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "+ idling"));
+        // 注册表键大小写不敏感（SMTP 侧 RCPT 地址大小写随意）
+        assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 1);
+        assert(IdlePushRegistry::instance().watcher_count("USER0@TEST.LOCAL") == 1);
+
+        // 投递事件：3 → 5，会话应收到 untagged EXISTS
+        ifx.reads->exists.store(5);
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        h.conn->pump_executor();   // 排空：post 会话 executor → 计数查询 → post 回 → 写
+        auto w = h.conn->written();
+        assert(HAS(w, "* 5 EXISTS"));
+        auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+        assert(ctx->announced_exists == 5);
+
+        // 计数不变 → 不重复宣告（grow-only）
+        h.conn->clear_written();
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        h.conn->pump_executor();
+        assert(h.conn->written().find("EXISTS") == std::string::npos);
+
+        // 缩小（另一会话 EXPUNGE，MVP 不推 EXPUNGE）→ 不推、基线不回退；
+        // 之后涨过基线仍能正确补发
+        ifx.reads->exists.store(4);
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        h.conn->pump_executor();
+        assert(h.conn->written().find("EXISTS") == std::string::npos);
+        assert(ctx->announced_exists == 5);
+        ifx.reads->exists.store(6);
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "* 6 EXISTS"));
+    }
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_exists_on_delivery" << std::endl;
+}
+
+TEST(idle_push_ignores_session_after_done) {
+    IdlePushRegistry::instance().reset();
+    {
+        IdlePushFixture ifx(fx);
+        auto h = ifx.make_session();
+        ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "+ idling"));
+
+        // 走真实 wire 路径退出 IDLE：客户端发裸 "DONE"（无 tag），经
+        // process_read 收口到 FSM handle_done（注销注册 + 重新 arm 看门狗 + OK）
+        h.conn->trigger_deferred_read("DONE\r\n");
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "OK IDLE terminated"));
+        assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 0);
+
+        // DONE 后投递事件 → 什么都不写
+        h.conn->clear_written();
+        ifx.reads->exists.store(9);
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        h.conn->pump_executor();
+        assert(h.conn->written().find("EXISTS") == std::string::npos);
+
+        // 看门狗 re-arm 路径不破坏会话：退出 IDLE 后 NOOP 正常应答
+        ifx.fsm->process_event(h.session, ImapEvent::NOOP, "N001");
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "NOOP completed"));
+    }
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_ignores_session_after_done" << std::endl;
+}
+
+TEST(idle_push_cleans_up_destroyed_session) {
+    IdlePushRegistry::instance().reset();
+    {
+        IdlePushFixture ifx(fx);
+        {
+            auto h = ifx.make_session();
+            ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+            h.conn->pump_executor();
+            assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 1);
+        }
+        // Handle 析构（finish_session: close + 排空）→ 会话已销毁。注册表无
+        // 显式注销调用（IDLE 中被断开的会话没有 DONE），只能靠 weak 过期兜底。
+        assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 1);
+        // 销毁后的投递事件：不崩溃，且过期条目被顺手清理
+        ifx.reads->exists.store(8);
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 0);
+    }
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_cleans_up_destroyed_session" << std::endl;
+}
+
+TEST(idle_push_select_sets_exists_baseline) {
+    IdlePushRegistry::instance().reset();
+    {
+        IdlePushFixture ifx(fx);
+        ifx.reads->exists.store(4);
+        auto connection = std::make_unique<MockConnection>();
+        auto* raw = connection.get();
+        raw->set_deferred_read(true);
+        auto session = std::make_shared<ImapsSession<MockConnection>>(ifx.server.get(), std::move(connection), ifx.fsm);
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        ctx->is_authenticated = true;
+        ctx->username = "user0@test.local";
+        ctx->user_id = 41;
+        ctx->shard_index = 0;
+        session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
+        FsmTestFixture::Handle h{raw, session};
+
+        // 真实 SELECT：响应里的 EXISTS 数同时写进 ctx 基线
+        ifx.fsm->process_event(h.session, ImapEvent::SELECT, "S001");
+        h.conn->pump_executor();
+        auto w = h.conn->written();
+        assert(HAS(w, "* 4 EXISTS"));
+        assert(ctx->announced_exists == 4);
+
+        // IDLE 中投递两封 → 只补发增量 6，不重发 4
+        ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+        h.conn->pump_executor();
+        assert(HAS(h.conn->written(), "+ idling"));
+        ifx.reads->exists.store(6);
+        IdlePushRegistry::instance().notify_account("user0@test.local");
+        h.conn->pump_executor();
+        w = h.conn->written();
+        assert(HAS(w, "* 6 EXISTS"));
+        assert(w.find("* 4 EXISTS") == w.rfind("* 4 EXISTS"));   // 旧计数只出现一次（SELECT 那次）
+    }
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_select_sets_exists_baseline" << std::endl;
 }
 
 // ========== UIDNEXT 高水位（原子推进，防并发撞值/expunge 回退） ==========
@@ -2423,6 +2617,12 @@ int main() {
         // ── IDLE/DONE ──
         test_idle_initiated(fx);
         test_idle_with_done(fx);
+
+        // ── IDLE push（本地投递 → untagged EXISTS） ──
+        test_idle_push_exists_on_delivery(fx);
+        test_idle_push_ignores_session_after_done(fx);
+        test_idle_push_cleans_up_destroyed_session(fx);
+        test_idle_push_select_sets_exists_baseline(fx);
 
         std::cout << "\nAll tests passed.\n";
     } catch (const std::exception& e) {

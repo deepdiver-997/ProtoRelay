@@ -5,6 +5,7 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/common/safe_parse.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
+#include "mail_system/back/mailServer/idle_push_registry.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/common/mime_parser.h"
 #include <filesystem>
@@ -1060,6 +1061,18 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                 if (session->is_closed()) { smtp->clear_pending_mail_submission(); return; }
                 session->set_paused(false);
                 if (!result.timed_out && result.status == persist_storage::PersistStatus::SUCCESS) {
+                    // IDLE 推送钩子：投递事务已提交（mails / mail_recipients /
+                    // mail_mailbox 关联行落库）。对每个 RCPT 收件人地址通知注册表；
+                    // 注册表在锁外把后续动作 post 到各 IMAP 会话自己的 executor，
+                    // 本线程（连接 executor）零阻塞。非本域收件人在注册表里查不到
+                    // 条目，是纯 map miss，无需预先过滤。
+                    // （AFTER_ENQUEUE 应答模式不走这里：确认时持久化尚未完成，
+                    // 不推；那些会话靠 NOOP/重 SELECT 收敛，属 MVP 后续工作。）
+                    if (auto* c = static_cast<SmtpsContext*>(session->get_context())) {
+                        for (const auto& rcpt : c->recipient_addresses) {
+                            IdlePushRegistry::instance().notify_account(rcpt);
+                        }
+                    }
                     session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                     smtp->reset_mail_state();
                     static_cast<MailServerBase*>(session->get_server())->increment_mails_accepted();
