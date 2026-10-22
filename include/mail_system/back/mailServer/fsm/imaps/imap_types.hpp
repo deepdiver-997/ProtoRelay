@@ -2,7 +2,9 @@
 #define IMAPS_FSM_H
 
 #include "mail_system/back/entities/mailbox.h"
+#include "framework/net/executor.h"
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <ctime>
 #include "mail_system/back/common/safe_parse.h"   // safe_stoull（曾在此处定义，2026-10-17 收口）
@@ -88,6 +90,13 @@ struct ImapContext {
     // 读写模式
     bool read_only = false;                   // true = EXAMINE, false = SELECT
 
+    // IDLE 推送（轮询路径）。生产是 smtps / imaps 两个独立进程，进程内
+    // IdlePushRegistry 跨不过进程边界，所以 IDLE 会话靠自己的定时器周期查
+    // 邮件数——这是主路径；注册表只做同进程投递的零延迟快路径。
+    std::shared_ptr<pr::net::ITimer> idle_poll_timer;  // 会话自己的轮询定时器
+    bool idle_poll_inflight = false;                   // 上一次查数未回来：跳过本轮
+    int idle_poll_interval_ms = 1000;                  // 轮询间隔（配置可覆盖）
+
     // IDLE
     bool idle_mode = false;                   // 是否处于 IDLE 状态
 
@@ -123,6 +132,8 @@ struct ImapContext {
         announced_exists = 0;
         read_only = false;
         idle_mode = false;
+        idle_poll_timer.reset();   // 定时器由会话 io 线程 cancel 后再走到这里
+        idle_poll_inflight = false;
         sasl_plain_state = 0;
         sasl_plain_response.clear();
         awaiting_literal = false;

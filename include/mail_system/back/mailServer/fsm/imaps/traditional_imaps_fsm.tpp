@@ -2,6 +2,7 @@
 #define TRADITIONAL_IMAPS_FSM_TPP
 
 #include <exception>
+#include "framework/server_base.h"   // config_snapshot() 的完整类型（idle_poll_interval_ms）
 #include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/mailServer/imaps_server.h"
 #include "mail_system/back/mailServer/idle_push_registry.h"
@@ -2708,73 +2709,158 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
             // Continue reading — DONE command will be sent by client
             s->do_async_read();
 
-            // 注册 IDLE 推送：投递事件 → 本会话 executor 上比对邮件数 →
-            // 变大才写 untagged EXISTS。仅已选中邮箱的会话可注册（RFC 2177
+            auto* ctx = static_cast<ImapContext*>(s->get_context());
+            if (!ctx) return;
+
+            // 轮询间隔：会话存活期间配置不变，这里读一次即可
+            if (auto server = s->get_server()) {
+                if (auto cfg = server->config_snapshot()) {
+                    ctx->idle_poll_interval_ms =
+                        static_cast<int>(cfg->idle_poll_interval_ms);
+                }
+            }
+
+            // 注册 IDLE 推送快路径：同进程投递事件 → 本会话 executor 上比对
+            // 邮件数 → 变大才写 EXISTS。仅已选中邮箱的会话可注册（RFC 2177
             // 允许 authenticated 未选中态 IDLE，但那种会话没有推送目标）。
             // NotifyFn 只弱捕获会话（注册表不持有强引用）；裸 this 依赖的
             // 不变量：ImapsSession 持有 FSM shared_ptr，会话活着则 FSM 活着。
-            auto* ctx = static_cast<ImapContext*>(s->get_context());
-            if (!ctx || !ctx->mailbox_selected ||
-                ctx->selected_mailbox_id == 0 || ctx->username.empty()) {
-                return;
+            if (ctx->mailbox_selected && ctx->selected_mailbox_id != 0 &&
+                !ctx->username.empty()) {
+                auto weak = std::weak_ptr<pr::SessionBase<ConnectionType>>(s);
+                auto* fsm = this;
+                IdlePushRegistry::instance().register_watcher(
+                    ctx->username, s,
+                    [fsm, weak] {
+                        auto self = weak.lock();
+                        if (!self) return;   // 会话已死：注册表条目由 notify 清理
+                        fsm->push_exists_on_delivery(std::move(self));
+                    });
             }
-            auto weak = std::weak_ptr<pr::SessionBase<ConnectionType>>(s);
-            auto* fsm = this;
-            IdlePushRegistry::instance().register_watcher(
-                ctx->username, s,
-                [fsm, weak] {
-                    auto self = weak.lock();
-                    if (!self) return;   // 会话已死：注册表条目由 notify 清理
-                    fsm->push_exists_on_delivery(std::move(self));
-                });
+
+            // 轮询定时器才是跨进程主路径：生产 smtps / imaps 是两个独立进程，
+            // 进程内注册表跨不过去，只有查库能发现别的进程写进来的邮件。
+            this->arm_idle_poll(s);
         }
     );
 }
 
-// IDLE 推送：投递通知 → 会话 executor 上重查邮件数 → 变大才补发 untagged EXISTS。
-// 线程模型（三段，全部经 executor 搬运，与 SEARCH 完成路径同款）：
-//   通知线程（SMTP io / persistence worker）只 post，不碰连接；
-//   会话 executor：取 DB 租约、发起 count 查询（真仓储的回调来自 DB 线程）；
-//   count 回调（DB 线程）再 post 回会话 executor：比对 announced_exists，
-//   变大才写 `* N EXISTS`（格式与 handle_select 一致）并更新基线。
-// 缩小（其他会话 EXPUNGE）不推不回退基线——EXPUNGE 推送属 MVP 后续工作。
+// IDLE 推送：装载/续装轮询定时器。必须在会话 io 线程调用（定时器 mutation
+// 只能在它自己的 executor 上——ManualTimer 的 require_owner 会断言这一点）。
+// handler 只弱捕获会话：强捕获会形成 session ↔ timer 引用环（LSan 泄漏）。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::arm_idle_poll(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+    std::chrono::milliseconds delay)
+{
+    if (!session || session->is_closed()) return;
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    if (!ctx || !ctx->idle_mode) return;
+
+    if (delay.count() <= 0) {
+        int interval = ctx->idle_poll_interval_ms;
+        if (interval < 200) interval = 200;      // 防配置写成 0 → 忙轮询
+        if (interval > 60000) interval = 60000;
+        delay = std::chrono::milliseconds(interval);
+    }
+
+    auto exec = session->get_connection().executor();
+    if (!exec) return;
+    if (!ctx->idle_poll_timer) {
+        ctx->idle_poll_timer = exec->make_timer();
+        if (!ctx->idle_poll_timer) return;
+    }
+
+    auto timer = ctx->idle_poll_timer;
+    std::weak_ptr<pr::SessionBase<ConnectionType>> weak = session;
+    auto* fsm = this;
+    timer->expires_after(delay);
+    timer->async_wait([fsm, weak, delay](const std::error_code& error) {
+        if (error) return;   // cancel / 连接关闭：终止续装
+        auto self = weak.lock();
+        if (!self || self->is_closed()) return;
+        fsm->check_idle_exists(self);
+        // 续装下一轮。本轮查数是异步的，idle_poll_inflight 防止堆叠；即便
+        // 某轮查询丢了回调，定时器链本身仍然活着（活性不依赖查询成功）。
+        fsm->arm_idle_poll(std::move(self), delay);
+    });
+}
+
+// 停止轮询：cancel 经执行器 post 回定时器自己的 io 线程。捕获 timer 自身
+// shared_ptr（不依赖 session 存活），析构期调用也安全——同 disarm_timeout。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::stop_idle_poll(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
+{
+    if (!session) return;
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    if (!ctx) return;
+    ctx->idle_poll_inflight = false;
+    auto timer = ctx->idle_poll_timer;
+    if (!timer) return;
+    auto exec = timer->executor();
+    if (!exec) return;
+    exec->post([timer]() { timer->cancel(); });
+}
+
+// 核心检查：查一次邮件数 → 与 announced_exists 比较 → 变大才写 untagged
+// EXISTS。轮询与注册表快路径共用，必须在会话 io 线程调用。
+// 线程模型：io 线程发起 COUNT（DB 线程回调）→ 回调再 post 回 io 线程写连接，
+// 绝不跨线程直写连接。
+// 缩小（他会话 EXPUNGE）不推也不回退基线——EXPUNGE 推送属后续工作。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::check_idle_exists(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
+{
+    if (!session || session->is_closed()) return;
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    if (!ctx || !ctx->idle_mode || !ctx->mailbox_selected ||
+        ctx->selected_mailbox_id == 0) {
+        return;
+    }
+    if (ctx->idle_poll_inflight) return;   // 上一轮未回：跳过，绝不堆叠查询
+    ctx->idle_poll_inflight = true;
+
+    const uint64_t user_id = ctx->user_id;
+    const uint64_t mailbox_id = ctx->selected_mailbox_id;
+    auto conn = this->acquire_connection(ctx->shard_index);
+    // 直调仓储 COUNT，不经 MailboxStatsCache：后者有 8 秒 TTL，跨进程投递
+    // 后要等 TTL 才可见，轮询的意义正是绕开它。口径与 SELECT 宣告的 exists
+    // 同源（同一段 COUNT SQL）。不预检租约有效性：真仓储对无效租约 cb(0)
+    // 兜底，0 不会大于基线，自然不推；单测注入的假仓储不看租约。
+    this->get_mailbox_count_async(std::move(conn), mailbox_id, user_id,
+        [this, session, mailbox_id](size_t count) {
+            session->get_connection().executor()->post(
+                [this, session, mailbox_id, count]() mutable {
+                    if (!session || session->is_closed()) return;
+                    auto* ctx = static_cast<ImapContext*>(session->get_context());
+                    if (!ctx) return;
+                    ctx->idle_poll_inflight = false;
+                    if (!ctx->idle_mode || ctx->selected_mailbox_id != mailbox_id) {
+                        return;   // 已 DONE / 已切换邮箱：静默丢弃
+                    }
+                    if (count <= ctx->announced_exists) return;
+                    ctx->announced_exists = count;
+                    session->do_async_write(
+                        "* " + std::to_string(count) + " EXISTS\r\n",
+                        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
+                           const std::error_code& ec) {
+                            if (!ec) s->do_async_read();
+                        });
+                });
+        });
+}
+
+// IDLE 推送快路径：同进程投递通知（IdlePushRegistry NotifyFn）→ 搬回会话
+// executor → 共用 check_idle_exists 的查数/比较/写逻辑。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::push_exists_on_delivery(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
+    if (!session) return;
     session->get_connection().executor()->post(
         [this, self = std::move(session)]() mutable {
-            if (self->is_closed()) return;
-            auto* ctx = static_cast<ImapContext*>(self->get_context());
-            if (!ctx || !ctx->idle_mode || !ctx->mailbox_selected ||
-                ctx->selected_mailbox_id == 0) {
-                return;
-            }
-            const uint64_t user_id = ctx->user_id;
-            const uint64_t mailbox_id = ctx->selected_mailbox_id;
-            const int shard = ctx->shard_index;
-            auto conn = this->acquire_connection(shard);
-            // 不预检租约有效性：真仓储对无效租约有 cb(0) 兜底（0 不会大于
-            // 基线，自然不推）；单测注入的假仓储则不看租约。
-            this->get_mailbox_count_async(std::move(conn), mailbox_id, user_id,
-                [this, self, mailbox_id](size_t count) {
-                    self->get_connection().executor()->post(
-                        [self, mailbox_id, count]() mutable {
-                            if (self->is_closed()) return;
-                            auto* ctx = static_cast<ImapContext*>(self->get_context());
-                            if (!ctx || !ctx->idle_mode ||
-                                ctx->selected_mailbox_id != mailbox_id) {
-                                return;   // 已 DONE / 已切换邮箱：静默丢弃
-                            }
-                            if (count <= ctx->announced_exists) return;
-                            ctx->announced_exists = count;
-                            self->do_async_write("* " + std::to_string(count) + " EXISTS\r\n",
-                                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
-                                   const std::error_code& ec) {
-                                    if (!ec) s->do_async_read();
-                                });
-                        });
-                });
+            this->check_idle_exists(std::move(self));
         });
 }
 
@@ -2791,6 +2877,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_done(
     if (!ctx->username.empty()) {
         IdlePushRegistry::instance().unregister_watcher(ctx->username, session.get());
     }
+
+    // 停轮询：cancel post 回定时器 io 线程；在途的查数回调回来后被
+    // idle_mode=false 拦下，不会再写连接。
+    this->stop_idle_poll(session);
 
     ctx->idle_mode = false;
     session->rearm(session->config_read_timeout());   // 离开 IDLE，重新 arm

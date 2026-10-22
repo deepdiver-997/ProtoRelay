@@ -21,6 +21,7 @@
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/mail_crypto.h"
+#include "manual_executor.h"
 #include "mock_connection.h"
 #include "mock_db_pool.h"
 #include "mail_system/back/storage/local_file_storage_provider.h"
@@ -1364,6 +1365,148 @@ TEST(idle_push_select_sets_exists_baseline) {
     }
     IdlePushRegistry::instance().reset();
     std::cout << "  [PASS] idle_push_select_sets_exists_baseline" << std::endl;
+}
+
+// ========== IDLE 轮询推送（跨进程主路径，2026-10-22） ==========
+// 生产 smtps / imaps 是两个独立进程，进程内 IdlePushRegistry 跨不过进程
+// 边界；IDLE 会话靠自己的定时器周期查库发现新邮件。用 ManualExecutor /
+// ManualTimer 确定性驱动（fire() 手动触发），不依赖真实时钟。
+struct IdlePollSession {
+    MockConnection* conn = nullptr;
+    std::shared_ptr<ImapsSession<MockConnection>> session;
+    std::shared_ptr<test::ManualExecutor> exec;
+
+    ~IdlePollSession() {
+        if (!session) return;
+        if (!session->is_closed()) {
+            session->set_trace_clean_close();
+            session->close();
+        }
+        // 收尾：close 的发起 post、在途续作都在注入的执行器队列里。排空让
+        // 引用计数收敛（同 finish_session 的契约，但驱动的是 ManualExecutor）。
+        for (int i = 0; i < 64 && session.use_count() > 1; ++i) {
+            exec->drain();
+        }
+    }
+};
+
+struct IdlePollFixture {
+    std::shared_ptr<test::ManualExecutor> exec = std::make_shared<test::ManualExecutor>();
+    std::shared_ptr<test::MockDbPool> pool = std::make_shared<test::MockDbPool>();
+    std::shared_ptr<router::StaticShardRouter> shards;
+    std::shared_ptr<TestServer> server;
+    std::shared_ptr<TraditionalImapsFsm<MockConnection>> fsm;
+    std::shared_ptr<IdlePushMailboxRepository> reads = std::make_shared<IdlePushMailboxRepository>();
+
+    explicit IdlePollFixture(FsmTestFixture& fx) {
+        shards = std::make_shared<router::StaticShardRouter>(
+            std::vector<std::pair<std::string, int>>{}, 0,
+            std::vector<std::shared_ptr<DBPool>>{pool},
+            std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+        server = std::make_shared<TestServer>(fx.cfg, fx.io_pool, fx.worker_pool, shards);
+        fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(fx.io_pool, fx.worker_pool, shards);
+        fsm->set_mailbox_repository(reads);
+    }
+
+    IdlePollSession make_session() {
+        auto connection = std::make_unique<MockConnection>(exec);   // 注入确定性执行器
+        auto* raw = connection.get();
+        raw->set_deferred_read(true);   // IDLE 长等待：防 read→EOF→close
+        auto session = std::make_shared<ImapsSession<MockConnection>>(
+            server.get(), std::move(connection), fsm);
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        ctx->is_authenticated = true;
+        ctx->username = "user0@test.local";
+        ctx->user_id = 41;
+        ctx->shard_index = 0;
+        ctx->mailbox_selected = true;
+        ctx->selected_mailbox_name = "INBOX";
+        ctx->selected_mailbox_id = 77;
+        ctx->announced_exists = reads->exists.load();
+        session->set_current_state(static_cast<int>(ImapState::SELECTED));
+        return IdlePollSession{raw, session, exec};
+    }
+};
+
+TEST(idle_push_poll_delivers_across_process) {
+    IdlePushRegistry::instance().reset();
+    {
+        IdlePollFixture ifx(fx);
+        auto h = ifx.make_session();
+        ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+        ifx.exec->drain();
+        assert(HAS(h.conn->written(), "+ idling"));
+
+        auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+        auto timer = std::dynamic_pointer_cast<test::ManualTimer>(ctx->idle_poll_timer);
+        assert(timer && "IDLE 必须装载轮询定时器（跨进程主路径）");
+        assert(timer->delay.count() == 1000);   // 默认 idle_poll_interval_ms
+
+        // 模拟另一进程（smtps）投递：只有数据库计数变化，没有任何进程内通知
+        ifx.reads->exists.store(5);
+        timer->fire();
+        ifx.exec->drain();
+        assert(HAS(h.conn->written(), "* 5 EXISTS"));
+        assert(ctx->announced_exists == 5);
+
+        // 定时器已续装；计数不变不重复宣告（grow-only）
+        h.conn->clear_written();
+        auto next = std::dynamic_pointer_cast<test::ManualTimer>(ctx->idle_poll_timer);
+        assert(next && next->waits == 2);       // 首装 + 一轮续装
+        next->fire();
+        ifx.exec->drain();
+        assert(h.conn->written().find("EXISTS") == std::string::npos);
+
+        // 再涨：跨进程场景持续有效
+        ifx.reads->exists.store(7);
+        next->fire();
+        ifx.exec->drain();
+        assert(HAS(h.conn->written(), "* 7 EXISTS"));
+    }
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_poll_delivers_across_process" << std::endl;
+}
+
+TEST(idle_push_poll_done_cancels_timer) {
+    IdlePushRegistry::instance().reset();
+    {
+        IdlePollFixture ifx(fx);
+        auto h = ifx.make_session();
+        ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+        ifx.exec->drain();
+        auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+        auto timer = std::dynamic_pointer_cast<test::ManualTimer>(ctx->idle_poll_timer);
+        assert(timer && timer->waits == 1);
+
+        // 真实 wire 路径 DONE（无 tag）→ handle_done 停轮询 + 摘注册 + rearm
+        h.conn->trigger_deferred_read("DONE\r\n");
+        ifx.exec->drain();
+        assert(HAS(h.conn->written(), "OK IDLE terminated"));
+        assert(IdlePushRegistry::instance().watcher_count("user0@test.local") == 0);
+        assert(timer->cancels >= 1);
+        assert(!timer->handler && "DONE 后不得再有挂起的轮询等待（不续装）");
+    }
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_poll_done_cancels_timer" << std::endl;
+}
+
+TEST(idle_push_poll_no_leak_on_idle_disconnect) {
+    IdlePushRegistry::instance().reset();
+    IdlePollFixture ifx(fx);
+    std::weak_ptr<ImapsSession<MockConnection>> weak;
+    {
+        auto h = ifx.make_session();
+        ifx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+        ifx.exec->drain();
+        auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+        assert(std::dynamic_pointer_cast<test::ManualTimer>(ctx->idle_poll_timer));
+        weak = h.session;
+        // 客户端直接断开（没有 DONE）：析构走 close + 排空
+    }
+    // 定时器 handler 只弱捕获会话；泄漏即说明形成了 session ↔ timer 引用环
+    assert(weak.expired() && "IDLE 中断开：轮询定时器不得把会话钉住");
+    IdlePushRegistry::instance().reset();
+    std::cout << "  [PASS] idle_push_poll_no_leak_on_idle_disconnect" << std::endl;
 }
 
 // ========== UIDNEXT 高水位（原子推进，防并发撞值/expunge 回退） ==========
@@ -2850,6 +2993,9 @@ int main() {
         test_idle_push_ignores_session_after_done(fx);
         test_idle_push_cleans_up_destroyed_session(fx);
         test_idle_push_select_sets_exists_baseline(fx);
+        test_idle_push_poll_delivers_across_process(fx);
+        test_idle_push_poll_done_cancels_timer(fx);
+        test_idle_push_poll_no_leak_on_idle_disconnect(fx);
 
         std::cout << "\nAll tests passed.\n";
     } catch (const std::exception& e) {
