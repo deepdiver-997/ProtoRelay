@@ -143,7 +143,11 @@ void pool_and_lease_survive_every_delayed_stage() {
 }
 class ThrowingResult final : public test::MockDbResult {
 public:
-    ThrowingResult() : MockDbResult({{{"id", "1"}, {"cnt", "1"}}}) {}
+    // 显式写出参数类型：gcc-11 下裸花括号列表会同时匹配 vector 转换构造与
+    // 拷贝/移动构造（ambiguous），clang 与 gcc-13 均接受，只有 gcc-11 拒绝。
+    ThrowingResult()
+        : MockDbResult(std::vector<std::map<std::string, std::string>>(
+              {{{"id", "1"}, {"cnt", "1"}}})) {}
     std::string get_value(size_t, const std::string&) const override { throw std::runtime_error("column mapping failed"); }
 };
 class ThrowingConnection final : public test::MockDbConnection {

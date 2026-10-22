@@ -10,12 +10,19 @@ SCRIPT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 print_usage() {
     cat <<'EOF'
-Usage: ./link.sh <entry_obj> [-o output] [--obj-root dir] [--compiler cxx] [--dry-run]
+Usage: ./link.sh <entry_obj> [-o output] [--obj-root dir] [--collect-dir dir]... [--compiler cxx] [--dry-run]
 
 Options:
   --obj-root <dir>   显式指定收集 .o 的根目录。强烈建议在部署脚本里always 指定：
                      不指定时会退回按脚本所在位置推断，若同一目录下存在多份
                      对象树（如 obj/ 与 build-obj/）会被一并链接 → 重复符号。
+  --collect-dir <dir>
+                     只从这些目录收集 .o（可重复给出多个）。给出本选项后
+                     --obj-root 仅用于校验入口归属，收集范围收窄到列出的目录。
+                     推荐部署脚本一律使用：对象根目录若混入历史遗留的孤儿 .o
+                     （源文件已删除/搬移的旧对象），全量收集会把它们链进产物，
+                     孤儿强符号覆盖现行 inline 弱符号 → ODR 劫持（2026-10-22
+                     生产启动 SEGV 即此根因）。
   --exclude <pat>    跳过路径含该子串的 .o（用于排除其它入口的 main）
   --compiler <cxx>   指定编译器（交叉部署时通常是目标机上的 g++-13）
 
@@ -44,6 +51,7 @@ DRY_RUN="0"
 PIE_MODE="OFF"
 OBJ_ROOT_OVERRIDE=""
 EXCLUDE_PATTERNS=()
+COLLECT_DIRS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -58,8 +66,13 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --obj-root)
-            [[ $# -ge 2 ]] || { echo "Missing value for --obj-root" >&2; exit 1; }
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
             OBJ_ROOT_OVERRIDE="$2"
+            shift 2
+            ;;
+        --collect-dir)
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
+            COLLECT_DIRS+=("$2")
             shift 2
             ;;
         --exclude)
@@ -194,6 +207,29 @@ if [[ "$_obj_dirs" -gt 1 && ${#EXCLUDE_PATTERNS[@]} -eq 0 ]]; then
     echo "         Multiple entry points will collide (duplicate main). Consider --exclude." >&2
 fi
 
+# 收集范围：默认整棵 --obj-root；给了 --collect-dir 则收窄到列出的目录。
+# 收集目录必须在 --obj-root 之下（相对路径按 CWD 解析），防止收集范围与入口脱钩。
+SEARCH_DIRS=()
+if [[ ${#COLLECT_DIRS[@]} -gt 0 ]]; then
+    for _cd in "${COLLECT_DIRS[@]}"; do
+        if [[ ! -d "$_cd" ]]; then
+            echo "Collect directory not found: $_cd" >&2
+            exit 1
+        fi
+        _cd_abs="$(abspath "$_cd")"
+        if [[ "$_cd_abs" != "$OBJ_ROOT/"* ]]; then
+            echo "Collect directory is outside --obj-root:" >&2
+            echo "  collect-dir: $_cd_abs" >&2
+            echo "  obj-root   : $OBJ_ROOT" >&2
+            exit 1
+        fi
+        SEARCH_DIRS+=("$_cd_abs")
+    done
+    unset _cd _cd_abs
+else
+    SEARCH_DIRS+=("$OBJ_ROOT")
+fi
+
 OBJECTS=()
 while IFS= read -r line; do
     skip=0
@@ -204,7 +240,7 @@ while IFS= read -r line; do
         fi
     done
     [[ $skip -eq 0 ]] && OBJECTS+=("$line")
-done < <(find "$OBJ_ROOT" -type f -name '*.o' | sort)
+done < <(find "${SEARCH_DIRS[@]}" -type f -name '*.o' | sort)
 if [[ ${#OBJECTS[@]} -eq 0 ]]; then
     echo "No object files found under: $OBJ_ROOT" >&2
     exit 1

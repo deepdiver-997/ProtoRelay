@@ -93,27 +93,33 @@ echo "  Uploaded to obj.new/ (incremental via --link-dest)"
 # --- Step 4: 链接到 *.new ---
 # --obj-root 必须显式给：否则 link.sh 会收集 $TARGET_DIR 下**所有** .o
 # （服务器上还留着历史的 build-obj/），两份对象树混链 → 重复符号。
-# --exclude webServer_obj：webServer_obj 树里有一份 COMMON_SRCS 拷贝 + 自己的
-# main，release -O3 下靠内联退化成弱符号才没炸；-O1/ASan 构建下是强符号，
-# 必为 multiple definition（gold 实测）。imaps/smtps 二进制永远不需要它。
-# 重构后对象树互补而非自包含：smtps 树含框架/会话实例（imaps 链接也依赖它），
-# 故只需排除其它入口（*_test.cpp.o 带 main、webServer 树、老 combined 单体入口）。
-# 新增共享编译单元时注意 --exclude 是"路径含子串"匹配，别用宽泛前缀。
+# --collect-dir 把收集范围进一步收窄到链接真正需要的对象树：
+#   smtps 二进制 = smtpsServer_obj.dir 一棵树（自包含：框架/会话实例/仓库全在里面）
+#   imaps 二进制 = imapsServer_obj.dir（入口）+ smtpsServer_obj.dir（框架/会话实例）
+# 绝不能按 --obj-root 全量收集：对象根目录里若混入孤儿 .o（源文件已删除/搬移的
+# 旧对象，CMake 增量构建不会清理它们），孤儿里冻结的旧版强符号会覆盖现行头文件
+# inline（弱）符号——2026-10-22 生产启动 SEGV 的根因（两个月前删除的
+# back/storage/local_file_storage_provider.cpp.o 里旧版构造函数劫持了新包装类，
+# 新布局对象被旧构造函数初始化，bootstrap 阶段解引用未构造的基子对象即崩）。
+# build.sh 导出时已剪枝孤儿 .o；这里 collect-dir 是第二道防线。
+# webServer_obj / mailServer_obj 树因此天然不进链接，不再依赖 --exclude 子串。
 echo "[4/6] Linking binaries on server (link extra: ${LINK_EXTRA:-none})..."
 if [ "$DEPLOY_SMTP" = "1" ]; then
     ssh_strict "cd '$TARGET_DIR' && \
         LINK_EXTRA_FLAGS='$LINK_EXTRA' bash link.sh obj.new/CMakeFiles/smtpsServer_obj.dir/test/server/smtps_test.cpp.o \
             --obj-root obj.new \
-            -o smtpsServer.new --compiler g++-13 \
-            --exclude imaps_test --exclude webServer_obj --exclude mail_server_combined 2>&1 | tail -1"
+            --collect-dir obj.new/CMakeFiles/smtpsServer_obj.dir \
+            -o smtpsServer.new --compiler g++-13 2>&1 | tail -1"
 else
     echo "  DEPLOY_SMTP=0: skip smtpsServer (现役不动)"
 fi
 ssh_strict "cd '$TARGET_DIR' && \
     LINK_EXTRA_FLAGS='$LINK_EXTRA' bash link.sh obj.new/CMakeFiles/imapsServer_obj.dir/test/server/imaps_test.cpp.o \
         --obj-root obj.new \
-        -o imapsServer.new --compiler g++-13 \
-        --exclude smtps_test --exclude webServer_obj --exclude mail_server_combined 2>&1 | tail -1"
+        --collect-dir obj.new/CMakeFiles/imapsServer_obj.dir \
+        --collect-dir obj.new/CMakeFiles/smtpsServer_obj.dir \
+        --exclude smtps_test \
+        -o imapsServer.new --compiler g++-13 2>&1 | tail -1"
 
 # 产物校验：链接曾经静默失败过，这里必须挡住
 if [ "$DEPLOY_SMTP" = "1" ]; then

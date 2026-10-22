@@ -774,6 +774,31 @@ if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
         done < <(find "$obj_dir" -type f -name '*.o' | sort)
     done
 
+    # ---- 剪枝孤儿 .o（2026-10-22 生产启动 SEGV 的根因防御）----
+    # CMake 增量构建不会清理"源文件已被删除/搬移"的旧 .o，它们留在构建目录里
+    # 并被上面的镜像导出原样带进部署产物；而 link.sh 按 obj 根目录全量收集 .o。
+    # 孤儿里冻结的旧版代码一旦与现行代码产生同名符号（重构改类布局/改名后必然），
+    # ELF 的"强符号覆盖弱符号"会让旧版 out-of-line 定义劫持现行头文件 inline（弱）
+    # 符号：2026-10-22 事故中，删除两个月前的 back/storage/local_file_storage_
+    # provider.cpp.o 里旧版构造函数（强）覆盖了现行包装类的 inline 构造函数（弱），
+    # 以旧成员布局初始化新双继承对象 → pr:: 基子对象的 directories_ 向量从未构造
+    # → bootstrap 阶段虚调用 ensure_ready 解引用垃圾指针，smtps/imaps 双双启动即崩。
+    # 判据：导出树里的每个 .o 必须能在当前检出中找到对应源文件，否则删除。
+    PRUNED=0
+    while IFS= read -r obj; do
+        rel="${obj#${EXPORT_DIR}/CMakeFiles/}"
+        src="${rel#*.dir/}"
+        src="${src%.o}"
+        if [ ! -f "${SCRIPT_DIR}/${src}" ]; then
+            rm -f "$obj"
+            print_warning "Pruned orphan object (source no longer exists): ${src}"
+            PRUNED=$((PRUNED + 1))
+        fi
+    done < <(find "${EXPORT_DIR}/CMakeFiles" -type f -name '*.o' 2>/dev/null | sort)
+    if [ "$PRUNED" -gt 0 ]; then
+        print_info "Pruned ${PRUNED} orphan object file(s) from export"
+    fi
+
     # 把链接脚本也放进去，目标机可直接复用。
     if [ -f "${SCRIPT_DIR}/link.sh" ]; then
         cp "${SCRIPT_DIR}/link.sh" "${EXPORT_DIR}/"
