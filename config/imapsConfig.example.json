@@ -23,6 +23,7 @@
   "connection_timeout": 300,
   "read_timeout": 60,
   "write_timeout": 60,
+  "idle_poll_interval_ms": 1000,
   "max_auth_attempts": 3,
 
   "perf_mode": true,

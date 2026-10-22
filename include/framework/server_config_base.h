@@ -70,6 +70,10 @@ struct ServerConfig {
     uint32_t connection_timeout;
     uint32_t read_timeout;
     uint32_t write_timeout;
+    // IMAP IDLE 期间发现新邮件的轮询间隔（毫秒）。生产 smtps / imaps 是两个
+    // 独立进程，进程内投递通知跨不过去，IDLE 会话靠自己的定时器查库发现新
+    // 邮件；这个值就是跨进程推送的实际延迟上限。解析时钳制到 [200, 60000]。
+    uint32_t idle_poll_interval_ms;
 
     size_t max_auth_attempts;
 
@@ -96,6 +100,7 @@ struct ServerConfig {
         , connection_timeout(300)
         , read_timeout(60)
         , write_timeout(60)
+        , idle_poll_interval_ms(1000)
         , max_auth_attempts(3)
         , log_level("info")
         , log_to_console(true)
@@ -145,6 +150,9 @@ struct ServerConfig {
         connection_timeout  = j.value("connection_timeout", connection_timeout);
         read_timeout        = j.value("read_timeout", read_timeout);
         write_timeout       = j.value("write_timeout", write_timeout);
+        idle_poll_interval_ms = j.value("idle_poll_interval_ms", idle_poll_interval_ms);
+        if (idle_poll_interval_ms < 200) idle_poll_interval_ms = 200;
+        if (idle_poll_interval_ms > 60000) idle_poll_interval_ms = 60000;
         max_auth_attempts   = j.value("max_auth_attempts", max_auth_attempts);
         log_level           = j.value("log_level", log_level);
         log_file            = resolve_path(base_dir, j.value("log_file", log_file));

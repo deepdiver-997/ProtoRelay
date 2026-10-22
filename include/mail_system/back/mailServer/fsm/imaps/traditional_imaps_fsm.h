@@ -306,7 +306,20 @@ public:
     // 查库与写连接 post 到会话自己的 executor，绝不跨线程直写连接。仅在会话
     // 仍处 IDLE 且邮箱未变时，重查邮件数并与 announced_exists 比较，变大才
     // 补发 untagged `* N EXISTS`。
+    // 注意：生产 smtps / imaps 是两个独立进程，注册表只在同进程（组合二进制
+    // mailServer）命中；跨进程的新邮件靠下面的轮询定时器发现。
     void push_exists_on_delivery(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+
+    // IDLE 推送：轮询定时器装载/续装（必须在会话 io 线程调用）。
+    // delay 为 0 表示按会话配置的 idle_poll_interval_ms。
+    void arm_idle_poll(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+                       std::chrono::milliseconds delay = std::chrono::milliseconds(0));
+    // 停止轮询：cancel 经执行器 post 回定时器自己的 io 线程（同 disarm_timeout
+    // 的跨线程纪律），可从任意线程调用。
+    void stop_idle_poll(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    // 核心检查：查一次邮件数 → 与 announced_exists 比较 → 变大才写 EXISTS。
+    // 轮询与注册表快路径共用，必须在会话 io 线程调用。
+    void check_idle_exists(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
 private:
     // 初始化
