@@ -484,8 +484,14 @@ void listener_contract(PollerBackend backend, uint16_t hint) {
     });
     transport->start([&](std::unique_ptr<IConnection>, const ListenerConfig&) {}); // no-op
 
-    // stop() returns after queued accept callbacks ran; none can run after.
+    // connect() completing only queues the peer in the kernel backlog; the
+    // accept callback is dispatched by the loop, so wait for it before stop.
     RawPeer peer(open_connected_socket(bound));
+    const auto accept_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (accepted.load() < 1 && std::chrono::steady_clock::now() < accept_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // stop() returns after queued accept callbacks ran; none can run after.
     transport->stop();
     const int accepted_before = accepted.load();
     assert(accepted_before >= 1);
