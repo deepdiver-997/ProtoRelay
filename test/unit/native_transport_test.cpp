@@ -380,15 +380,18 @@ void cancel_exactly_once(PollerBackend backend, uint16_t hint) {
         read_result.set_value(error);
     });
 
-    // Watchdog pattern: a timer on the connection executor fires cancel().
+    // Watchdog pattern: a timer armed ON the connection executor fires
+    // cancel() (timers mutate on their executor).
     auto watchdog = executor->make_timer();
-    watchdog->expires_after(std::chrono::milliseconds(50));
     std::promise<void> watchdog_fired;
     auto watchdog_outcome = watchdog_fired.get_future();
-    watchdog->async_wait([&](const std::error_code& error) {
-        assert(!error);
-        server_side->cancel(); // not close: the connection survives
-        watchdog_fired.set_value();
+    executor->post([&] {
+        watchdog->expires_after(std::chrono::milliseconds(50));
+        watchdog->async_wait([&](const std::error_code& error) {
+            assert(!error);
+            server_side->cancel(); // not close: the connection survives
+            watchdog_fired.set_value();
+        });
     });
     assert(ready_within(read_outcome, std::chrono::seconds(5)));
     assert(read_outcome.get() == std::make_error_code(std::errc::operation_canceled));
