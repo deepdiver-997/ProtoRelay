@@ -505,7 +505,17 @@ if(NOT PROTORELAY_BUILD_MAIL)
             add_test(NAME ${_test} COMMAND ${_test})
             set_tests_properties(${_test} PROPERTIES TIMEOUT 20)
         endforeach()
-        add_custom_target(unit_tests DEPENDS logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test)
+        # Native (non-Asio) network backend: builds and runs in this reduced
+        # configuration too — it must not depend on Boost/OpenSSL/spdlog.
+        foreach(_test native_poller_test native_runtime_test native_transport_test)
+            add_executable(${_test} test/unit/${_test}.cpp)
+            target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_link_libraries(${_test} PRIVATE protorelay_native_net)
+            add_test(NAME ${_test} COMMAND ${_test})
+            set_tests_properties(${_test} PROPERTIES TIMEOUT 120)
+        endforeach()
+        add_custom_target(unit_tests DEPENDS logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test
+            native_poller_test native_runtime_test native_transport_test)
     endif()
     add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
     add_test(NAME object_tree_hygiene COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_object_tree_hygiene.cmake)
@@ -877,6 +887,15 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_link_libraries(server_transport_test PRIVATE protorelay_logging nlohmann_json::nlohmann_json)
     add_test(NAME server_transport_test COMMAND server_transport_test)
     set_tests_properties(server_transport_test PROPERTIES TIMEOUT 20)
+
+    # Native (non-Asio) network backend tests: parallel optional module, the
+    # Asio production wiring is untouched. Registered like every other unit
+    # test via the catch-all ctest scan below.
+    foreach(_test native_poller_test native_runtime_test native_transport_test)
+        add_executable(${_test} test/unit/${_test}.cpp)
+        target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_link_libraries(${_test} PRIVATE protorelay_native_net)
+    endforeach()
 
     add_executable(asio_executor_test test/unit/asio_executor_test.cpp)
     target_include_directories(asio_executor_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
