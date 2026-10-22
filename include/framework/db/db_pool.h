@@ -28,7 +28,9 @@ public:
 // ---- IDBConnection: 数据库连接接口 ----
 class IDBConnection {
 public:
-    enum class Dialect { MySQL, Null };
+    // SQLite 追加在尾部（不改动既有枚举值），供可选的本地状态库驱动
+    // （protorelay_db_sqlite）标识方言；MySQL 路径行为不受影响。
+    enum class Dialect { MySQL, Null, SQLite };
 
     virtual ~IDBConnection() = default;
     virtual Dialect dialect() const = 0;

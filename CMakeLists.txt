@@ -300,6 +300,17 @@ elseif(NOT BUILD_OBJECT_ONLY)
     message(STATUS "mariadb-connector-c headers not found — MariaDB 引擎不编译（achieve=mariadb 不可用）")
 endif()
 
+# ---- SQLite3（可选本地状态库驱动，直接链接；macOS 系统 SDK / Homebrew 均可） ----
+# SDK 缺失时仅跳过 protorelay_db_sqlite 模块及其测试，不影响其余构建。
+find_package(SQLite3 QUIET)
+if(SQLite3_FOUND)
+    set(HAVE_SQLITE3 1)
+    message(STATUS "SQLite3 found: ${SQLite3_VERSION} — protorelay_db_sqlite 启用")
+else()
+    set(HAVE_SQLITE3 0)
+    message(STATUS "SQLite3 not found — SQLite 驱动模块不编译（本地状态库方向未启用）")
+endif()
+
 endif()
 
 # ===== 链接库列表 =====
@@ -905,6 +916,16 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         set_tests_properties(mariadb_async_test PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
+    # SQLite 驱动回归：本地文件库（AGENT_TMP_ROOT 下进程独占目录，测试自清理）。
+    # 库文件由测试自行创建，无外部服务依赖——77 仅在临时目录不可用时出现。
+    if(HAVE_SQLITE3)
+        add_executable(sqlite_driver_test test/unit/sqlite_driver_test.cpp)
+        target_include_directories(sqlite_driver_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+        target_link_libraries(sqlite_driver_test PRIVATE protorelay_db_sqlite protorelay_runtime)
+        add_test(NAME sqlite_driver_test COMMAND sqlite_driver_test)
+        set_tests_properties(sqlite_driver_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
+
     # 会话/FSM/服务基座：TestSession::close() 引用 ServerBase 成员符号
     # （server_base.cpp），须链 COMMON_SRCS（同 smtps/imaps_fsm_test 模式）
     add_executable(fsm_base_test ${COMMON_SRCS} test/unit/fsm_base_test.cpp)
@@ -1105,6 +1126,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     if(HAVE_MARIADB)
         add_dependencies(unit_tests mariadb_async_test)
+    endif()
+    if(HAVE_SQLITE3)
+        add_dependencies(unit_tests sqlite_driver_test)
     endif()
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
