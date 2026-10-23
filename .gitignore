@@ -4,6 +4,7 @@ Testing/
 # ==================== 编译产物 ====================
 # CMake 构建目录
 build/
+build-fw/
 build-tsan/
 build-fuzz/
 build-asan/

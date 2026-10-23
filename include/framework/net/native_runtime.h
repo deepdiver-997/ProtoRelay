@@ -53,6 +53,9 @@ class NativeTimer;
 // possible even when destruction races a fire.
 struct TimerWait {
     std::atomic<bool> abandoned{false};
+    // The wheel has already removed this slot (expiry or loop shutdown).
+    // NativeTimer::cancel must not erase its now-invalid iterator.
+    std::atomic<bool> detached{false};
     ITimer::Handler handler; // taken by the loop before any invocation
 };
 using TimerWheel = std::multimap<std::chrono::steady_clock::time_point, std::shared_ptr<TimerWait>>;
