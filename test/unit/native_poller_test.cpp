@@ -1,6 +1,7 @@
 // Native poller contract tests, run against EVERY backend compiled into this
-// binary (kqueue + poll on macOS, poll on Linux): level-triggered readiness,
-// hangup folding, EINTR deadline preservation and the env override switch.
+// binary (kqueue + poll on macOS, epoll + poll on Linux): level-triggered
+// readiness, hangup folding, EINTR deadline preservation and the env override
+// switch.
 #undef NDEBUG
 #include "framework/net/native/poller.h"
 
@@ -180,6 +181,15 @@ int main() {
     std::string chosen;
     ::setenv("PROTORELAY_NATIVE_POLLER", "poll", 1);
     assert(make_poller_from_env(&chosen) && chosen == "poll");
+#if defined(__linux__)
+    ::setenv("PROTORELAY_NATIVE_POLLER", "epoll", 1);
+    assert(make_poller_from_env(&chosen) && chosen == "epoll");
+#else
+    // epoll is not compiled in here — the enumerator does not exist, the name
+    // parses as unknown and the request lands on the platform default.
+    ::setenv("PROTORELAY_NATIVE_POLLER", "epoll", 1);
+    assert(make_poller_from_env(&chosen) && chosen == backend_name(default_poller_backend()));
+#endif
 #ifdef __APPLE__
     ::setenv("PROTORELAY_NATIVE_POLLER", "kqueue", 1);
     assert(make_poller_from_env(&chosen) && chosen == "kqueue");

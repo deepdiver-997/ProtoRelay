@@ -20,6 +20,21 @@ bool ready_within(std::future<T>& future, std::chrono::milliseconds budget) {
     return future.wait_for(budget) == std::future_status::ready;
 }
 
+// Drive a non-running loop until the future completes or the wall-clock budget
+// expires. A fixed iteration count is not equivalent: below one millisecond of
+// remaining timer distance the wait truncates to zero, so poll_once returns
+// immediately and a bounded number of iterations can pass long before the
+// deadline — which it did on Linux, where the syscall is cheaper than kevent.
+template <typename T>
+void pump_until(NativeLoop& loop, std::future<T>& future,
+                std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!ready_within(future, std::chrono::milliseconds(0)) &&
+           std::chrono::steady_clock::now() < deadline) {
+        loop.poll_once(5);
+    }
+}
+
 // post() from outside and from the loop thread itself must never execute at
 // the call site; queued tasks run in a later drain.
 void post_never_inline(PollerBackend backend) {
@@ -96,8 +111,7 @@ void timer_fires_once(PollerBackend backend) {
         calls.fetch_add(1);
         fired.set_value(error);
     });
-    for (int i = 0; i < 200 && !ready_within(outcome, std::chrono::milliseconds(0)); ++i)
-        loop->poll_once(5);
+    pump_until(*loop, outcome, std::chrono::milliseconds(5000));
     assert(ready_within(outcome, std::chrono::milliseconds(0)));
     assert(!outcome.get());
     assert(calls.load() == 1);
@@ -132,8 +146,7 @@ void timer_cancel_completes_once(PollerBackend backend) {
     auto refire_outcome = refired.get_future();
     timer->expires_after(std::chrono::milliseconds(1));
     timer->async_wait([&](const std::error_code& error) { refired.set_value(error); });
-    for (int i = 0; i < 200 && !ready_within(refire_outcome, std::chrono::milliseconds(0)); ++i)
-        loop->poll_once(5);
+    pump_until(*loop, refire_outcome, std::chrono::milliseconds(5000));
     assert(ready_within(refire_outcome, std::chrono::milliseconds(0)));
     assert(!refire_outcome.get());
 }
@@ -151,8 +164,7 @@ void timer_rearm_displaces_once(PollerBackend backend) {
     std::promise<std::error_code> second;
     auto second_outcome = second.get_future();
     timer->async_wait([&](const std::error_code& error) { second.set_value(error); });
-    for (int i = 0; i < 200 && !ready_within(second_outcome, std::chrono::milliseconds(0)); ++i)
-        loop->poll_once(5);
+    pump_until(*loop, second_outcome, std::chrono::milliseconds(5000));
     assert(ready_within(second_outcome, std::chrono::milliseconds(0)));
     assert(!second_outcome.get());
     assert(ready_within(first_outcome, std::chrono::milliseconds(0)));

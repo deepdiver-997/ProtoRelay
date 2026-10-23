@@ -31,9 +31,10 @@ protorelay_module(protorelay_runtime
     src/framework/thread_pool/io_context_registry.cpp)
 target_link_libraries(protorelay_runtime PUBLIC protorelay_asio)
 
-# Native (non-Asio) network backend: poller abstraction (kqueue + POSIX poll),
-# IO runtime and plain-TCP transports. Parallel optional module — nothing in
-# the production services links it yet; the Asio pool remains the default.
+# Native (non-Asio) network backend: poller abstraction (kqueue on Apple/BSD,
+# epoll on Linux, POSIX poll fallback), IO runtime and plain-TCP transports.
+# Parallel optional module — nothing in the production services links it yet;
+# the Asio pool remains the default.
 set(NATIVE_NET_SRCS
     src/framework/net/native/poller.cpp
     src/framework/net/native/poller_poll.cpp
@@ -43,6 +44,9 @@ set(NATIVE_NET_SRCS
     src/framework/net/native_client_transport.cpp)
 if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")
     list(APPEND NATIVE_NET_SRCS src/framework/net/native/poller_kqueue.cpp)
+endif()
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+    list(APPEND NATIVE_NET_SRCS src/framework/net/native/poller_epoll.cpp)
 endif()
 protorelay_module(protorelay_native_net ${NATIVE_NET_SRCS})
 

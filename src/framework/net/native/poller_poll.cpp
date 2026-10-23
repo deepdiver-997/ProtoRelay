@@ -3,6 +3,7 @@
 #include "framework/net/native/poller.h"
 
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <chrono>
 #include <cstddef>
