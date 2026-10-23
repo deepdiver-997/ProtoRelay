@@ -1,5 +1,6 @@
 {
   "address": "0.0.0.0",
+  "io_backend": "asio",
   "system_name": "example-email-imap",
   "system_domain": "example.com",
 

@@ -45,6 +45,7 @@ int main() {
     {
         ServerConfig c;
         expect_true(c.address == "0.0.0.0", "default address");
+        expect_true(c.io_backend == "asio", "default Asio backend");
         expect_true(c.maxMessageSize == 1024 * 1024, "default maxMessageSize 1MB");
         expect_true(c.maxConnections == 1000, "default maxConnections");
         expect_true(c.max_auth_attempts == 3, "default max_auth_attempts");
@@ -58,6 +59,7 @@ int main() {
         ServerConfig c;
         nlohmann::json j = {
             {"address", "127.0.0.1"},
+            {"io_backend", "native"},
             {"maxMessageSize", 2048},
             {"maxConnections", 500},
             {"connection_timeout", 120},
@@ -76,6 +78,7 @@ int main() {
         };
         expect_true(c.loadFromJson(j, "/srv/base"), "loadFromJson returns true");
         expect_true(c.address == "127.0.0.1", "address parsed");
+        expect_true(c.io_backend == "native", "native backend parsed");
         expect_true(c.maxMessageSize == 2048, "maxMessageSize parsed");
         expect_true(c.max_auth_attempts == 5, "max_auth_attempts parsed");
         expect_true(c.log_level == "debug", "log_level parsed");
@@ -104,6 +107,7 @@ int main() {
                                    ""), "empty listeners json ok");
         expect_true(c.max_auth_attempts == 3, "missing field keeps default");
         expect_true(c.address == "0.0.0.0", "missing address keeps default");
+        expect_true(c.io_backend == "asio", "missing backend keeps Asio default");
         expect_true(ListenerConfig().advertise_starttls, "advertise_starttls defaults true");
     }
 

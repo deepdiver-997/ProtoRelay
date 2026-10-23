@@ -1,5 +1,6 @@
 {
   "address": "0.0.0.0",
+  "io_backend": "asio",
   "system_name": "example-email-smtp",
   "system_domain": "example.com",
   "helo_hostname": "mx1.example.com",

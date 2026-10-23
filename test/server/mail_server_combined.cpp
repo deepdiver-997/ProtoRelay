@@ -15,12 +15,6 @@
 
 #include "mail_system/back/mailServer/smtps_server.h"
 #include "mail_system/back/mailServer/imaps_server.h"
-#include "mail_system/back/db/mysql_pool.h"
-#include "mail_system/back/db/db_service.h"
-#include "mail_system/back/db/mysql_service.h"
-#include "mail_system/back/db/distributed_mysql_pool.h"
-#include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/cli/help_text.h"
 #include "mail_system/back/bootstrap.h"
 #include "mail_system/back/common/logger.h"
@@ -75,37 +69,6 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
         }
     }
     return true;
-}
-
-// 创建数据库连接池（根据配置类型）
-std::shared_ptr<DBPool> create_db_pool(const ServerConfig& config) {
-    if (!config.use_database) {
-        return nullptr;
-    }
-
-    try {
-        std::shared_ptr<DBPool> pool;
-        if (config.db_pool_config.achieve == "mysql_distributed") {
-            pool = DistributedMySQLPoolFactory::get_instance().create_pool(
-                config.db_pool_config,
-                std::make_shared<MySQLService>());
-        } else {
-            pool = MySQLPoolFactory::get_instance().create_pool(
-                config.db_pool_config,
-                std::make_shared<MySQLService>());
-        }
-        if (pool) {
-            LOG_SERVER_INFO("Database pool created successfully ({}: {})",
-                           config.db_pool_config.achieve,
-                           config.system_name);
-        } else {
-            LOG_SERVER_ERROR("Failed to create database pool");
-        }
-        return pool;
-    } catch (const std::exception& e) {
-        LOG_SERVER_ERROR("Exception creating DB pool: {}", e.what());
-        return nullptr;
-    }
 }
 
 } // anonymous namespace
@@ -202,20 +165,12 @@ int main(int argc, char* argv[]) {
         // 4. 创建共享基础设施
         //    线程池和数据库连接池在两个服务器间共享
         // ================================================================
-        auto io_pool = std::make_shared<pr::IOThreadPool>(smtp_config.io_thread_count);
-        io_pool->start();
-        LOG_SERVER_INFO("Shared IO thread pool started ({} threads)", smtp_config.io_thread_count);
-
-        auto work_pool = std::make_shared<pr::WorkerThreadPool>(smtp_config.worker_thread_count);
-        work_pool->start();
-        LOG_SERVER_INFO("Shared worker thread pool started ({} threads)", smtp_config.worker_thread_count);
-
-        auto db_pool = create_db_pool(smtp_config);
-        if (smtp_config.use_database && !db_pool) {
-            LOG_SERVER_WARN("Database pool is null — some features may be unavailable");
-        }
-
-        g_resources = {io_pool, work_pool, db_pool};
+        if (smtp_config.io_backend != imap_config.io_backend)
+            throw std::runtime_error("Combined server requires matching io_backend values");
+        auto smtp_res = mail_system::bootstrap::assemble(smtp_config);
+        auto io_pool = smtp_res.io_pool;
+        auto work_pool = smtp_res.worker_pool;
+        g_resources = {io_pool, work_pool, nullptr};
 
         // ================================================================
         // 5. 创建 SMTP 服务器
@@ -225,7 +180,6 @@ int main(int argc, char* argv[]) {
         mail_system::bootstrap::Options shared_pools;
         shared_pools.io_pool = io_pool;
         shared_pools.worker_pool = work_pool;
-        auto smtp_res = mail_system::bootstrap::assemble(smtp_config, shared_pools);
         g_smtp_server = std::make_shared<SmtpsServer>(
             smtp_config, smtp_res.io_pool, smtp_res.worker_pool, smtp_res.shard_router);
         g_smtp_server->m_configFilePath = options.smtp_config_path;

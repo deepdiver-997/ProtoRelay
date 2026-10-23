@@ -7,8 +7,6 @@
 //       默认 port=8081  doc_root=./build-webmail
 // 装配同 mail_server_combined：bootstrap::assemble 按配置建 DB/存储/路由。
 // ──────────────────────────────────────────────────────────────────
-#include "framework/thread_pool/io_thread_pool.h"
-#include "framework/thread_pool/worker_thread_pool.h"
 #include "mail_system/back/bootstrap.h"
 #include "mail_system/back/webmail/webmail_server.h"
 #include "mail_system/back/common/logger.h"
@@ -79,14 +77,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Starting webmail API server on :" << port
                   << "  doc_root=" << doc_root << "\n";
 
-        auto io_pool = std::make_shared<pr::IOThreadPool>(config.io_thread_count);
-        io_pool->start();
-        auto wk_pool = std::make_shared<pr::WorkerThreadPool>(config.worker_thread_count);
-        wk_pool->start();
-        bootstrap::Options pools;
-        pools.io_pool = io_pool;
-        pools.worker_pool = wk_pool;
-        auto res = bootstrap::assemble(config, pools);
+        auto res = bootstrap::assemble(config);
 
         g_server = std::make_unique<webmail::WebmailServer>(
             config, doc_root, res.io_pool, res.worker_pool, res.shard_router,

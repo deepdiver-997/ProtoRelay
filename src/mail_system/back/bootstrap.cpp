@@ -1,6 +1,8 @@
 #include "mail_system/back/bootstrap.h"
 
 #include "framework/thread_pool/io_thread_pool.h"
+#include "framework/net/native_runtime.h"
+#include "framework/net/native_tls.h"
 #include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/log/log_macros.h"
 #include "framework/storage/io_error.h"
@@ -10,6 +12,10 @@
 #include "mail_system/back/db/distributed_mysql_pool.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/null_db_pool.h"
+#ifdef HAVE_SQLITE3
+#include "mail_system/back/db/sqlite_pool.h"
+#include "mail_system/back/db/sqlite_service.h"
+#endif
 #include "mail_system/back/storage/async_storage_provider.h"
 #include "mail_system/back/storage/distributed_file_storage_provider.h"
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
@@ -37,6 +43,31 @@ static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const S
 Assembled assemble(const ServerConfig& config, const Options& opts) {
     Assembled out;
 
+    if (config.io_backend != "asio" && config.io_backend != "native")
+        throw std::runtime_error("bootstrap: io_backend must be 'asio' or 'native'");
+    if (config.io_backend == "native" && config.use_database &&
+        config.db_pool_config.achieve != "sqlite")
+        throw std::runtime_error("bootstrap: native io_backend supports only SQLite or use_database=false; MySQL/MariaDB require asio");
+#ifndef HAVE_SQLITE3
+    if (config.io_backend == "native" && config.use_database)
+        throw std::runtime_error("bootstrap: native SQLite database requires SQLite3 support in this build");
+#endif
+    if (config.io_backend == "native") {
+        for (const auto& shard : config.router_config.shards) {
+            if (shard.db_config_file.empty()) continue;
+            pr::DBPoolConfig shard_db;
+            if (!shard_db.loadFromJson(shard.db_config_file) || shard_db.achieve != "sqlite")
+                throw std::runtime_error("bootstrap: native io_backend supports only SQLite shard pools; MySQL/MariaDB require asio");
+        }
+    }
+    if (opts.io_pool) {
+        const bool is_native = static_cast<bool>(std::dynamic_pointer_cast<pr::net::native::NativeRuntime>(opts.io_pool));
+        if (is_native != (config.io_backend == "native"))
+            throw std::runtime_error("bootstrap: injected io_pool does not match io_backend");
+    }
+    if (config.io_backend == "native" && !pr::net::native::enable_native_tls())
+        throw std::runtime_error("bootstrap: native TLS support is unavailable");
+
     pr::Logger::get_instance().init(config.log_file, 5 * 1024 * 1024, 3,
         pr::Logger::string_to_level(config.log_level), config.log_to_console, config.log_to_file);
 
@@ -45,8 +76,10 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     if (!out.io_pool) {
         if (config.io_thread_count <= 0)
             throw std::runtime_error("bootstrap: io_thread_count must be > 0");
-        out.io_pool = std::make_shared<pr::IOThreadPool>(
-            static_cast<size_t>(config.io_thread_count));
+        if (config.io_backend == "native")
+            out.io_pool = std::make_shared<pr::net::native::NativeRuntime>(config.io_thread_count);
+        else
+            out.io_pool = std::make_shared<pr::IOThreadPool>(config.io_thread_count);
         out.io_pool->start();
     }
     out.worker_pool = opts.worker_pool;
@@ -106,6 +139,12 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
             if (!se.db_config_file.empty()) {
                 pr::DBPoolConfig scfg;
                 if (scfg.loadFromJson(se.db_config_file)) {
+#ifdef HAVE_SQLITE3
+                    if (scfg.achieve == "sqlite")
+                        sdb = SQLitePoolFactory::get_instance().create_pool(
+                            scfg, make_sqlite_service());
+                    else
+#endif
                     if (scfg.achieve == "mysql_distributed")
                         sdb = DistributedMySQLPoolFactory::get_instance().create_pool(
                             scfg, std::make_shared<MySQLService>());
@@ -155,6 +194,11 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
 
 static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config, const std::shared_ptr<pr::ThreadPoolBase>& io) {
     if (!config.use_database) return nullptr;
+#ifdef HAVE_SQLITE3
+    if (config.db_pool_config.achieve == "sqlite")
+        return SQLitePoolFactory::get_instance().create_pool(
+            config.db_pool_config, make_sqlite_service());
+#endif
     if (config.db_pool_config.achieve.find("mysql") == 0) {
         try {
             if (config.db_pool_config.achieve == "mysql_distributed")
