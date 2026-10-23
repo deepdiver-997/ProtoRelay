@@ -1,7 +1,11 @@
 // Native client connect factory: IClientTransport over the native runtime.
-// v1 is plain TCP; async_start_tls refuses (no TLS in this backend yet).
+// Plain TCP always works; async_start_tls needs the optional
+// protorelay_native_tls module (enable_native_tls) — without it the call
+// fails closed with operation_not_supported. After STARTTLS every IO routes
+// through the TLS connection wrapping this transport's stream.
 #include "framework/net/native_transport.h"
 #include "native/native_stream_internal.h"
+#include "native/native_tls_hook.h"
 
 #include <algorithm>
 #include <atomic>
@@ -55,21 +59,57 @@ bool resolve_blocking(const std::string& host, uint16_t port, sockaddr_storage& 
 }
 
 class NativeClientTransport final : public net::IClientTransport {
+    // Post-STARTTLS slot. Mutations happen on the loop thread, but close(),
+    // cancel() and destruction may run on any thread, and loop tasks must
+    // never capture `this` — so closures capture this holder instead and copy
+    // the connection out under the mutex.
+    struct TlsSlot {
+        mutable std::mutex mutex;
+        std::shared_ptr<IConnection> connection;
+        std::string diagnostic; // setup failures before a connection exists
+        std::atomic<bool> active{false}; // raw fd must hide once TLS is on
+
+        std::shared_ptr<IConnection> get() const {
+            std::lock_guard<std::mutex> lock(mutex);
+            return connection;
+        }
+        void set(std::shared_ptr<IConnection> value) {
+            std::lock_guard<std::mutex> lock(mutex);
+            connection = std::move(value);
+        }
+        std::shared_ptr<IConnection> clear() {
+            std::lock_guard<std::mutex> lock(mutex);
+            return std::move(connection);
+        }
+        void set_diagnostic(std::string text) {
+            std::lock_guard<std::mutex> lock(mutex);
+            diagnostic = std::move(text);
+        }
+        std::string get_diagnostic(const IConnection* connection) const {
+            std::lock_guard<std::mutex> lock(mutex);
+            return connection ? connection->get_handshake_diagnostic() : diagnostic;
+        }
+    };
+
 public:
     explicit NativeClientTransport(std::shared_ptr<NativeLoop> loop) : loop_(std::move(loop)) {
         if (!loop_) throw std::invalid_argument("client transport requires an executor");
         state_ = std::make_shared<StreamState>(loop_, -1);
+        tls_ = std::make_shared<TlsSlot>();
     }
 
     std::shared_ptr<net::IExecutor> executor() override { return loop_; }
 
     void async_connect(const std::string& host, uint16_t port,
                        HandshakeHandler handler) override {
-        const auto initiate = [state = state_, host, port,
+        const auto initiate = [state = state_, slot = tls_, host, port,
                                handler = std::move(handler)]() mutable {
             state->loop->assert_loop_thread("async_connect");
             if (state->connecting) throw std::logic_error("connect already pending");
             if (state->fd >= 0) state->initiate_close(); // reconnect semantics
+            // A reconnect starts plain again (Asio parity: fresh state per
+            // connect); the abandoned TLS session is disposed, silently.
+            if (auto stale = slot->clear()) slot->active.store(false, std::memory_order_release);
             state->connecting = true;
             state->connect_handler = std::move(handler);
             sockaddr_storage storage{};
@@ -103,58 +143,122 @@ public:
     }
 
     void async_start_tls(ClientTlsConfig config, HandshakeHandler handler) override {
-        // TLS is a backend capability; the native backend v1 has none.
-        const bool invalid = config.server_name.empty();
-        loop_->post([handler = std::move(handler), invalid] {
-            handler(std::make_error_code(invalid ? std::errc::invalid_argument
-                                                 : std::errc::operation_not_supported));
+        loop_->post([state = state_, slot = tls_, handler = std::move(handler),
+                     config = std::move(config)]() mutable {
+            begin_start_tls(state, slot, std::move(config), std::move(handler));
         });
     }
 
     void async_read(net::MutableBuffer buffer, ReadHandler handler) override {
-        run_on_loop([state = state_, buffer, handler = std::move(handler)]() mutable {
-            state->initiate_read(buffer, std::move(handler));
+        run_on_loop([state = state_, slot = tls_, buffer, handler = std::move(handler)]() mutable {
+            if (auto connection = slot->get())
+                connection->async_read(buffer, std::move(handler));
+            else
+                state->initiate_read(buffer, std::move(handler));
         });
     }
 
     void async_write(net::ConstBuffer buffer, WriteHandler handler) override {
-        run_on_loop([state = state_, buffer, handler = std::move(handler)]() mutable {
-            state->initiate_write(buffer.data(), buffer.size(), std::move(handler));
+        run_on_loop([state = state_, slot = tls_, buffer, handler = std::move(handler)]() mutable {
+            if (auto connection = slot->get())
+                connection->async_write(buffer, std::move(handler));
+            else
+                state->initiate_write(buffer.data(), buffer.size(), std::move(handler));
         });
     }
 
     void async_handshake(net::HandshakeRole role, HandshakeHandler handler) override {
-        // async_start_tls performs the only TLS handshake; an established
-        // client connection needs no second handshake (Asio parity).
-        const bool connected = state_->is_open();
-        loop_->post([role, connected, handler = std::move(handler)] {
-            handler(!connected ? std::make_error_code(std::errc::not_connected) :
-                    role == net::HandshakeRole::client ? std::error_code{} :
-                    std::make_error_code(std::errc::operation_not_supported));
+        // Without TLS the established plain connection needs no handshake
+        // (Asio parity); with TLS the call drives the handshake on it.
+        run_on_loop([state = state_, slot = tls_, role, handler = std::move(handler)]() mutable {
+            if (auto connection = slot->get()) {
+                connection->async_handshake(role, std::move(handler));
+                return;
+            }
+            const bool connected = state->is_open();
+            state->loop->post([role, connected, handler = std::move(handler)] {
+                handler(!connected ? std::make_error_code(std::errc::not_connected) :
+                        role == net::HandshakeRole::client ? std::error_code{} :
+                        std::make_error_code(std::errc::operation_not_supported));
+            });
         });
     }
 
     void close() override {
         state_->open.store(false, std::memory_order_release);
-        run_on_loop([state = state_] { state->initiate_close(); });
+        run_on_loop([state = state_, slot = tls_] {
+            if (auto connection = slot->get())
+                connection->close(); // routes close_notify, then the socket
+            else
+                state->initiate_close();
+        });
     }
 
     void cancel() override {
-        run_on_loop([state = state_] { state->initiate_cancel(); });
+        run_on_loop([state = state_, slot = tls_] {
+            if (auto connection = slot->get())
+                connection->cancel();
+            else
+                state->initiate_cancel();
+        });
     }
 
     bool is_open() const override { return state_->is_open(); }
     uint16_t get_local_port() const override { return state_->local_port; }
     std::string get_remote_ip() const override { return state_->remote_ip; }
-    int native_handle() const override { return state_->fd; }
+    int native_handle() const override {
+        // After STARTTLS the raw fd would bypass the TLS layer — hidden.
+        return tls_->active.load(std::memory_order_acquire) ? -1 : state_->fd;
+    }
+    std::string get_handshake_diagnostic() const override {
+        return tls_->get_diagnostic(tls_->get().get());
+    }
 
     ~NativeClientTransport() override {
+        auto tls = tls_->clear();
         auto state = std::move(state_);
         state->open.store(false, std::memory_order_release);
+        // Graves FIFO: the TLS teardown (SSL_free + stream dispose) runs
+        // before the plain dispose, which stays for the non-TLS case and is
+        // idempotent when TLS already closed everything.
+        loop_->defer_destroy([tls = std::move(tls)] { });
         loop_->defer_destroy([state] { state->dispose(); });
     }
 
 private:
+    // Loop thread. On success the transport keeps serving through the TLS
+    // connection wrapped around this transport's own stream state.
+    static void begin_start_tls(const std::shared_ptr<StreamState>& state,
+                                const std::shared_ptr<TlsSlot>& slot, ClientTlsConfig config,
+                                HandshakeHandler handler) {
+        state->loop->assert_loop_thread("async_start_tls");
+        const auto fail = [state, &handler](std::error_code error) {
+            state->loop->post([handler = std::move(handler), error] { handler(error); });
+        };
+        if (config.server_name.empty()) return fail(std::make_error_code(std::errc::invalid_argument));
+        auto* hooks = tls_hook::get_hooks();
+        if (!hooks)
+            return fail(std::make_error_code(std::errc::operation_not_supported));
+        if (!state->is_open() || state->connecting)
+            return fail(std::make_error_code(std::errc::not_connected));
+        if (slot->get()) return fail(std::make_error_code(std::errc::invalid_argument));
+        if (state->read_pending || state->write_pending)
+            throw std::logic_error("async_start_tls requires an idle transport");
+        std::shared_ptr<IConnection> connection;
+        try {
+            const auto context = hooks->make_client_context(config);
+            connection = hooks->wrap(state->loop, state, context, net::HandshakeRole::client);
+        } catch (const std::exception& error) {
+            slot->set_diagnostic(error.what());
+            return fail(std::make_error_code(std::errc::protocol_error));
+        }
+        slot->set(connection);
+        slot->active.store(true, std::memory_order_release);
+        // Already on the loop thread: this arms the handshake; its completion
+        // is queued like every other callback.
+        connection->async_handshake(net::HandshakeRole::client, std::move(handler));
+    }
+
     void run_on_loop(std::function<void()> action) {
         if (loop_->is_loop_thread()) action();
         else loop_->post(std::move(action));
@@ -162,6 +266,7 @@ private:
 
     std::shared_ptr<NativeLoop> loop_;
     std::shared_ptr<StreamState> state_;
+    std::shared_ptr<TlsSlot> tls_;
 };
 } // namespace
 

@@ -5,9 +5,11 @@
 // IConnection/IExecutor/ITimer/IServerTransport/IClientTransport contracts as
 // the Asio adapters.
 //
-// v1 scope: plain TCP, POSIX/kqueue platforms. No TLS, no Windows, no QUIC —
-// upgrade_tls / configure_tls / SSL listeners / async_start_tls throw
-// operation_not_supported.
+// Scope: plain TCP listeners/connections on POSIX/kqueue platforms, plus TLS
+// when the optional protorelay_native_tls module installed its hooks (see
+// native_tls.h: SSL listeners, configure_tls, upgrade_tls, async_start_tls).
+// Without that module every TLS entry point throws operation_not_supported.
+// No Windows, no QUIC.
 #include "framework/net/client_transport.h"
 #include "framework/net/native_runtime.h"
 #include "framework/net/server_transport.h"

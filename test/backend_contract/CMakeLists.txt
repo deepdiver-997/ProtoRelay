@@ -33,7 +33,8 @@ set(NATIVE_NET_SOURCES
     "${PR_SOURCE_ROOT}/src/framework/net/native_runtime.cpp"
     "${PR_SOURCE_ROOT}/src/framework/net/native_stream.cpp"
     "${PR_SOURCE_ROOT}/src/framework/net/native_server_transport.cpp"
-    "${PR_SOURCE_ROOT}/src/framework/net/native_client_transport.cpp")
+    "${PR_SOURCE_ROOT}/src/framework/net/native_client_transport.cpp"
+    "${PR_SOURCE_ROOT}/src/framework/net/native_tls_registry.cpp")
 if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")
     list(APPEND NATIVE_NET_SOURCES "${PR_SOURCE_ROOT}/src/framework/net/native/poller_kqueue.cpp")
 endif()
