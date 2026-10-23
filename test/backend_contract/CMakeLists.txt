@@ -25,4 +25,27 @@ foreach(contract logger_test std_thread_pool_test connection_interface_test serv
     set_tests_properties(${contract} PROPERTIES TIMEOUT 20)
 endforeach()
 
+# Native (non-Asio) network backend: builds and passes here with no Boost,
+# OpenSSL or spdlog — the proof that the contracts do not require Asio.
+set(NATIVE_NET_SOURCES
+    "${PR_SOURCE_ROOT}/src/framework/net/native/poller.cpp"
+    "${PR_SOURCE_ROOT}/src/framework/net/native/poller_poll.cpp"
+    "${PR_SOURCE_ROOT}/src/framework/net/native_runtime.cpp"
+    "${PR_SOURCE_ROOT}/src/framework/net/native_stream.cpp"
+    "${PR_SOURCE_ROOT}/src/framework/net/native_server_transport.cpp"
+    "${PR_SOURCE_ROOT}/src/framework/net/native_client_transport.cpp")
+if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")
+    list(APPEND NATIVE_NET_SOURCES "${PR_SOURCE_ROOT}/src/framework/net/native/poller_kqueue.cpp")
+endif()
+add_library(protorelay_native_net STATIC ${NATIVE_NET_SOURCES})
+target_include_directories(protorelay_native_net PUBLIC "${PR_SOURCE_ROOT}/include")
+target_compile_definitions(protorelay_native_net PUBLIC PROTORELAY_HAS_SPDLOG=0 PROTORELAY_LOG_NONE=0)
+target_link_libraries(protorelay_native_net PUBLIC protorelay_contract_core Threads::Threads)
+foreach(contract native_poller_test native_runtime_test native_transport_test)
+    add_executable(${contract} "${PR_SOURCE_ROOT}/test/unit/${contract}.cpp")
+    target_link_libraries(${contract} PRIVATE protorelay_native_net)
+    add_test(NAME ${contract} COMMAND ${contract})
+    set_tests_properties(${contract} PROPERTIES TIMEOUT 120)
+endforeach()
+
 add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${PR_SOURCE_ROOT} -P ${CMAKE_CURRENT_LIST_DIR}/check_dependency_boundaries.cmake)
