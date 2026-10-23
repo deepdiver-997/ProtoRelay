@@ -80,6 +80,15 @@ if(HAVE_MARIADB)
     target_link_libraries(protorelay_db_mariadb PRIVATE protorelay_readiness protorelay_db_mysql ${CMAKE_DL_LIBS})
 endif()
 
+# SQLite 可选驱动：本地文件库（轻量节点本地状态存储方向）。PRIVATE 链
+# protorelay_db_mysql（SQLitePoolFactory 复用引擎无关的 MySQLPool），静态库
+# 的 PRIVATE 依赖在 CMake 中仍会向消费者传播链接（与 MariaDB 模块同惯例）。
+if(HAVE_SQLITE3)
+    protorelay_module(protorelay_db_sqlite
+        src/mail_system/back/db/sqlite_service.cpp src/mail_system/back/db/sqlite_pool.cpp)
+    target_link_libraries(protorelay_db_sqlite PRIVATE protorelay_db_mysql SQLite::SQLite3)
+endif()
+
 protorelay_module(protorelay_smtp_client src/mail_system/back/smtp_client/client_session.cpp)
 target_link_libraries(protorelay_smtp_client PUBLIC protorelay_runtime)
 
