@@ -140,8 +140,12 @@ void bounded(PollerBackend backend) {
     std::this_thread::sleep_for(10ms);
     std::promise<std::error_code> first, second;
     auto a = first.get_future(), b = second.get_future();
-    f.client->request("ignore", 1s, [&](std::error_code e, std::string) { first.set_value(e); });
-    f.client->request("ignore", 1s, [&](std::error_code e, std::string) { second.set_value(e); });
+    // Both requests inside ONE loop task: the queue-full check for the second
+    // must run before any flush completion can dequeue the first frame.
+    f.runtime.loop_for(0)->post([&] {
+        f.client->request("ignore", 1s, [&](std::error_code e, std::string) { first.set_value(e); });
+        f.client->request("ignore", 1s, [&](std::error_code e, std::string) { second.set_value(e); });
+    });
     assert(b.wait_for(3s) == std::future_status::ready && b.get() == std::errc::no_buffer_space);
     f.client->stop();
     assert(a.wait_for(3s) == std::future_status::ready && a.get() == std::errc::operation_canceled);
@@ -151,11 +155,15 @@ void queue_bound(PollerBackend backend) {
     client.max_queued_frames = 1;
     Fixture f(backend, client);
     await([&] { return f.client->ready() && f.server() && f.server()->ready(); });
-    std::this_thread::sleep_for(10ms);
     std::promise<std::error_code> first, second;
     auto a = first.get_future(), b = second.get_future();
-    f.client->request("ignore", 1s, [&](std::error_code e, std::string) { first.set_value(e); });
-    f.client->request("ignore", 1s, [&](std::error_code e, std::string) { second.set_value(e); });
+    // Same single-task issuance as bounded(): posting from the test thread let
+    // a flush completion dequeue frame one between the two requests, so the
+    // bound never tripped under load (observed flake under ctest).
+    f.runtime.loop_for(0)->post([&] {
+        f.client->request("ignore", 1s, [&](std::error_code e, std::string) { first.set_value(e); });
+        f.client->request("ignore", 1s, [&](std::error_code e, std::string) { second.set_value(e); });
+    });
     assert(b.wait_for(3s) == std::future_status::ready && b.get() == std::errc::no_buffer_space);
     f.client->stop();
     assert(a.wait_for(3s) == std::future_status::ready && a.get() == std::errc::operation_canceled);
