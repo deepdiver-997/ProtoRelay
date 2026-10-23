@@ -22,6 +22,18 @@ int main() {
     assert(asio_error(boost::asio::error::operation_aborted) == std::errc::operation_canceled);
     assert(asio_error(boost::asio::error::connection_refused) == std::errc::connection_refused);
     assert(asio_error(boost::asio::error::timed_out) == std::errc::timed_out);
+#ifdef USE_SSL
+    assert(asio_error(boost::asio::ssl::error::stream_truncated) ==
+           pr::net::TlsErrc::stream_truncated);
+    const boost::system::error_code verify_failed(
+        ERR_PACK(ERR_LIB_SSL, 0, SSL_R_CERTIFICATE_VERIFY_FAILED),
+        boost::asio::error::get_ssl_category());
+    assert(asio_error(verify_failed) == pr::net::TlsErrc::certificate_verification);
+    const boost::system::error_code other_ssl(
+        ERR_PACK(ERR_LIB_SSL, 0, SSL_R_BAD_RECORD_TYPE),
+        boost::asio::error::get_ssl_category());
+    assert(asio_error(other_ssl) == static_cast<std::error_code>(other_ssl));
+#endif
 
     static DriverCategory category;
     for (auto value : {static_cast<int>(boost::asio::error::eof), static_cast<int>(boost::asio::error::operation_aborted)}) {
