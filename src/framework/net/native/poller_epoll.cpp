@@ -9,18 +9,18 @@
 // reports POLLHUP/POLLERR for descriptors registered with events == 0.
 #include "framework/net/native/poller.h"
 
+#if !defined(__linux__)
+#error "poller_epoll.cpp requires Linux"
+#else
+#include <sys/epoll.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <chrono>
 #include <climits>
 #include <cstddef>
 #include <unordered_set>
 #include <vector>
-#include <sys/epoll.h>
-#include <unistd.h>
-
-#if !defined(__linux__)
-#error "poller_epoll.cpp requires Linux"
-#endif
 
 namespace pr::net::native {
 namespace {
@@ -134,3 +134,4 @@ private:
 
 std::unique_ptr<Poller> make_epoll_poller() { return std::make_unique<EpollPoller>(); }
 } // namespace pr::net::native
+#endif
