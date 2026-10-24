@@ -538,8 +538,19 @@ if(NOT PROTORELAY_BUILD_MAIL)
         target_link_libraries(node_link_test PRIVATE protorelay_node_link)
         add_test(NAME node_link_test COMMAND node_link_test)
         set_tests_properties(node_link_test PROPERTIES TIMEOUT 120)
+        # QUIC multiplexing contracts: header-only; must compile with no
+        # backend at all — and without any third-party QUIC/TLS headers.
+        # nlohmann is linked only because the test builds a complete
+        # TlsConfig (server_transport.h); the contract header itself is
+        # std-only.
+        add_executable(quic_contract_test test/unit/quic_contract_test.cpp)
+        target_include_directories(quic_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+        target_link_libraries(quic_contract_test PRIVATE nlohmann_json::nlohmann_json)
+        add_test(NAME quic_contract_test COMMAND quic_contract_test)
+        set_tests_properties(quic_contract_test PROPERTIES TIMEOUT 20)
         add_custom_target(unit_tests DEPENDS logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test
-            native_poller_test native_runtime_test native_transport_test node_link_test)
+            native_poller_test native_runtime_test native_transport_test node_link_test
+            quic_contract_test)
         if(TARGET protorelay_native_tls)
             add_dependencies(unit_tests native_tls_test)
         endif()
@@ -907,6 +918,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(connection_interface_test test/unit/connection_interface_test.cpp)
     target_include_directories(connection_interface_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
     add_test(NAME connection_interface_test COMMAND connection_interface_test)
+
+    # QUIC 多路复用契约：header-only，不链任何后端与第三方 QUIC/TLS 库；
+    # nlohmann 仅为在测试里构造完整 TlsConfig（server_transport.h）而链，
+    # 契约头本身只依赖标准库。ctest 注册与 unit_tests 聚合由下方
+    # catch-all 扫描完成。
+    add_executable(quic_contract_test test/unit/quic_contract_test.cpp)
+    target_include_directories(quic_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_link_libraries(quic_contract_test PRIVATE nlohmann_json::nlohmann_json)
 
     # Full server/metrics interface exercised without linking any Asio backend.
     add_executable(server_transport_test src/framework/server_base.cpp test/unit/server_transport_test.cpp)

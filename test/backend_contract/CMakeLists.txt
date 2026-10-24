@@ -25,6 +25,16 @@ foreach(contract logger_test std_thread_pool_test connection_interface_test serv
     set_tests_properties(${contract} PROPERTIES TIMEOUT 20)
 endforeach()
 
+# QUIC multiplexing contracts: header-only; compiles and links with no
+# framework sources, no backend and no third-party QUIC/TLS at all. nlohmann
+# is linked only so the test can build a complete TlsConfig
+# (server_transport.h); the contract header itself is std-only.
+add_executable(quic_contract_test "${PR_SOURCE_ROOT}/test/unit/quic_contract_test.cpp")
+target_include_directories(quic_contract_test PRIVATE "${PR_SOURCE_ROOT}/include")
+target_link_libraries(quic_contract_test PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME quic_contract_test COMMAND quic_contract_test)
+set_tests_properties(quic_contract_test PROPERTIES TIMEOUT 20)
+
 # Native (non-Asio) network backend: builds and passes here with no Boost,
 # OpenSSL or spdlog — the proof that the contracts do not require Asio.
 set(NATIVE_NET_SOURCES
