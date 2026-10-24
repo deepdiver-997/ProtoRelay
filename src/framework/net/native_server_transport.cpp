@@ -1,9 +1,12 @@
 // Native TCP listener backend: IServerTransport over the native runtime.
-// v1 supports plain TCP listeners only; TLS upgrade throws
-// operation_not_supported (the STARTTLS path stays Asio-only until the native
-// TLS adapter exists).
+// Plain TCP listeners always work. When the optional protorelay_native_tls
+// module installed its hooks (see native_tls.h / enable_native_tls), SSL-type
+// listeners accept TLS connections, configure_tls loads a server context and
+// upgrade_tls wraps a plain connection for STARTTLS. Without the module
+// everything TLS fails closed with operation_not_supported.
 #include "framework/net/native_transport.h"
 #include "native/native_stream_internal.h"
+#include "native/native_tls_hook.h"
 #include "framework/log/log_macros.h"
 
 #include <arpa/inet.h>
@@ -19,6 +22,21 @@ namespace pr::net::native {
 namespace {
 std::error_code last_error() { return std::error_code(errno, std::generic_category()); }
 
+// Per-transport TLS context slot: configure_tls may run on an application
+// thread while accepts and upgrades happen on loop threads.
+struct TlsContextHolder {
+    mutable std::mutex mutex;
+    tls_hook::Hooks::Context context; // null until a context was configured
+    tls_hook::Hooks::Context snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return context;
+    }
+    void store(tls_hook::Hooks::Context value) {
+        std::lock_guard<std::mutex> lock(mutex);
+        context = std::move(value);
+    }
+};
+
 struct ListenerState {
     ListenerConfig config;
     int fd = -1;
@@ -26,6 +44,8 @@ struct ListenerState {
     std::shared_ptr<LoopEntry> entry;
     bool registered = false;
     net::IServerTransport::AcceptHandler handler; // loop-thread only
+    tls_hook::Hooks* hooks = nullptr;             // null without the TLS module
+    std::shared_ptr<TlsContextHolder> tls;
 };
 
 // Returns the sockaddr length, or 0 when the address is not a numeric IPv4/
@@ -88,6 +108,24 @@ void open_listen_socket(ListenerState& state, const sockaddr_storage& address,
     }
 }
 
+// SSL-type listener: consume the accepted plain stream into a TLS connection.
+// Handshake initiation stays with the session (async_handshake on the
+// returned connection), matching the STARTTLS upgrade shape.
+std::unique_ptr<IConnection> wrap_ssl_listener_connection(
+    const std::shared_ptr<ListenerState>& state, std::unique_ptr<IConnection> connection) {
+    auto* base = dynamic_cast<NativeStreamBase*>(connection.get());
+    if (!base) throw std::runtime_error("native TLS listener requires a native stream");
+    auto stream = base->release_state();
+    connection.reset(); // the wrapper now owns nothing
+    try {
+        return state->hooks->wrap(state->loop, stream, state->tls->snapshot(),
+                                  net::HandshakeRole::server);
+    } catch (...) {
+        stream->dispose(); // loop thread: close the socket we just consumed
+        throw;
+    }
+}
+
 // Loop thread: drain pending connections. Level-triggered readiness means the
 // event repeats while connections wait, so a transient accept error must not
 // leave the fd registered (it would spin).
@@ -100,9 +138,20 @@ void accept_ready(const std::shared_ptr<ListenerState>& state) {
             try {
                 connection = make_native_tcp_connection(client, state->loop);
             } catch (const std::exception& error) {
-                ::close(client);
+                ::close(client); // nothing owns the fd yet
                 LOG_NETWORK_ERROR("Accepted connection setup failed: {}", error.what());
                 continue;
+            }
+            if (state->config.type == ListenerType::SSL) {
+                try {
+                    connection = wrap_ssl_listener_connection(state, std::move(connection));
+                } catch (const std::exception& error) {
+                    // The wrapper (or its stream) still owns the fd; its
+                    // destructor schedules the teardown.
+                    connection.reset();
+                    LOG_NETWORK_ERROR("TLS connection setup failed: {}", error.what());
+                    continue;
+                }
             }
             // Deliver through the loop queue like every other callback. The
             // holder is copyable for std::function; exclusive ownership moves
@@ -151,7 +200,8 @@ void close_listener(const std::shared_ptr<ListenerState>& state) {
 class NativeServerTransport final : public net::IServerTransport {
 public:
     NativeServerTransport(const net::ServerTransportConfig& config,
-                          const std::vector<NativeLoopPtr>& loops) {
+                          const std::vector<NativeLoopPtr>& loops)
+        : tls_(std::make_shared<TlsContextHolder>()) {
         if (loops.empty())
             throw std::invalid_argument("native server transport requires a runtime loop");
         sockaddr_storage address{};
@@ -159,17 +209,25 @@ public:
         if (address_length == 0)
             throw std::invalid_argument("native server transport requires a numeric bind address: " +
                                         config.address);
+        hooks_ = tls_hook::get_hooks();
         const bool needs_tls = !config.tls.certificate_file.empty() || !config.tls.private_key_file.empty();
+        bool has_ssl_listener = false;
+        for (const auto& listener : config.listeners)
+            has_ssl_listener |= listener.type == ListenerType::SSL;
+        if ((needs_tls || has_ssl_listener) && !hooks_)
+            throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                    "native backend has no TLS support in this binary");
+        if (hooks_ && (needs_tls || has_ssl_listener))
+            tls_->store(hooks_->make_server_context(config.tls)); // throws on bad files
         for (const auto& listener : config.listeners) {
-            if (listener.type != ListenerType::TCP)
+            if (listener.type != ListenerType::TCP && listener.type != ListenerType::SSL)
                 throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
-                                        "native backend v1 supports plain TCP listeners only");
-            if (needs_tls)
-                throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
-                                        "native backend v1 does not implement TLS listeners");
+                                        "native backend supports TCP and SSL listeners only");
             auto state = std::make_shared<ListenerState>();
             state->config = listener;
             state->loop = loops[listener_slot_++ % loops.size()];
+            state->hooks = hooks_;
+            state->tls = tls_;
             open_listen_socket(*state, address, address_length);
             bound_listeners_.push_back(state->config);
             listeners_.push_back(std::move(state));
@@ -209,22 +267,40 @@ public:
         }
     }
 
-    void configure_tls(const net::TlsConfig&) override {
-        throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
-                                "native backend v1 does not implement TLS");
+    void configure_tls(const net::TlsConfig& config) override {
+        if (!hooks_)
+            throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                    "native backend has no TLS support in this binary");
+        // Build fully before the swap: a failing configure leaves the previous
+        // context serving.
+        tls_->store(hooks_->make_server_context(config));
     }
 
     std::unique_ptr<IConnection> upgrade_tls(std::unique_ptr<IConnection> plain) override {
-        // Preserve the documented exception type; close what we were given.
-        if (plain) plain->close();
-        throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
-                                "native backend v1 does not implement TLS upgrade");
+        const auto context = tls_->snapshot();
+        if (!hooks_ || !context) {
+            // Preserve the documented exception type; close what we were given.
+            if (plain) plain->close();
+            throw std::system_error(std::make_error_code(std::errc::operation_not_supported),
+                                    !hooks_ ? "native backend has no TLS support in this binary"
+                                            : "no TLS context configured (configure_tls first)");
+        }
+        auto* base = dynamic_cast<NativeStreamBase*>(plain.get());
+        if (!base) {
+            if (plain) plain->close();
+            throw std::invalid_argument("upgrade_tls requires a native transport connection");
+        }
+        auto stream = base->release_state();
+        plain.reset(); // the TLS connection owns the stream now
+        return hooks_->wrap(stream->loop, std::move(stream), context, net::HandshakeRole::server);
     }
 
 private:
     size_t listener_slot_ = 0;
     std::vector<std::shared_ptr<ListenerState>> listeners_;
     std::vector<ListenerConfig> bound_listeners_;
+    tls_hook::Hooks* hooks_ = nullptr;
+    std::shared_ptr<TlsContextHolder> tls_;
     std::mutex lifecycle_;
     bool started_ = false;
     bool stopped_ = false;

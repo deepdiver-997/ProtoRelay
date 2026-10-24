@@ -114,6 +114,12 @@ public:
     std::string get_remote_ip() const override { return state_->remote_ip; }
     int native_handle() const override { return state_->fd; }
 
+    // Consumes the stream out of this wrapper (used by the TLS upgrade: the
+    // socket, its loop registration and the serialized executor survive while
+    // the wrapper itself is discarded). The wrapper must not be used again;
+    // its destructor then owns nothing.
+    std::shared_ptr<StreamState> release_state() { return std::move(state_); }
+
     ~NativeStreamBase() override;
 
 protected:

@@ -41,7 +41,8 @@ set(NATIVE_NET_SRCS
     src/framework/net/native_runtime.cpp
     src/framework/net/native_stream.cpp
     src/framework/net/native_server_transport.cpp
-    src/framework/net/native_client_transport.cpp)
+    src/framework/net/native_client_transport.cpp
+    src/framework/net/native_tls_registry.cpp)
 if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "BSD")
     list(APPEND NATIVE_NET_SRCS src/framework/net/native/poller_kqueue.cpp)
 endif()
@@ -49,6 +50,15 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND NATIVE_NET_SRCS src/framework/net/native/poller_epoll.cpp)
 endif()
 protorelay_module(protorelay_native_net ${NATIVE_NET_SRCS})
+
+# Native TLS extension: OpenSSL adapter over protorelay_native_net (see
+# include/framework/net/native_tls.h). Optional — without this module every
+# native TLS entry point keeps its fail-closed behavior, and builds without
+# an OpenSSL target (e.g. contracts-only) never compile it.
+if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+    protorelay_module(protorelay_native_tls src/framework/net/native_tls.cpp)
+    target_link_libraries(protorelay_native_tls PRIVATE protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 protorelay_module(protorelay_http
     src/framework/http/message_processor.cpp src/framework/http/http_parser.cpp
