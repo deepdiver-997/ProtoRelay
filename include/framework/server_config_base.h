@@ -50,6 +50,7 @@ struct ListenerConfig {
 struct ServerConfig {
     using Config = ServerConfig;
     std::string address;
+    std::string io_backend = "asio";
 
     std::vector<ListenerConfig> listeners;
 
@@ -143,6 +144,7 @@ struct ServerConfig {
         }
 
         address             = j.value("address", address);
+        io_backend          = j.value("io_backend", io_backend);
         maxMessageSize      = j.value("maxMessageSize", maxMessageSize);
         maxConnections      = j.value("maxConnections", maxConnections);
         io_thread_count     = j.value("io_thread_count", io_thread_count);
@@ -189,6 +191,7 @@ struct ServerConfig {
 
     // ---- 校验 (子类应重写以扩展) ----
     virtual bool validate() const {
+        if (io_backend != "asio" && io_backend != "native") return false;
         if (listeners.empty()) return false;
         bool has_ssl = false;
         for (auto& l : listeners) {

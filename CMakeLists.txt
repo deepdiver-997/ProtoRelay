@@ -934,6 +934,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(asio_error_test test/unit/asio_error_test.cpp)
     target_include_directories(asio_error_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(asio_error_test PRIVATE Threads::Threads)
+    if(TARGET OpenSSL::Crypto)
+        target_link_libraries(asio_error_test PRIVATE OpenSSL::Crypto)
+    endif()
     add_test(NAME asio_error_test COMMAND asio_error_test)
     add_executable(asio_server_transport_test
         src/framework/thread_pool/io_thread_pool.cpp src/framework/thread_pool/io_context_registry.cpp

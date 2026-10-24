@@ -153,7 +153,14 @@ protorelay_module(protorelay_mail_core
     src/mail_system/back/mailServer/outbound/outbound_smtp_session.cpp)
 target_link_libraries(protorelay_mail_core PUBLIC
     protorelay_framework protorelay_runtime protorelay_mail_storage protorelay_smtp_client
-    protorelay_db_mysql)
+    protorelay_db_mysql protorelay_native_net)
+if(TARGET protorelay_native_tls)
+    target_link_libraries(protorelay_mail_core PUBLIC protorelay_native_tls)
+endif()
+if(HAVE_SQLITE3)
+    target_compile_definitions(protorelay_mail_core PRIVATE HAVE_SQLITE3=1)
+    target_link_libraries(protorelay_mail_core PRIVATE protorelay_db_sqlite)
+endif()
 target_include_directories(protorelay_mail_core SYSTEM PRIVATE ${CARES_INCLUDE_DIRS} ${MYSQL_INCLUDE_DIRS})
 if(CARES_LIBRARY_DIRS)
     target_link_directories(protorelay_mail_core PRIVATE ${CARES_LIBRARY_DIRS})
