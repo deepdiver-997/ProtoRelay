@@ -50,6 +50,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND NATIVE_NET_SRCS src/framework/net/native/poller_epoll.cpp)
 endif()
 protorelay_module(protorelay_native_net ${NATIVE_NET_SRCS})
+protorelay_module(protorelay_node_link src/framework/node/node_link.cpp)
+target_link_libraries(protorelay_node_link PUBLIC protorelay_native_net)
 
 # Native TLS extension: OpenSSL adapter over protorelay_native_net (see
 # include/framework/net/native_tls.h). Optional — without this module every

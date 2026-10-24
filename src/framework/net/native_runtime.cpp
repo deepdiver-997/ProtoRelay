@@ -238,6 +238,7 @@ void NativeLoop::fire_due_timers() {
     while (!timer_wheel_.empty() && timer_wheel_.begin()->first <= now) {
         const auto node = timer_wheel_.begin();
         const std::shared_ptr<TimerWait> wait = node->second;
+        wait->detached.store(true, std::memory_order_release);
         timer_wheel_.erase(node);
         if (wait->abandoned.load(std::memory_order_acquire)) continue; // timer destroyed
         ITimer::Handler handler;
@@ -321,6 +322,7 @@ void NativeLoop::shutdown_drain() {
     while (!timer_wheel_.empty()) {
         const auto node = timer_wheel_.begin();
         const std::shared_ptr<TimerWait> wait = node->second;
+        wait->detached.store(true, std::memory_order_release);
         timer_wheel_.erase(node);
         if (wait->abandoned.load(std::memory_order_acquire)) continue;
         ITimer::Handler handler;
@@ -425,6 +427,11 @@ void NativeTimer::cancel() {
 
 bool NativeTimer::take_wait(std::shared_ptr<TimerWait>& out) {
     if (!waiting_) return false;
+    if (wait_->detached.load(std::memory_order_acquire)) {
+        waiting_ = false;
+        wait_.reset();
+        return false;
+    }
     loop_->cancel_timer_slot(*this, slot_);
     waiting_ = false;
     out.swap(wait_);
