@@ -50,8 +50,17 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND NATIVE_NET_SRCS src/framework/net/native/poller_epoll.cpp)
 endif()
 protorelay_module(protorelay_native_net ${NATIVE_NET_SRCS})
-protorelay_module(protorelay_node_link src/framework/node/node_link.cpp)
+protorelay_module(protorelay_node_link
+    src/framework/node/node_link.cpp src/framework/node/node_trust.cpp)
 target_link_libraries(protorelay_node_link PUBLIC protorelay_native_net)
+
+# Node link Ed25519 credentials (see include/framework/node/node_auth.h).
+# Optional — node_link itself stays OpenSSL-free; without this module callers
+# wire their own NodeCredentials sign/verify implementations.
+if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+    protorelay_module(protorelay_node_auth src/framework/node/node_auth_ed25519.cpp)
+    target_link_libraries(protorelay_node_auth PUBLIC protorelay_node_link OpenSSL::Crypto)
+endif()
 
 # Native TLS extension: OpenSSL adapter over protorelay_native_net (see
 # include/framework/net/native_tls.h). Optional — without this module every
