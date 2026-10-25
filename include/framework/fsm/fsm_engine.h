@@ -80,6 +80,23 @@ public:
             });
         }
 
+        // Closing variant: applies the target state, but the pipeline is NOT
+        // resumed — no drain, no read re-arm. For terminal steps (QUIT /
+        // LOGOUT family) where buffered input must die with the connection,
+        // exactly like today's handlers.
+        void finish_closing() {
+            if (!engine_ || !session_) return;
+            Engine* engine = engine_;
+            SessionPtr session = session_;
+            auto target = target_;
+            release();
+            if (session->is_closed()) return;
+            post(session, [engine, session, target]() {
+                if (session->is_closed()) return;
+                engine->settle_closing(session, target);
+            });
+        }
+
         // Intermediate write before the eventual finish (any thread).
         void reply(std::string data) {
             if (!session_ || data.empty()) return;
@@ -200,6 +217,13 @@ public:
         settle(session, std::optional<State>(target), std::move(reply));
     }
 
+    // Sync closing variant of apply: unpause + state, nothing else — the
+    // caller replies and closes. Buffered input dies with the connection,
+    // matching today's QUIT/LOGOUT handlers (no drain on closing paths).
+    void apply_closing(const SessionPtr& session, State target) {
+        settle_closing(session, std::optional<State>(target));
+    }
+
     // Async: pause takes effect immediately (the IO pipeline stops consuming
     // while the work runs); finish()/fail() may come from any thread.
     [[nodiscard]] Transition begin_transition(const SessionPtr& session,
@@ -244,9 +268,22 @@ private:
         bump_error_budget(session);
     }
 
+    // Closing-path收口: strict check + unpause + state; no drain, no re-arm.
+    void settle_closing(const SessionPtr& session, std::optional<State> target) {
+        if (!session || session->is_closed()) return;
+        if (target) check_strict_guard(session, *target);
+        session->set_paused(false);
+        if (target) session->set_current_state(static_cast<int>(*target));
+    }
+
     void write_reply(const SessionPtr& session, const std::string& text) {
-        if (session && !session->is_closed() && !text.empty())
-            session->do_async_write(text, nullptr);
+        if (!session || session->is_closed() || text.empty()) return;
+        // Same wire shape as the protocols' send_line helpers: complete the
+        // line ending and record the outbound trace before queueing.
+        std::string out = text;
+        if (out.empty() || out.back() != '\n') out += "\r\n";
+        session->trace_append_outbound(out);
+        session->do_async_write(out, nullptr);
     }
 
     std::string violation_reply(State state, Event event) const {

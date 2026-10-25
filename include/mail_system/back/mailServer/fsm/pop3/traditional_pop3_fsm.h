@@ -3,11 +3,12 @@
 
 #include "framework/session_base.h"
 #include "mail_system/back/common/account_authentication.h"
-#include "framework/fsm_base.h"
+#include "framework/fsm/fsm_engine.h"
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/pop3/pop3_types.hpp"
+#include "mail_system/back/mailServer/fsm/pop3/pop3_desc.h"
 #include "mail_system/back/repository/pop3_mailbox_repository.h"
 #include "mail_system/back/repository/pop3_lock_repository.h"
 #include <chrono>
@@ -22,9 +23,15 @@
 
 namespace mail_system {
 
+// Holds the fsm engine instead of inheriting pr::FsmBase: dispatch, guard
+// replies and the transition write points now live in the engine (design
+// §3.2/§4 step 1). Protocol behavior (handlers, operations, facades) is
+// unchanged; the guard/handler tables moved to make_pop3_desc + register_.
 template <typename ConnectionType>
-class TraditionalPop3Fsm : public pr::FsmBase<ConnectionType, Pop3State, Pop3Event> {
+class TraditionalPop3Fsm {
 public:
+    using Engine = pr::fsm::Engine<ConnectionType, Pop3State, Pop3Event>;
+
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
     // 锁心跳续约周期（默认 60s）。测试可改短以在有限时间内观察续约/失锁。
     std::chrono::milliseconds heartbeat_interval_{std::chrono::seconds(60)};
@@ -36,9 +43,7 @@ protected:
     std::shared_ptr<IAccountAuthenticator> authenticator_;
     std::shared_ptr<repository::IPop3MailboxRepository> mailbox_repository_ = repository::make_sql_pop3_mailbox_repository();
     std::shared_ptr<repository::IPop3LockRepository> lock_repository_ = repository::make_sql_pop3_lock_repository();
-    // 每会话上下文。Pop3Context 是 per-session 状态，由 session 拥有；
-    // FSM 通过 session->get_context() 获取裸指针。
-    // 这里不存，避免所有权歧义。
+    Engine engine_;
 
 public:
     TraditionalPop3Fsm(
@@ -47,14 +52,14 @@ public:
         std::shared_ptr<router::IShardRouter> shard_router
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
-        m_shardRouter(std::move(shard_router)) {
+        m_shardRouter(std::move(shard_router)),
+        engine_(make_pop3_desc()) {
         authenticator_ = std::make_shared<AccountAuthenticationService>(
             m_shardRouter, m_authCache, m_workerThreadPool);
-        init_transition_table();
-        init_state_handlers();
+        register_handlers();
     }
 
-    ~TraditionalPop3Fsm() override = default;
+    ~TraditionalPop3Fsm() = default;
     void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
         if (authenticator) authenticator_ = std::move(authenticator);
     }
@@ -141,17 +146,7 @@ public:
 private:
     struct LoginOperation;
     struct QuitOperation;
-    void init_transition_table();
-    void init_state_handlers();
-
-    // pr::FsmBase hooks
-    using BaseFsm = pr::FsmBase<ConnectionType, Pop3State, Pop3Event>;
-    using Handler = typename BaseFsm::Handler;
-    bool is_terminal_state(Pop3State s) const override;
-    void on_invalid_transition(Pop3State s, Pop3Event e,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
-    void on_handler_not_found(Pop3State s, Pop3Event e,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
+    void register_handlers();
 
     // ========== 锁心跳（v2） ==========
     // 在 io_context 上启动递归续约定时器；handler 只捕获 weak 引用打破自环，
