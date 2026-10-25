@@ -62,6 +62,17 @@ if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     target_link_libraries(protorelay_node_auth PUBLIC protorelay_node_link OpenSSL::Crypto)
 endif()
 
+# Node message protocol: envelopes, controlled source routing, bounded
+# forwarding on top of protorelay_node_link. AEAD (AES-256-GCM) for encrypted
+# payloads is enabled only when an OpenSSL target exists, mirroring the
+# protorelay_native_tls precedent; without it, encrypted sends fail closed.
+protorelay_module(protorelay_node_proto src/framework/node/node_proto.cpp)
+target_link_libraries(protorelay_node_proto PUBLIC protorelay_node_link)
+if(TARGET OpenSSL::Crypto)
+    target_compile_definitions(protorelay_node_proto PRIVATE PR_NODE_PROTO_HAVE_OPENSSL_AEAD=1)
+    target_link_libraries(protorelay_node_proto PRIVATE OpenSSL::Crypto)
+endif()
+
 # Native TLS extension: OpenSSL adapter over protorelay_native_net (see
 # include/framework/net/native_tls.h). Optional — without this module every
 # native TLS entry point keeps its fail-closed behavior, and builds without
