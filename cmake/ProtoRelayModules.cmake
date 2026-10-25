@@ -23,7 +23,8 @@ endfunction()
 
 protorelay_module(protorelay_framework
     src/framework/server_base.cpp
-    src/framework/session_base_inst.cpp)
+    src/framework/session_base_inst.cpp
+    src/framework/fsm/fsm_completion.cpp)
 protorelay_module(protorelay_readiness src/framework/net/poll_readiness_waiter.cpp)
 protorelay_module(protorelay_runtime
     ${WORKER_SRCS}

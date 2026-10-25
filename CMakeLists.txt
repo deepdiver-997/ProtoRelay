@@ -1062,6 +1062,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(fsm_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(fsm_base_test)
 
+    add_executable(fsm_engine_test ${COMMON_SRCS} test/unit/fsm_engine_test.cpp)
+    target_include_directories(fsm_engine_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(fsm_engine_test)
+    target_link_libraries(fsm_engine_test PRIVATE protorelay_framework)
+
     add_executable(fast_fsm_base_test ${COMMON_SRCS} test/unit/fast_fsm_base_test.cpp)
     target_include_directories(fast_fsm_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(fast_fsm_base_test)
