@@ -534,6 +534,19 @@ if(NOT PROTORELAY_BUILD_MAIL)
             add_test(NAME native_tls_test COMMAND native_tls_test)
             set_tests_properties(native_tls_test PROPERTIES TIMEOUT 120)
         endif()
+        # QUIC transport backend: only when the vendored third party was built.
+        if(TARGET protorelay_quic)
+            add_executable(quic_loopback_test test/unit/quic_loopback_test.cpp)
+            target_include_directories(quic_loopback_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            # The prefixed BoringSSL headers must precede any system OpenSSL
+            # include path (e.g. Homebrew via nlohmann's interface).
+            target_include_directories(quic_loopback_test SYSTEM PRIVATE
+                ${CMAKE_SOURCE_DIR}/third_party/quic/boringssl/include
+                ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
+            target_link_libraries(quic_loopback_test PRIVATE protorelay_quic protorelay_native_net quic_lsquic)
+            add_test(NAME quic_loopback_test COMMAND quic_loopback_test)
+            set_tests_properties(quic_loopback_test PROPERTIES TIMEOUT 120)
+        endif()
         add_executable(node_link_test test/unit/node_link_test.cpp)
         target_link_libraries(node_link_test PRIVATE protorelay_node_link)
         add_test(NAME node_link_test COMMAND node_link_test)
@@ -551,6 +564,9 @@ if(NOT PROTORELAY_BUILD_MAIL)
         add_custom_target(unit_tests DEPENDS logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test
             native_poller_test native_runtime_test native_transport_test node_link_test
             quic_contract_test)
+        if(TARGET protorelay_quic)
+            add_dependencies(unit_tests quic_loopback_test)
+        endif()
         if(TARGET protorelay_native_tls)
             add_dependencies(unit_tests native_tls_test)
         endif()
@@ -948,6 +964,15 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         target_include_directories(native_tls_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
         target_link_libraries(native_tls_test PRIVATE protorelay_native_tls
             protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
+    endif()
+    # QUIC transport backend: only when the vendored third party was built.
+    if(TARGET protorelay_quic)
+        add_executable(quic_loopback_test test/unit/quic_loopback_test.cpp)
+        target_include_directories(quic_loopback_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(quic_loopback_test SYSTEM PRIVATE
+            ${CMAKE_SOURCE_DIR}/third_party/quic/boringssl/include
+            ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
+        target_link_libraries(quic_loopback_test PRIVATE protorelay_quic protorelay_native_net quic_lsquic)
     endif()
     add_executable(node_link_test test/unit/node_link_test.cpp)
     target_link_libraries(node_link_test PRIVATE protorelay_node_link)

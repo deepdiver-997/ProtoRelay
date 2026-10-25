@@ -62,6 +62,25 @@ if(TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
     target_link_libraries(protorelay_native_tls PRIVATE protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
+# QUIC transport backend (see include/framework/net/quic_transport.h and
+# third_party/quic/MANIFEST.md). Optional: compiled only when the vendored
+# lsquic + symbol-prefixed BoringSSL artifacts were built in this checkout.
+include(${CMAKE_SOURCE_DIR}/cmake/ProtoRelayQuicThirdParty.cmake)
+if(PROTORELAY_HAVE_QUIC_THIRD_PARTY)
+    protorelay_module(protorelay_quic
+        src/framework/net/quic/quic_internal.cpp
+        src/framework/net/quic/quic_core.cpp
+        src/framework/net/quic/quic_stream.cpp
+        src/framework/net/quic/quic_mux_connection.cpp
+        src/framework/net/quic/quic_server.cpp
+        src/framework/net/quic/quic_client.cpp)
+    target_link_libraries(protorelay_quic PRIVATE protorelay_native_net quic_lsquic)
+    # <openssl/*.h> must resolve to the vendored (prefixed) headers.
+    target_include_directories(protorelay_quic SYSTEM PRIVATE
+        ${PROTORELAY_QUIC_THIRD_PARTY_DIR}/boringssl/include
+        ${PROTORELAY_QUIC_THIRD_PARTY_DIR}/lsquic/include)
+endif()
+
 protorelay_module(protorelay_http
     src/framework/http/message_processor.cpp src/framework/http/http_parser.cpp
     src/framework/http/http_fsm_inst.cpp src/framework/http/http_session_inst.cpp
