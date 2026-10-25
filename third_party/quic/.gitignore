@@ -1,0 +1,5 @@
+boringssl/
+lsquic/
+# 本地工具脚本不入库（根 .gitignore 的 !build.sh 例外会重新暴露 build.sh，此处压回）
+build.sh
+sync.sh
