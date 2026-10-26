@@ -7,16 +7,21 @@ test/bench/
   README.md                  ← 本文件
   run_bench_all.sh           跑全部压测（SMTP 优先，见文件内注释）
   smtp/
-    smtp_client.cpp          SMTP 压测客户端（raw socket，线程×连接）
-    bench.sh                 SMTP 压测启动器（ramp 并发找峰值）
+    round.sh                 标准四象限基准（读服务端配置取端口/存储；支持 ack 模式/
+                             入队上限覆盖/local-ips/象限选择，全部环境变量参数化）
+    smtp_client.cpp          SMTP 压测客户端（raw socket，线程×连接；--local-ips
+                             每 worker 绑一个回环 IP 扩四元组空间）
+    bench.sh                 SMTP 压测启动器（ramp 并发找峰值；依赖 scripts/cl.py，已失修）
     profile.sh               高负载采样找热点（写路径，跑完按需清理）
     REPORT.md                SMTP 吞吐基准报告（历史全量）
   imap/
+    round.sh                 标准读路径基准（端口从配置读；预热登录/SELECT 对照可调）
     imap_client.cpp          IMAP 读路径压测客户端（SELECT+FETCH 循环）
     seed_imap_data.py        灌测试邮件（INSERT IGNORE 幂等；POP3 也共用此数据）
     profile.sh               高负载采样找热点（macOS sample / Linux perf）
     REPORT.md                IMAP 吞吐基准 + Phase 2/3 对照 + 热点报告
   pop3/
+    round.sh                 标准读路径基准（端口/DB 从配置读；轮间自动清会话锁）
     pop3_client.cpp          POP3 读路径压测客户端（STAT+LIST+RETR 循环）
     profile.sh               高负载采样找热点
     REPORT.md                POP3 吞吐基准 + 热点报告
@@ -24,6 +29,14 @@ test/bench/
     fsm_bench.cpp            纯 FSM 基准（MockConnection 零 I/O）
     dispatch_bench.cpp       分发器基准
 ```
+
+## round.sh 约定（推荐入口）
+
+三个 `round.sh` 是"脚本只管跑"的标准基准：端口、存储路径、DB 连接全部从
+`CONFIG` 指向的服务端配置 JSON 读取，脚本自身零硬编码资源；资源占用（线程档位、
+消息量、象限选择、ack 模式、入队上限、本地 IP 列表）用环境变量覆盖。默认值对齐
+各 REPORT.md 最近一轮的口径，直接跑即可复现。结果打 stdout，誊进对应 REPORT.md。
+
 
 ## 快速开始
 
