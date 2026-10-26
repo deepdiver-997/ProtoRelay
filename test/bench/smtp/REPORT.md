@@ -611,3 +611,112 @@ sudo ifconfig lo0 alias 127.0.0.2 up
 ---
 
 
+## 2026-10-26 — FSM 引擎落地后全矩阵（main@45e5663）
+
+### 测试条件（边界）
+
+```
+工具:      C++ smtp_client (raw socket, TCP_NODELAY)；fsm_bench (MockConnection 零 I/O)
+构建:      Release (-O3 -DNDEBUG), ./build.sh Release
+服务端:    smtpsServer -c /tmp/protorelay_agent_1/smtp_bench_config.json
+           内容 = test/config/smtps_mock.json，仅两处改写：
+             - storage 指向 /tmp/protorelay_agent_1/bench_smtp/{mail,attachments}
+               （与其他协议基准的数据隔离，避免 6.5 万封压测文件混入读路径数据）
+             - log_to_console=false + log_to_file=/tmp 日志（落盘量级与 console 相当）
+           perf_mode=true, inbound_ack_mode=after_enqueue, 4 io + 4 worker, 无 TLS
+网络:      localhost:20100 plain TCP（agent worktree 独占端口段）
+机器:      Apple M2 Pro 12 核 / 16GB / macOS 15.8.1；压测期间无其他重负载
+清理:      每象限前 kill 服务 + rm -rf 隔离 mail 目录重建；
+           per-conn 象限结束后 TIME_WAIT<50 再加 35s 静置
+```
+
+**与历史轮次的可比性（重要）**：
+- **不可与 2026-06-28（峰值 12.5K）和 2026-07-29（18K）直接对比。**
+  2026-08-21（cb38178/c52485b）起 DATA_END 收尾契约改为「正文 fsync 落盘成功才回 250」，
+  防止向对端 MTA 谎报投递。250 的语义从 after_enqueue（内存队列）变成每封一次 fsync。
+  本轮测的是**持久化 ingest 上限**；历史数字是弱持久化口径，3 倍差距主要是这个契约差。
+- fsm_bench 的 harness 自 61b0bcf 起未改动，实现层（传统手写 FSM → pr::fsm::Engine 声明式
+  引擎）已在 829685d/a32a54e 整体替换，数字反映新引擎 + 现行 handler 链。
+
+### 结果
+
+#### 1. Sequential + Per-Conn（串行命令，每封新建 TCP；msgs=5000）
+
+| 线程 | 成功 | 失败 | 速率 |
+|------|------|------|------|
+| 1 | 5000 | 0 | 1649 msg/s |
+| 2 | 5000 | 0 | 3129 msg/s |
+| 4 | 4999 | 1 | 4860 msg/s |
+| 8 | 1530 | 3470 | 280 msg/s ⚠ |
+| 16 | 0 | 5000 | 0 msg/s ⚠ |
+
+⚠ 见下方甄别实验：t≥8 崩塌是客户端 ephemeral port 池耗尽，非服务端回归。
+
+#### 2. Sequential + Reuse（串行命令，复用 TCP；msgs=5000）
+
+| 线程 | 成功 | 失败 | 速率 |
+|------|------|------|------|
+| 1 | 5000 | 0 | 2223 msg/s |
+| 2 | 5000 | 0 | 4519 msg/s |
+| **4** | **5000** | **0** | **6079 msg/s** |
+| 8 | 5000 | 0 | 6015 msg/s |
+| 16 | 5000 | 0 | 5923 msg/s |
+| 32 | 5000 | 0 | 5254 msg/s |
+
+#### 3. Pipeline + Per-Conn（批量写，每封新建 TCP；msgs=5000）
+
+| 线程 | 成功 | 失败 | 速率 |
+|------|------|------|------|
+| 1 | 5000 | 0 | 2164 msg/s |
+| 2 | 5000 | 0 | 3828 msg/s |
+| **4** | **4995** | **5** | **5997 msg/s** |
+| 8 | 1358 | 3642 | 241 msg/s ⚠（同上，端口池） |
+
+#### 4. Pipeline + Reuse（批量写，复用 TCP；msgs=50000）
+
+| 线程 | 成功 | 失败 | 速率 |
+|------|------|------|------|
+| 1 | 50000 | 0 | 2886 msg/s |
+| 2 | 50000 | 0 | 4212 msg/s |
+| **4** | **50000** | **0** | **5678 msg/s** |
+| 8 | 50000 | 0 | 5383 msg/s |
+| 16 | 50000 | 0 | 4840 msg/s |
+| 32 | 50000 | 0 | 5043 msg/s |
+| 64 | 50000 | 0 | 4714 msg/s |
+
+**形态**：各象限 t=4 后全部走平（~5-6K），并发加大无收益——瓶颈是持久化刷盘链的
+串行 fsync，不在命令处理。
+
+### 甄别实验
+
+1. **per-conn t=8 崩塌归因**：ramp 内 5 组 × 5000 连接累计 25000，超出 localhost
+   ephemeral 池（16384 个 / TIME_WAIT 30s 窗口）。单独排空后复跑 seq+per-conn t=8：
+   **4255 msg/s，仅 3 失败**。结论：本表 per-conn 行仅 t≤4 可信，t≥8 的数字测的是
+   客户端端口池边界，不是服务端能力。（生产无此问题：对端 IP 不同，四元组不冲突。）
+2. **pipe+reuse 方差**：t=4 复跑 5042 msg/s（首跑 5678），同环境方差 ~12%。
+
+### 热点（pipe+reuse t=4 负载期间，`sample` 5s）
+
+| 采样计数 | 热点函数 |
+|---------|---------|
+| 16892 | `__psynch_cvwait` |
+| 10182 | `kevent` |
+| 3387+3065+3205 | `open`×2 + `rename`（正文临时文件 + 原子改名） |
+| 946/883/780/687 | `stat` / `write` / `fsync` / `pwrite` |
+| 222/108 | `recvfrom` / `sendto`（网络收发反而小头） |
+
+**解读**：文件系统操作（open/rename/fsync/pwrite）合计近万采样，是 250 前持久化契约的
+直接成本；FSM/引擎符号完全不在榜上——**本次 FSM 抽取在写路径上没有引入可测的 CPU 开销**。
+
+### FSM Mock 基准（2026-10-26，同构建）
+
+```
+./build/fsm_bench -t 1 -n 5000   → 232,692 msg/s（复跑 220,409）
+./build/fsm_bench -t 4 -n 50000  → 294,664 msg/s（200K 封 0.68s）
+./build/dispatch_bench           → std::map 153M op/s (6ns) vs 编译期数组 1013M op/s
+```
+
+纯 FSM（零 I/O，含 session 构造 + 7 命令全流水 + persist queue 入队）单线程 23 万 msg/s，
+折合 4.3μs/封。对照 07-29 的 14,136：harness 相同，但期间除 FSM 引擎替换外服务端代码
+亦有多次演进，**不做跨轮归因**；本轮内对照意义：FSM 派发成本（6ns/次 × 6 次/封）
+在 4.3μs 里 <1%，mock 与 real（~5.7K）的 40× 差距全部在真实 I/O 与持久化侧。

@@ -89,3 +89,52 @@ _（由 `profile.sh` 自动 append）_
 **结论**：POP3 读路径瓶颈不在服务端 CPU——io 线程空闲为主、应用热点是 RETR 的
 storage 文件 I/O。若要提吞吐：少重复 RETR 同几封（读路径本来就是重复读），或把
 正文读取交给 worker（远程 storage 时才有意义，本地 open/read 是 µs 级）。
+
+## 2026-10-26 — POP3 读路径复测（Release，main@45e5663）
+
+### 测试条件（边界）
+
+```
+构建:      Release (-O3 -DNDEBUG)
+服务端:    pop3Server -c /tmp/protorelay_agent_1/pop3_bench_config.json
+           20115/tcp；use_database=true → 本机 MySQL `mail_agent_1`；
+           local storage（与 IMAP 共用同一份 mailbox 数据：每用户 INBOX 200 封 × 2KB）；
+           4 io + 4 worker
+用户:      5 个 bench 账号（test2/t1/test@scut.email、alice@a.local、bob@b.local），
+           首登 rehash-to-bcrypt 已预热
+每轮:      STAT + LIST + RETR 1:5（LOGIN 每连接一次）
+机器:      Apple M2 Pro 12 核 / 16GB / macOS 15.8.1
+```
+
+**两条 harness 边界（影响数字解读）**：
+1. **单会话锁**：并发连接数 ≤ 用户数（5），超出即 `[IN-USE] Mailbox lock busy`，
+   超出部分不参与测量（本报告并发档 = 1/4/5）。
+2. **pop3_client 不发 QUIT**：跑完直接关 socket，锁留待心跳清扫（~5min）。轮间必须
+   `DELETE FROM pop3_session_lock`（agent 库）+ 1s 间隔，否则后续轮全部 IN-USE。
+   真实客户端发 QUIT 不受影响；这是压测工具的怪癖，不是服务端缺陷。
+
+### 吞吐
+
+| 并发（=用户数） | rounds/s | P50 (ms) | P95 (ms) | P99 (ms) |
+|---------------|----------|----------|----------|----------|
+| 1 | 1390 | 0.59 | 0.71 | 0.77 |
+| 4 | 4387 | 0.79 | 0.92 | 0.98 |
+| 5 | 4541 | 0.85 | 1.00 | 1.07 |
+| 5（10000 轮长跑） | 4841 | 0.95 | 1.13 | 1.24 |
+
+对照说明：2026-08-29 的 260 rps @ c4 是 **Debug 构建**，与本轮 Release 不可比。
+
+### 热点（5 并发 × 10000 轮负载，`sample` 8s）
+
+| 采样计数 | 热点函数 |
+|---------|---------|
+| 25797 | `kevent` |
+| 21621 | `__psynch_cvwait` |
+| 2271 | `__open_nocancel`（每轮 5 次 RETR × open 正文文件） |
+| 1637/1351 | `sendto` / `recvfrom` |
+| 930 | `std::string::push_back`（响应拼装） |
+| 470 | `istreambuf_iterator` 构造 string（正文逐迭代器读入） |
+
+**结论**：与上轮 profile 一致——瓶颈是事件循环 + RETR 的 open/读文件；应用侧
+明确的优化线索是正文读取的 `istreambuf_iterator` 逐字符 slurp（470 采样），
+换成按块 read 可消。
