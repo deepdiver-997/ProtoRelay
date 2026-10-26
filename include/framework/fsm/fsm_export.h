@@ -8,22 +8,17 @@
 // no runtime path is guessed. States not referenced by any guard row still
 // get nodes (orphan states are information too).
 //
-// Phase 2 (runtime edge counts) is deferred: both functions already take an
-// optional edge-count map slot so call sites won't change when it lands.
+// Phase 2 (runtime edge counts): pass Engine::edge_count_snapshot() as
+// `edge_counts`. Each guard row is annotated with its observed traversal
+// count — "×0" rows (dashed/red in DOT) are dead edges, i.e. declared
+// transitions no executed path has ever taken.
 #include "framework/fsm/fsm_desc.h"
 
-#include <map>
+#include <optional>
 #include <ostream>
 #include <string>
-#include <vector>
 
 namespace pr::fsm {
-
-// Optional per-(state,event) observed transition counts, keyed the same way
-// as the engine's handler table. Phase 2 will overlay these onto the export;
-// both functions accept the pointer today and render identically when null.
-template <typename State, typename Event>
-using EdgeCountMap = std::map<std::pair<State, Event>, std::uint64_t>;
 
 namespace detail {
 
@@ -57,7 +52,13 @@ std::string command_words_for(const Desc<State, Event>& desc, Event event) {
 template <typename State, typename Event>
 void write_dot(const Desc<State, Event>& desc, std::ostream& out,
                const EdgeCountMap<State, Event>* edge_counts = nullptr) {
-    (void)edge_counts; // Phase 2 overlay slot; rendering is count-independent today.
+    auto count_of = [&](const GuardRow<State, Event>& row)
+        -> std::optional<std::uint64_t> {
+        if (!edge_counts) return std::nullopt;
+        auto it = edge_counts->find({row.from, row.on, row.to.value_or(row.from)});
+        return it == edge_counts->end() ? std::optional<std::uint64_t>(0)
+                                        : std::optional<std::uint64_t>(it->second);
+    };
     out << "digraph fsm {\n";
     out << "  rankdir=LR;\n";
     out << "  node [shape=box fontname=\"monospace\"];\n";
@@ -73,9 +74,13 @@ void write_dot(const Desc<State, Event>& desc, std::ostream& out,
         std::string label = std::string(desc.name_of(row.on));
         std::string words = detail::command_words_for(desc, row.on);
         if (!words.empty()) label += " {" + words + "}";
+        const auto count = count_of(row);
+        if (count) label += " x" + std::to_string(*count);
         out << "  \"" << detail::escape_label(std::string(desc.name_of(row.from)))
             << "\" -> \"" << detail::escape_label(std::string(desc.name_of(to)))
-            << "\" [label=\"" << detail::escape_label(label) << "\"];\n";
+            << "\" [label=\"" << detail::escape_label(label) << "\"";
+        if (count && *count == 0) out << ", style=dashed, color=red";
+        out << "];\n";
     }
     out << "}\n";
 }
@@ -84,7 +89,13 @@ void write_dot(const Desc<State, Event>& desc, std::ostream& out,
 template <typename State, typename Event>
 void write_mermaid(const Desc<State, Event>& desc, std::ostream& out,
                    const EdgeCountMap<State, Event>* edge_counts = nullptr) {
-    (void)edge_counts; // Phase 2 overlay slot.
+    auto count_of = [&](const GuardRow<State, Event>& row)
+        -> std::optional<std::uint64_t> {
+        if (!edge_counts) return std::nullopt;
+        auto it = edge_counts->find({row.from, row.on, row.to.value_or(row.from)});
+        return it == edge_counts->end() ? std::optional<std::uint64_t>(0)
+                                        : std::optional<std::uint64_t>(it->second);
+    };
     out << "stateDiagram-v2\n";
     // Terminal marker: Mermaid v2 has no double-border primitive; a note per
     // terminal keeps the information visible in every renderer.
@@ -97,6 +108,8 @@ void write_mermaid(const Desc<State, Event>& desc, std::ostream& out,
         std::string label = std::string(desc.name_of(row.on));
         std::string words = detail::command_words_for(desc, row.on);
         if (!words.empty()) label += " {" + words + "}";
+        const auto count = count_of(row);
+        if (count) label += " x" + std::to_string(*count);
         out << "  " << detail::escape_label(std::string(desc.name_of(row.from)))
             << " --> " << detail::escape_label(std::string(desc.name_of(to)))
             << ": " << detail::escape_label(label) << "\n";

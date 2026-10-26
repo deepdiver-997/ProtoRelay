@@ -25,6 +25,7 @@
 #include "framework/session_base.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <functional>
 #include <ostream>
@@ -34,6 +35,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace pr::fsm {
 
@@ -71,11 +73,11 @@ public:
             auto reply = std::move(reply_);
             release();
             if (session->is_closed()) return;
-            post(session, [engine, session, ok, target,
+            post(session, [engine, session, ok, target, event = event_,
                            reply = std::move(reply)]() mutable {
                 if (session->is_closed()) return;
-                if (ok) engine->settle(session, target, std::move(reply));
-                else engine->settle(session, std::nullopt, std::nullopt);
+                if (ok) engine->settle(session, target, std::move(reply), event);
+                else engine->settle(session, std::nullopt, std::nullopt, event);
             });
         }
 
@@ -104,10 +106,10 @@ public:
             SessionPtr session = session_;
             release();
             if (session->is_closed()) return;
-            post(session, [engine, session,
+            post(session, [engine, session, event = event_,
                            error_reply = std::move(error_reply)]() mutable {
                 if (session->is_closed()) return;
-                engine->settle(session, std::nullopt, std::move(error_reply));
+                engine->settle(session, std::nullopt, std::move(error_reply), event);
             });
         }
 
@@ -122,9 +124,9 @@ public:
             auto target = target_;
             release();
             if (session->is_closed()) return;
-            post(session, [engine, session, target]() {
+            post(session, [engine, session, target, event = event_]() {
                 if (session->is_closed()) return;
-                engine->settle_closing(session, target);
+                engine->settle_closing(session, target, event);
             });
         }
 
@@ -142,9 +144,9 @@ public:
     private:
         friend class Engine;
         Transition(SessionPtr session, Engine* engine, std::optional<State> target,
-                   std::optional<std::string> reply)
+                   std::optional<std::string> reply, std::optional<Event> event)
             : session_(std::move(session)), engine_(engine), target_(target),
-              reply_(std::move(reply)) {}
+              reply_(std::move(reply)), event_(std::move(event)) {}
 
         static void post(const SessionPtr& session, std::function<void()> task) {
             session->get_connection().executor()->post(std::move(task));
@@ -160,6 +162,7 @@ public:
         Engine* engine_ = nullptr;
         std::optional<State> target_;
         std::optional<std::string> reply_;
+        std::optional<Event> event_;   // captured at arm time (dispatch context)
     };
 
     explicit Engine(Desc<State, Event> desc) : desc_(std::move(desc)) {
@@ -168,6 +171,19 @@ public:
         if (desc_.has_conflicting_command()) {
             throw std::logic_error(
                 "fsm desc: duplicate command word (match_command would shadow)");
+        }
+        const char* stats = std::getenv("PR_FSM_EDGE_STATS");
+        if (stats && stats[0] == '1') {
+            // Counters indexed [from][event][to]; engines are shared by many
+            // sessions across io threads, hence atomics.
+            const std::size_t total = static_cast<std::size_t>(State::COUNT) *
+                                      static_cast<std::size_t>(Event::COUNT) *
+                                      static_cast<std::size_t>(State::COUNT);
+            edge_count_total_ = total;
+            edge_counts_ = std::make_unique<std::atomic<std::uint64_t>[]>(total);
+            for (std::size_t i = 0; i < total; ++i)
+                edge_counts_[i].store(0, std::memory_order_relaxed);
+            edge_stats_enabled_ = true;
         }
     }
 
@@ -247,6 +263,9 @@ public:
         }
         if (event_begin_) event_begin_(current, event, session);
         if (pre_dispatch_) pre_dispatch_(current, event, session);
+        auto& dispatch_event = dispatch_event_tls();
+        const std::optional<Event> saved_event = dispatch_event;
+        dispatch_event = event;   // write points read this to attribute edges
         try {
             handler->second(session);
         } catch (const std::exception& error) {
@@ -263,6 +282,7 @@ public:
                               std::string(desc_.name_of(event)));
             write_reply(session, internal_error_reply(current, event, session));
         }
+        dispatch_event = saved_event;   // restore across nested dispatch (drain)
     }
 
     // The session-driven entry: parse filled next_event_, dispatch it.
@@ -276,14 +296,16 @@ public:
     // Sync: the收口 (unpause → state → reply → drain → re-arm read) right here.
     void apply(const SessionPtr& session, State target,
                std::optional<std::string> reply = std::nullopt) {
-        settle(session, std::optional<State>(target), std::move(reply));
+        settle(session, std::optional<State>(target), std::move(reply),
+               current_dispatch_event());
     }
 
     // Sync closing variant of apply: unpause + state, nothing else — the
     // caller replies and closes. Buffered input dies with the connection,
     // matching today's QUIT/LOGOUT handlers (no drain on closing paths).
     void apply_closing(const SessionPtr& session, State target) {
-        settle_closing(session, std::optional<State>(target));
+        settle_closing(session, std::optional<State>(target),
+                       current_dispatch_event());
     }
 
     // Shape-A收口 (banner / prompts / policy rejections): reply, land the
@@ -294,6 +316,7 @@ public:
     void reply_then_settle(const SessionPtr& session, std::string text, State target) {
         if (!session || session->is_closed()) return;
         check_strict_guard(session, target);
+        count_edge(state_of(session), current_dispatch_event(), target);
         write_reply(session, text);
         session->set_paused(false);
         session->set_current_state(static_cast<int>(target));
@@ -306,7 +329,11 @@ public:
                                                std::optional<State> target,
                                                std::optional<std::string> reply = std::nullopt) {
         if (session) session->set_paused(true);
-        return Transition(session, this, target, std::move(reply));
+        // Armed inside the handler (io thread, within dispatch): capture the
+        // dispatch event now so the cross-thread finish still attributes its
+        // edge to the command that started it.
+        return Transition(session, this, target, std::move(reply),
+                          current_dispatch_event());
     }
 
     // One queued write; safe from any thread (do_async_write posts).
@@ -377,11 +404,21 @@ private:
     // The single收口 replacing today's per-handler set_state + drain +
     // do_async_read triples (30 set / 15 drain in SMTP alone).
     void settle(const SessionPtr& session, std::optional<State> target,
-                std::optional<std::string> reply) {
+                std::optional<std::string> reply,
+                std::optional<Event> event = std::nullopt) {
         if (!session || session->is_closed()) return;
-        if (target) check_strict_guard(session, *target);
+        if (target) {
+            check_strict_guard(session, *target);
+            const State from = state_of(session);
+            count_edge(from, event, *target);
+            session->set_current_state(static_cast<int>(*target));
+        } else {
+            // Resume without a state change (failure finish): attribute to the
+            // self edge so a taken failure exit is not mistaken for a dead one.
+            const State from = state_of(session);
+            count_edge(from, event, from);
+        }
         session->set_paused(false);
-        if (target) session->set_current_state(static_cast<int>(*target));
         if (reply && !reply->empty()) write_reply(session, *reply);
         session->drain_buffered_commands();
         // drain never arms new reads (its own header note); re-arm when the
@@ -397,11 +434,15 @@ private:
     }
 
     // Closing-path收口: strict check + unpause + state; no drain, no re-arm.
-    void settle_closing(const SessionPtr& session, std::optional<State> target) {
+    void settle_closing(const SessionPtr& session, std::optional<State> target,
+                        std::optional<Event> event = std::nullopt) {
         if (!session || session->is_closed()) return;
-        if (target) check_strict_guard(session, *target);
-        session->set_paused(false);
-        if (target) session->set_current_state(static_cast<int>(*target));
+        if (target) {
+            check_strict_guard(session, *target);
+            count_edge(state_of(session), event, *target);
+            session->set_current_state(static_cast<int>(*target));
+        }
+        session->set_paused(false);   // closing 收口仍要解暂停（不 drain 不续读）
     }
 
     void write_reply(const SessionPtr& session, const std::string& text) {
@@ -468,6 +509,29 @@ private:
         std::abort();
     }
 
+    // Edge statistics (PR_FSM_EDGE_STATS=1): counters indexed
+    // [from][event][to], shared by every session on this engine.
+    static std::optional<Event>& dispatch_event_tls() {
+        static thread_local std::optional<Event> ctx;
+        return ctx;
+    }
+    std::optional<Event> current_dispatch_event() const {
+        if (!edge_stats_enabled_) return std::nullopt;
+        return dispatch_event_tls();
+    }
+    void count_edge(State from, const std::optional<Event>& event, State to) {
+        if (!edge_stats_enabled_ || !event) return;
+        const std::size_t events = static_cast<std::size_t>(Event::COUNT);
+        const std::size_t states = static_cast<std::size_t>(State::COUNT);
+        edge_counts_[(static_cast<std::size_t>(from) * events +
+                      static_cast<std::size_t>(*event)) * states +
+                     static_cast<std::size_t>(to)]
+            .fetch_add(1, std::memory_order_relaxed);
+    }
+    State state_of(const SessionPtr& session) const {
+        return static_cast<State>(session->get_current_state());
+    }
+
     Desc<State, Event> desc_;
     std::map<std::pair<State, Event>, Handler> handlers_;
     std::function<void(State, Event, SessionPtr)> event_begin_;
@@ -475,6 +539,31 @@ private:
     std::function<void(SessionPtr)> violation_observer_;
     ReplyFormatter reply_formatter_;
     bool strict_guards_ = false;
+    bool edge_stats_enabled_ = false;
+    std::size_t edge_count_total_ = 0;
+    std::unique_ptr<std::atomic<std::uint64_t>[]> edge_counts_;
+
+public:
+    // Snapshot of the observed (from, event, to) traversal counts; zeros are
+    // omitted. Feed it to write_dot/write_mermaid to overlay ×N on the
+    // diagram — zero-count rows are dead edges. Empty when edge statistics
+    // are disabled (PR_FSM_EDGE_STATS unset).
+    EdgeCountMap<State, Event> edge_count_snapshot() const {
+        EdgeCountMap<State, Event> out;
+        if (!edge_stats_enabled_) return out;
+        const std::size_t events = static_cast<std::size_t>(Event::COUNT);
+        const std::size_t states = static_cast<std::size_t>(State::COUNT);
+        for (std::size_t f = 0; f < states; ++f)
+            for (std::size_t e = 0; e < events; ++e)
+                for (std::size_t t = 0; t < states; ++t) {
+                    const auto v =
+                    edge_counts_[(f * events + e) * states + t]
+                        .load(std::memory_order_relaxed);
+                    if (v) out[{static_cast<State>(f), static_cast<Event>(e),
+                                static_cast<State>(t)}] = v;
+                }
+        return out;
+    }
 };
 
 // Bulk-data skeleton (design §3.2-5): declared-length delimination with

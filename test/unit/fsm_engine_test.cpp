@@ -26,6 +26,7 @@
 #include "mail_system/back/mailServer/fsm/smtps/smtps_desc.h"
 #include "mail_system/back/mailServer/fsm/imaps/imaps_desc.h"
 #include "framework/http/http_fsm.h"
+#include "framework/fsm/fsm_export.h"
 #include "framework/net/asio_executor.h"
 #include "mock_connection.h"
 #include "test_session.h"
@@ -313,6 +314,85 @@ void test_strict_guard_rejects_unknown_target() {
                 "strict guards abort on an off-table transition target");
 }
 
+// ---- engine: edge statistics (PR_FSM_EDGE_STATS=1) ----
+
+void test_edge_stats_count_and_overlay() {
+    ::setenv("PR_FSM_EDGE_STATS", "1", 1);
+    pr::fsm::Desc<St, Ev> desc;
+    desc.guards = {
+        {St::INIT, Ev::CONNECT, St::READY},
+        {St::READY, Ev::PING, St::READY},
+        {St::READY, Ev::QUIT, St::BYE},    // will stay untaken -> dead edge
+        {St::READY, Ev::QUIT, St::BUSY},   // untaken sibling exit
+    };
+    desc.state_names = {"INIT", "READY", "BUSY", "BYE"};
+    desc.event_names = {"CONNECT", "PING", "QUIT"};
+    Engine engine(std::move(desc));
+
+    auto connection = std::make_unique<MockConnection>();
+    auto* conn = connection.get();
+    conn->set_deferred_read(true);
+    auto session = std::make_shared<TestSession>(std::move(connection));
+    session->set_current_state(static_cast<int>(St::INIT));
+
+    bool used_async = false;
+    engine.add_handler(St::INIT, Ev::CONNECT, [&](SessionPtr s) {
+        engine.apply(s, St::READY);
+    });
+    engine.add_handler(St::READY, Ev::PING, [&](SessionPtr s) {
+        if (used_async) {
+            engine.apply(s, St::READY);
+        } else {
+            // Async shape exercised inline: begin_transition armed inside
+            // dispatch must capture the event for the cross-thread finish.
+            used_async = true;
+            auto t = engine.begin_transition(s, St::READY);
+            t.finish(true);
+        }
+    });
+    engine.add_handler(St::READY, Ev::QUIT, [&](SessionPtr s) {
+        auto t = engine.begin_transition(s, std::nullopt);
+        t.finish(false);   // failure resume -> self edge (READY,QUIT,READY)
+    });
+
+    const auto drive = [&](Ev e) {
+        session->set_next_event(static_cast<int>(e));
+        engine.auto_process_event(session);
+        conn->pump_executor();   // Transition finishes land via the executor
+    };
+    drive(Ev::CONNECT);
+    drive(Ev::PING);    // async-captured finish
+    drive(Ev::PING);    // sync apply
+    drive(Ev::QUIT);    // failure resume
+
+    const auto counts = engine.edge_count_snapshot();
+    expect_true(counts.size() == 3, "only taken edges appear in the snapshot");
+    expect_true(counts.count({St::INIT, Ev::CONNECT, St::READY}) == 1 &&
+                counts.at({St::INIT, Ev::CONNECT, St::READY}) == 1,
+                "sync apply counts its edge");
+    expect_true(counts.at({St::READY, Ev::PING, St::READY}) == 2,
+                "async finish attributes the captured dispatch event");
+    expect_true(counts.at({St::READY, Ev::QUIT, St::READY}) == 1,
+                "failure resume counts as the self edge");
+    expect_true(counts.count({St::READY, Ev::QUIT, St::BYE}) == 0,
+                "untaken exit has no count");
+
+    std::ostringstream dot;
+    pr::fsm::write_dot(engine.desc(), dot, &counts);   // desc 已 move 进引擎
+    expect_true(dot.str().find("label=\"CONNECT x1\"") != std::string::npos,
+                "overlay annotates taken edges");
+    expect_true(dot.str().find("label=\"QUIT x0\", style=dashed, color=red") !=
+                    std::string::npos,
+                "dead edges render dashed/red with x0");
+
+    ::unsetenv("PR_FSM_EDGE_STATS");
+    pr::fsm::Desc<St, Ev> plain_desc;
+    plain_desc.guards = {{St::INIT, Ev::CONNECT, St::READY}};
+    Engine plain(std::move(plain_desc));
+    expect_true(plain.edge_count_snapshot().empty(),
+                "edge stats disabled without the env");
+}
+
 // ---- engine: the two sanctioned write points ----
 
 void test_apply_settles() {
@@ -499,6 +579,7 @@ int main() {
     test_registration_audit_report();
     test_registration_audit_real_protocols();
     test_strict_guard_rejects_unknown_target();
+    test_edge_stats_count_and_overlay();
     test_apply_settles();
     test_begin_transition_sync_path();
     test_transition_failure_path();
