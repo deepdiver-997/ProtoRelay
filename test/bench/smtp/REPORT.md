@@ -784,3 +784,38 @@ macOS 需一次性 `sudo ifconfig lo0 alias 127.0.0.X up`，脚本预检不可�
 本轮未加别名故 per-conn 大并发仍受 16384 端口池限制）。POP3 轮间自动清会话锁。
 `.gitignore` 的 `*.sh` 忽略规则补了 `!test/bench/*/round.sh` 例外（原来只有
 profile.sh 有例外）。
+
+### 附：写延迟溯源——不是分块写，是 fsync 契约（2026-10-26 复核）
+
+对「以前一次性落盘、现在分块流式写」的假设做了代码级核实，**时间线恰好相反**：
+
+- **2026-04-25 起（cb0d076）**：正文走"五件套"（expand_buffer / flush_buffer_to_disk /
+  async_flush_buffer_to_disk / wait_for_async_writes / flush_body_and_wait）——
+  这才是**分块异步流式**写；且 250 不等落盘（after_enqueue），没有持久化承诺。
+  历史峰值 12.5K（6/28）、18K（7/29）都是这个口径。
+- **2026-08-21 起（c52485b + cb38178）**：五件套被 `MailBodyWriter` 取代——
+  64KB 同步缓冲（小邮件攒满一次 pwrite，**恰恰是"一次性"**）+ commit 时
+  flush+fsync，fsync 成功才准回 250。每封固定多一次 fsync（APFS 实测 ~170μs，
+  1/170μs ≈ 5.9K/s，与实测天花板吻合）。
+- 所以「一直有写延迟」的准确表述是：**延迟一直有，但从 8/21 起才被计入 250 之前**；
+  来源是 fsync（设计选择，防对端 MTA 误删队列），不是写本身——page cache 写是
+  μs 级（`MailBodyWriter` 注释自带这笔记：写 64KB 十几微秒，异步化反而亏）。
+- 每封邮件除正文外还有一次 MIME 元数据 sidecar 的 temp+rename
+  （`LocalFileMetadataCache::save_metadata`，无 fsync，开销小）；采样里的
+  `rename` 3205 来自它，不是正文路径。
+
+### 附：回环别名指引（per-conn 大并发的解法）
+
+- **一个别名够不够**：每 IP 独占一份 ephemeral 池（16,384 端口 / TIME_WAIT 30s
+  窗口 ≈ 546 新建连接/秒/IP）。per-conn 象限峰值 ~6K/s → **至少 11 个**；
+  建议 16 个（127.0.0.2-127.0.0.17），聚合 ~8.7K/s，完全覆盖。
+- **加法**（临时，重启即失效）：
+  `for i in $(seq 2 17); do sudo ifconfig lo0 alias 127.0.0.$i 255.255.255.255 up; done`
+- **影响**：可忽略。别名只是本机路由表条目，不走网卡/ARP，流量仍是内核回环；
+  服务端无需改配置（监听 127.0.0.1，来源 127.0.0.X 的连接照常收）；仅回环域内
+  可达，无对外暴露面。删除：`sudo ifconfig lo0 -alias 127.0.0.X`。
+- **持久化（重启仍在）**：`ifconfig` 别名不跨重启，需要 LaunchDaemon 开机补挂——
+  `/Library/LaunchDaemons/com.protorelay.loopback-aliases.plist`，`RunAtLoad` +
+  上述 for 循环作为 `ProgramArguments`，`sudo launchctl load -w` 一次即可。
+- 配好后用 `LOCAL_IPS=127.0.0.2,127.0.0.3,... test/bench/smtp/round.sh`
+  （QUADRANTS=1/3）复跑 per-conn：ok 计数不再塌方即为生效。
