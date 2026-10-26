@@ -732,6 +732,24 @@ endif()
 # 测试 / Benchmark（BUILD_TESTS=OFF 时跳过）
 # ================================================================
 if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
+    # ---- CMake 卫生任务 1：数据驱动的一行式单测注册 ----
+    # 内部仍走 setup_mail_target，编译/链接语义与手写块一致：
+    #   SRCS 缺省 = ${COMMON_SRCS} + test/unit/<name>.cpp（最常见形态）；
+    #   LIBS  缺省不额外链接（保持 setup_mail_target 的链接集合）。
+    # 特殊块（额外源文件之外的非常规 include/定义/条件编译）保留手写。
+    function(pr_add_unit_test NAME)
+        cmake_parse_arguments(ARG "" "" "SRCS;LIBS" ${ARGN})
+        if(NOT ARG_SRCS)
+            set(ARG_SRCS ${COMMON_SRCS} test/unit/${NAME}.cpp)
+        endif()
+        add_executable(${NAME} ${ARG_SRCS})
+        target_include_directories(${NAME} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        setup_mail_target(${NAME})
+        if(ARG_LIBS)
+            target_link_libraries(${NAME} PRIVATE ${ARG_LIBS})
+        endif()
+    endfunction()
+
     add_executable(test_inbound_verifier
         test/unit/test_inbound_verifier.cpp
         src/mail_system/back/inbound/inbound_verifier.cpp
@@ -756,27 +774,18 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     setup_mail_target(auth_cache_test)
 
-    add_executable(mime_parser_test
-        test/unit/mime_parser_test.cpp
-        src/mail_system/back/mailServer/fsm/imaps/imap_utils.cpp
-    )
-    target_include_directories(mime_parser_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(mime_parser_test)
     # 测试直接 include traditional_imaps_fsm.tpp，模板在本 TU 实例化；模板体里
     # 的 build_mail_body_key 定义在 protorelay_mail_storage，必须显式链接
     # （COMMON_SRCS 路径的目标自带该 .cpp，不走那条路的目标要补这条依赖）。
-    target_link_libraries(mime_parser_test PRIVATE protorelay_mail_storage)
+    pr_add_unit_test(mime_parser_test
+        SRCS test/unit/mime_parser_test.cpp
+             src/mail_system/back/mailServer/fsm/imaps/imap_utils.cpp
+        LIBS protorelay_mail_storage)
 
-    add_executable(mail_body_writer_test test/unit/mail_body_writer_test.cpp)
-    target_include_directories(mail_body_writer_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(mail_body_writer_test)
-    target_link_libraries(mail_body_writer_test PRIVATE protorelay_mail_storage)
+    pr_add_unit_test(mail_body_writer_test SRCS test/unit/mail_body_writer_test.cpp
+        LIBS protorelay_mail_storage)
 
-    add_executable(buffered_upload_stream_test
-        test/unit/buffered_upload_stream_test.cpp
-    )
-    target_include_directories(buffered_upload_stream_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(buffered_upload_stream_test)
+    pr_add_unit_test(buffered_upload_stream_test SRCS test/unit/buffered_upload_stream_test.cpp)
 
     # web_server 纯函数层单测：MessageProcessor / h2_framer / h2_hpack / h2_codec
     add_executable(h2_web_test
@@ -789,32 +798,18 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     setup_mail_target(h2_web_test)
 
-    add_executable(io_error_test
-        test/unit/io_error_test.cpp
-    )
-    target_include_directories(io_error_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(io_error_test)
+    pr_add_unit_test(io_error_test SRCS test/unit/io_error_test.cpp)
 
-    add_executable(async_storage_provider_test
-        test/unit/async_storage_provider_test.cpp
-    )
-    target_include_directories(async_storage_provider_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(async_storage_provider_test)
-    target_link_libraries(async_storage_provider_test PRIVATE protorelay_mail_storage)
+    pr_add_unit_test(async_storage_provider_test SRCS test/unit/async_storage_provider_test.cpp
+        LIBS protorelay_mail_storage)
 
     # ---- framework 层单元测试 ----
     # 纯逻辑 / 文件 IO / 线程池：只依赖 framework 头 + 对应 .cpp
-    add_executable(intrusion_detector_test test/unit/intrusion_detector_test.cpp)
-    target_include_directories(intrusion_detector_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(intrusion_detector_test)
+    pr_add_unit_test(intrusion_detector_test SRCS test/unit/intrusion_detector_test.cpp)
 
-    add_executable(server_config_test test/unit/server_config_test.cpp)
-    target_include_directories(server_config_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(server_config_test)
+    pr_add_unit_test(server_config_test SRCS test/unit/server_config_test.cpp)
 
-    add_executable(mapped_file_test test/unit/mapped_file_test.cpp)
-    target_include_directories(mapped_file_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(mapped_file_test)
+    pr_add_unit_test(mapped_file_test SRCS test/unit/mapped_file_test.cpp)
 
     add_executable(bcrypt_test test/unit/bcrypt_test.cpp src/mail_system/back/common/bcrypt.cpp)
     target_include_directories(bcrypt_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
@@ -840,41 +835,31 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(account_policy_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(account_policy_boundary_test)
 
-    add_executable(webmail_test
-        ${COMMON_SRCS}
-        src/mail_system/back/webmail/api/auth_api.cpp
-        src/mail_system/back/webmail/api/mail_api.cpp
-        src/mail_system/back/webmail/api/compose_api.cpp
-        src/mail_system/back/webmail/api/actions_api.cpp
-        src/mail_system/back/webmail/mail_actions.cpp
-        src/mail_system/back/webmail/smtp_submitter.cpp
-        src/mail_system/back/webmail/session_store.cpp
-        src/mail_system/back/webmail/direct_submitter.cpp
-        src/mail_system/back/common/mime_composer.cpp
-        test/unit/webmail_test.cpp
-        test/unit/webmail_submission_test.cpp
-    )
-    target_include_directories(webmail_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(webmail_test)
+    pr_add_unit_test(webmail_test
+        SRCS ${COMMON_SRCS}
+             src/mail_system/back/webmail/api/auth_api.cpp
+             src/mail_system/back/webmail/api/mail_api.cpp
+             src/mail_system/back/webmail/api/compose_api.cpp
+             src/mail_system/back/webmail/api/actions_api.cpp
+             src/mail_system/back/webmail/mail_actions.cpp
+             src/mail_system/back/webmail/smtp_submitter.cpp
+             src/mail_system/back/webmail/session_store.cpp
+             src/mail_system/back/webmail/direct_submitter.cpp
+             src/mail_system/back/common/mime_composer.cpp
+             test/unit/webmail_test.cpp
+             test/unit/webmail_submission_test.cpp)
 
-    add_executable(http_session_read_test
-        ${COMMON_SRCS}
-        src/framework/http/http_parser.cpp
-        src/framework/http/message_processor.cpp
-        test/unit/http_session_read_test.cpp
-    )
-    target_include_directories(http_session_read_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(http_session_read_test)
+    pr_add_unit_test(http_session_read_test
+        SRCS ${COMMON_SRCS}
+             src/framework/http/http_parser.cpp
+             src/framework/http/message_processor.cpp
+             test/unit/http_session_read_test.cpp)
 
-    add_executable(persist_submission_test ${COMMON_SRCS} test/unit/persist_submission_test.cpp)
-    target_include_directories(persist_submission_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(persist_submission_test)
+    pr_add_unit_test(persist_submission_test)
 
-    add_executable(smtp_persist_ack_test ${COMMON_SRCS}
-        src/mail_system/back/mailServer/smtps/smtps_server.cpp
-        test/unit/smtp_persist_ack_test.cpp)
-    target_include_directories(smtp_persist_ack_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(smtp_persist_ack_test)
+    pr_add_unit_test(smtp_persist_ack_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/smtps/smtps_server.cpp
+             test/unit/smtp_persist_ack_test.cpp)
 
     add_executable(smtp_client_test test/unit/smtp_client_test.cpp)
     setup_mail_target(smtp_client_test)
@@ -886,27 +871,20 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     setup_mail_target(smtp_submitter_test)
 
-    add_executable(thread_pool_test
-        src/framework/thread_pool/io_thread_pool.cpp
-        src/framework/thread_pool/io_context_registry.cpp
-        ${WORKER_SRCS}
-        test/unit/thread_pool_test.cpp
-    )
-    target_include_directories(thread_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(thread_pool_test)
+    pr_add_unit_test(thread_pool_test
+        SRCS src/framework/thread_pool/io_thread_pool.cpp
+             src/framework/thread_pool/io_context_registry.cpp
+             ${WORKER_SRCS}
+             test/unit/thread_pool_test.cpp)
 
-    add_executable(readiness_waiter_test test/unit/readiness_waiter_test.cpp)
-    target_include_directories(readiness_waiter_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(readiness_waiter_test)
-    target_link_libraries(readiness_waiter_test PRIVATE protorelay_readiness protorelay_asio)
+    pr_add_unit_test(readiness_waiter_test SRCS test/unit/readiness_waiter_test.cpp
+        LIBS protorelay_readiness protorelay_asio)
     add_executable(async_db_adapter_test test/unit/async_db_adapter_test.cpp)
     target_include_directories(async_db_adapter_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
     target_link_libraries(async_db_adapter_test PRIVATE Threads::Threads)
 
-    add_executable(account_authentication_test test/unit/account_authentication_test.cpp)
-    target_include_directories(account_authentication_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(account_authentication_test)
-    target_link_libraries(account_authentication_test PRIVATE protorelay_mail_core)
+    pr_add_unit_test(account_authentication_test SRCS test/unit/account_authentication_test.cpp
+        LIBS protorelay_mail_core)
     add_executable(mailbox_repository_test
         src/mail_system/back/repository/mailbox_repository.cpp
         src/mail_system/back/db/sql_queries.cpp test/unit/mailbox_repository_test.cpp)
@@ -929,10 +907,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         target_link_libraries(${_completion}_test PRIVATE protorelay_mail_core)
     endforeach()
 
-    add_executable(mail_object_key_layout_test test/unit/mail_object_key_layout_test.cpp)
-    target_include_directories(mail_object_key_layout_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(mail_object_key_layout_test)
-    target_link_libraries(mail_object_key_layout_test PRIVATE protorelay_mail_storage)
+    pr_add_unit_test(mail_object_key_layout_test SRCS test/unit/mail_object_key_layout_test.cpp
+        LIBS protorelay_mail_storage)
 
     add_executable(smtp_client_contract_test
         src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_contract_test.cpp)
@@ -1058,49 +1034,27 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     # 会话/FSM/服务基座：TestSession::close() 引用 ServerBase 成员符号
     # （server_base.cpp），须链 COMMON_SRCS（同 smtps/imaps_fsm_test 模式）
-    add_executable(fsm_base_test ${COMMON_SRCS} test/unit/fsm_base_test.cpp)
-    target_include_directories(fsm_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(fsm_base_test)
+    pr_add_unit_test(fsm_base_test)
 
-    add_executable(fsm_engine_test ${COMMON_SRCS} test/unit/fsm_engine_test.cpp)
-    target_include_directories(fsm_engine_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(fsm_engine_test)
-    target_link_libraries(fsm_engine_test PRIVATE protorelay_framework)
+    pr_add_unit_test(fsm_engine_test LIBS protorelay_framework)
 
-    add_executable(fsm_export_test ${COMMON_SRCS} test/unit/fsm_export_test.cpp)
-    target_include_directories(fsm_export_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(fsm_export_test)
-    target_link_libraries(fsm_export_test PRIVATE protorelay_framework)
+    pr_add_unit_test(fsm_export_test LIBS protorelay_framework)
 
-    add_executable(fast_fsm_base_test ${COMMON_SRCS} test/unit/fast_fsm_base_test.cpp)
-    target_include_directories(fast_fsm_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(fast_fsm_base_test)
+    pr_add_unit_test(fast_fsm_base_test)
 
-    add_executable(session_base_test ${COMMON_SRCS} test/unit/session_base_test.cpp)
-    target_include_directories(session_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(session_base_test)
+    pr_add_unit_test(session_base_test)
 
-    add_executable(server_base_test ${COMMON_SRCS} test/unit/server_base_test.cpp)
-    target_include_directories(server_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(server_base_test)
+    pr_add_unit_test(server_base_test)
 
-    add_executable(outbound_utils_test ${COMMON_SRCS} test/unit/outbound_utils_test.cpp)
-    target_include_directories(outbound_utils_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(outbound_utils_test)
+    pr_add_unit_test(outbound_utils_test)
 
-    add_executable(starttls_handoff_test ${COMMON_SRCS} test/unit/starttls_handoff_test.cpp)
-    target_include_directories(starttls_handoff_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(starttls_handoff_test)
+    pr_add_unit_test(starttls_handoff_test)
 
-    add_executable(pipeline_deferred_test ${COMMON_SRCS} test/unit/pipeline_deferred_test.cpp)
-    target_include_directories(pipeline_deferred_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(pipeline_deferred_test)
+    pr_add_unit_test(pipeline_deferred_test)
 
     # MetricsServer 核心 API 不变量测试（counter/gauge/histogram 语义）。
     # 不链 COMMON_SRCS：MetricsServer 是 header-only，只依赖 boost::asio。
-    add_executable(metrics_core_test test/unit/metrics_core_test.cpp)
-    target_include_directories(metrics_core_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(metrics_core_test)
+    pr_add_unit_test(metrics_core_test SRCS test/unit/metrics_core_test.cpp)
 
     add_executable(fsm_bench
         ${COMMON_SRCS}
@@ -1110,22 +1064,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(fsm_bench)
 
-    add_executable(smtps_fsm_test
-        ${COMMON_SRCS}
-        src/mail_system/back/mailServer/smtps/smtps_server.cpp
-        test/unit/smtps_fsm_test.cpp
-    )
-    target_include_directories(smtps_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(smtps_fsm_test)
+    pr_add_unit_test(smtps_fsm_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/smtps/smtps_server.cpp
+             test/unit/smtps_fsm_test.cpp)
 
     # 异步/并发 FSM 测试（Mock DNS/DB 延迟回调 + 真实 IO 线程）
-    add_executable(smtps_fsm_concurrency_test
-        ${COMMON_SRCS}
-        src/mail_system/back/mailServer/smtps/smtps_server.cpp
-        test/unit/smtps_fsm_concurrency_test.cpp
-    )
-    target_include_directories(smtps_fsm_concurrency_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(smtps_fsm_concurrency_test)
+    pr_add_unit_test(smtps_fsm_concurrency_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/smtps/smtps_server.cpp
+             test/unit/smtps_fsm_concurrency_test.cpp)
     if(ENABLE_TSAN)
         target_compile_options(smtps_fsm_test PRIVATE -fsanitize=thread -g -O1)
         target_link_options(smtps_fsm_test PRIVATE -fsanitize=thread)
@@ -1134,26 +1080,17 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     endif()
 
 
-    add_executable(imaps_fsm_test
-        ${COMMON_SRCS}
-        src/mail_system/back/mailServer/imaps/imaps_server.cpp
-        test/unit/imaps_fsm_test.cpp
-    )
-    target_include_directories(imaps_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(imaps_fsm_test)
+    pr_add_unit_test(imaps_fsm_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/imaps/imaps_server.cpp
+             test/unit/imaps_fsm_test.cpp)
 
-    add_executable(pop3_fsm_test
-        ${COMMON_SRCS}
-        src/mail_system/back/mailServer/pop3/pop3_server.cpp
-        test/unit/pop3_fsm_test.cpp
-    )
-    target_include_directories(pop3_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(pop3_fsm_test)
+    pr_add_unit_test(pop3_fsm_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/pop3/pop3_server.cpp
+             test/unit/pop3_fsm_test.cpp)
 
-    add_executable(pop3_timer_boundary_test ${COMMON_SRCS}
-        src/mail_system/back/mailServer/pop3/pop3_server.cpp test/unit/pop3_timer_boundary_test.cpp)
-    target_include_directories(pop3_timer_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(pop3_timer_boundary_test)
+    pr_add_unit_test(pop3_timer_boundary_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/pop3/pop3_server.cpp
+             test/unit/pop3_timer_boundary_test.cpp)
     add_test(NAME pop3_timer_boundary_test COMMAND pop3_timer_boundary_test)
     set_tests_properties(pop3_timer_boundary_test asio_error_test PROPERTIES TIMEOUT 20)
 
@@ -1167,9 +1104,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(dispatch_bench test/bench/fsm/dispatch_bench.cpp)
     target_compile_features(dispatch_bench PRIVATE cxx_std_17)
 
-    add_executable(outbound_smoke ${COMMON_SRCS} test/unit/outbound_smoke.cpp)
-    setup_mail_target(outbound_smoke)
-    target_include_directories(outbound_smoke PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    pr_add_unit_test(outbound_smoke)
 endif()
 
 # ================================================================
