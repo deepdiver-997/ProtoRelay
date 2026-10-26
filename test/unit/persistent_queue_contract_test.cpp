@@ -183,9 +183,14 @@ void cancellation_pressure_and_scheduling_exceptions_finish_once() {
         auto first_mail = f.message(); const auto body = first_mail->body_path;
         auto submission = f.queue->submit_owned_mail(std::move(first_mail)); assert(submission.accepted && f.workers->wait_tasks());
         auto second = f.queue->submit_owned_mail(f.message(false)); assert(!second.accepted && second.rejected_mail);
+        // 背压语义的恢复半边：在途数降回上限之下后，入队必须恢复接收。
         submission.ticket.request_cancel(); f.workers->drain();
         assert(submission.ticket.status == PersistStatus::CANCELLED && !f.repository->persists && !std::filesystem::exists(body));
         assert(!f.queue->inflight_count());
+        auto third = f.queue->submit_owned_mail(f.message(false));
+        assert(third.accepted && f.workers->wait_tasks());
+        third.ticket.request_cancel(); f.workers->drain();
+        assert(third.ticket.status == PersistStatus::CANCELLED && !f.queue->inflight_count());
     }
     for (bool fail_after_primary : {false, true}) {
         Fixture f;

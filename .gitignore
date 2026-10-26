@@ -156,6 +156,7 @@ $RECYCLE.BIN/
 !test/scripts/*.sh
 !test/bench/*.sh
 !test/bench/*/profile.sh
+!test/bench/*/round.sh
 !test/run_all_tests.sh
 !scripts/generate_dkim_keys.sh
 !scripts/generate_server_cert.sh

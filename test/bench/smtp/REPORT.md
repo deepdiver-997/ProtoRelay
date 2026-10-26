@@ -720,3 +720,67 @@ sudo ifconfig lo0 alias 127.0.0.2 up
 折合 4.3μs/封。对照 07-29 的 14,136：harness 相同，但期间除 FSM 引擎替换外服务端代码
 亦有多次演进，**不做跨轮归因**；本轮内对照意义：FSM 派发成本（6ns/次 × 6 次/封）
 在 4.3μs 里 <1%，mock 与 real（~5.7K）的 40× 差距全部在真实 I/O 与持久化侧。
+
+## 2026-10-26（二）— ack 时机维度 + 入队背压实测
+
+### 机制盘点（先说清 250 的两段式等待）
+
+DATA_END 收尾链是：**正文写盘 + fsync（无条件，两模式都过）** → MIME 预解析 →
+入站校验（perf_mode 跳过）→ `submit_mail_to_queue()`（压力检查）→ ack 分叉：
+
+| 配置 | 250 时机 | 满载行为 |
+|------|---------|---------|
+| `after_persist`（枚举默认值） | 队列 flusher 持久化完成回调后，超时 5s 转 451 | 同左 |
+| `after_enqueue` | 入队成功即回 | inflight ≥ `persist_max_inflight_mails` 时拒绝 |
+
+- 队列背压已实现：`PersistentQueue::should_reject_submission` 检查
+  `persist_max_inflight_mails`（默认 2048；**perf_mode 会把它抬到 1,000,000**，
+  要测背压必须在配置显式写小值）；拒绝时 DATA_END 回
+  `451 insufficient storage or backend pressure` 并关连接——可重试语义，符合 RFC。
+  inflight 在持久化任务 `finish_task` 时递减，低于上限后自动恢复接收。
+- 另有两道独立压力闸：DB 连接不足、可用内存不足（`is_db/memory_under_pressure`）。
+
+### ack 双模式对照（cap 显式 2048，pipe+reuse，msgs=20000，隔离存储）
+
+| 线程 | after_enqueue | after_persist |
+|------|---------------|---------------|
+| 1 | 3102 msg/s | 2832 msg/s |
+| 4 | 6325 msg/s | 6404 msg/s |
+| 8 | 5665 msg/s | 5559 msg/s |
+
+**结论：本地 mock 后端下两模式统计等价（方差 ~5% 内）**。原因：正文 fsync 在
+DATA_END 无条件发生且是 ~170μs/封的串行大头，after_persist 额外等待的 flusher
+持久化在 mock 下是 μs 级，完全藏在 fsync 阴影里。两种口径的"峰值接收能力"都由
+fsync 决定（~6K/s）。差异要在**慢后端**（远程 DB/网络盘）才会显形：那时
+after_enqueue 的 250 会先于持久化返回，接收能力脱离 fsync、由队列上限和排水速度
+决定——这正是背压存在的意义。
+
+### 背压实测（cap=8 与 cap=1，after_enqueue，t=8 突灌）
+
+```
+cap=8,  t=8, 20000 封 → ok=20000 fail=0, 5601 msg/s
+cap=1,  t=8,  5000 封 → ok=5000  fail=0, 6069 msg/s
+```
+
+**零拒绝**：mock flusher 排水 μs 级，"提交→持久化完成"窗口内 8 线程的在途数
+叠加不起来，cap=1 都打不满。本机结论：**队列上限在本地后端下不构成实际约束**，
+峰值接收能力完全由 fsync 供给；背压只在慢持久化后端下才会触发。451 路径的
+确定性验证由单测承担（见下）。
+
+### 背压语义的测试覆盖（本轮补齐）
+
+`persistent_queue_contract_test` 原有"满则拒绝"半边（cap=1 第二封被拒、
+16384 容量满即拒且不阻塞）；本轮补上**恢复半边**断言：在途降回上限之下后
+`submit` 恢复接收（`cancellation_pressure_and_scheduling_exceptions_finish_once`）。
+满→拒→排水→再收，语义闭环。
+
+### 基准设施（脚本转正）
+
+本轮的手写驱动收编为 `test/bench/{smtp,imap,pop3}/round.sh`：端口/存储/DB 全部
+从 `CONFIG` 服务端配置 JSON 读取，ack 模式（`ACK_MODE`）、入队上限
+（`INFLIGHT_CAP`）、线程档位/消息量、象限选择（`QUADRANTS`）、本地回环 IP 列表
+（`LOCAL_IPS`，透传客户端 `--local-ips`，每 worker 绑一个 IP 扩四元组空间——
+macOS 需一次性 `sudo ifconfig lo0 alias 127.0.0.X up`，脚本预检不可绑则告警跳过；
+本轮未加别名故 per-conn 大并发仍受 16384 端口池限制）。POP3 轮间自动清会话锁。
+`.gitignore` 的 `*.sh` 忽略规则补了 `!test/bench/*/round.sh` 例外（原来只有
+profile.sh 有例外）。
