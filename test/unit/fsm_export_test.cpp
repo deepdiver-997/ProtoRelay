@@ -98,16 +98,38 @@ void test_golden_mermaid() {
     expect_true(out.str() == kGoldenMermaid, "golden Mermaid output matches exactly");
 }
 
-void test_edge_counts_slot_renders_identically() {
-    // Phase 2 overlay slot: a non-null (empty) map must not change Phase-1
-    // rendering — the parameter exists so call sites won't change later.
+void test_edge_counts_null_renders_plain() {
+    // No counts handed in -> plain rendering (Phase-1 format locked above).
     const auto desc = make_mini_desc();
-    pr::fsm::EdgeCountMap<St, Ev> counts;
+    std::ostringstream dot, mermaid;
+    pr::fsm::write_dot(desc, dot);           // counts omitted -> plain
+    pr::fsm::write_mermaid(desc, mermaid);
+    expect_true(dot.str() == kGoldenDot, "DOT unchanged without counts");
+    expect_true(mermaid.str() == kGoldenMermaid, "Mermaid unchanged without counts");
+}
+
+void test_edge_counts_overlay_marks_dead_edges() {
+    // Phase 2: an empty (but provided) map means "everything observed to be
+    // untaken" — every row annotates ×0 and dead edges get the dashed/red
+    // marker in DOT.
+    const auto desc = make_mini_desc();
+    pr::fsm::EdgeCountMap<St, Ev> counts;   // empty: nothing ever taken
+    counts[{St::INIT, Ev::CONNECT, St::READY}] = 1;
+    counts[{St::READY, Ev::PING, St::READY}] = 7;
     std::ostringstream dot, mermaid;
     pr::fsm::write_dot(desc, dot, &counts);
     pr::fsm::write_mermaid(desc, mermaid, &counts);
-    expect_true(dot.str() == kGoldenDot, "DOT unchanged with edge-counts slot");
-    expect_true(mermaid.str() == kGoldenMermaid, "Mermaid unchanged with edge-counts slot");
+    expect_true(dot.str().find("[label=\"CONNECT x1\"];") != std::string::npos,
+                "taken edge shows its count in DOT");
+    expect_true(dot.str().find("label=\"PING {PING} x7\"") != std::string::npos,
+                "multi-count edge shows its count in DOT");
+    expect_true(dot.str().find("label=\"QUIT {quit} x0\", style=dashed, color=red") !=
+                    std::string::npos,
+                "untaken edges are dashed/red with x0 in DOT");
+    expect_true(mermaid.str().find("INIT --> READY: CONNECT x1") != std::string::npos,
+                "taken edge shows its count in Mermaid");
+    expect_true(mermaid.str().find("QUIT {quit} x0") != std::string::npos,
+                "untaken edges show x0 in Mermaid");
 }
 
 void test_label_escaping() {
@@ -202,7 +224,8 @@ void test_generate_diagram_files() {
 int main() {
     test_golden_dot();
     test_golden_mermaid();
-    test_edge_counts_slot_renders_identically();
+    test_edge_counts_null_renders_plain();
+    test_edge_counts_overlay_marks_dead_edges();
     test_label_escaping();
     test_real_desc_smoke();
     test_generate_diagram_files();

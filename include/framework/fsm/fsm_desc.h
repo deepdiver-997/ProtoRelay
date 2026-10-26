@@ -7,6 +7,9 @@
 // without sessions, engines or any framework internals (§3.4 boundary).
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <map>
+#include <tuple>
 #include <functional>
 #include <optional>
 #include <string>
@@ -14,6 +17,14 @@
 #include <vector>
 
 namespace pr::fsm {
+
+// Runtime edge-traversal counts keyed by (from, event, to) — the same
+// identity as one guard row (documented self loops normalize to to == from).
+// The engine fills it when PR_FSM_EDGE_STATS=1 (atomic counters, engines are
+// shared by many sessions/threads); the export overlays it onto the diagram
+// so dead edges show up as ×0.
+template <typename State, typename Event>
+using EdgeCountMap = std::map<std::tuple<State, Event, State>, std::uint64_t>;
 
 template <typename State, typename Event>
 struct CommandEntry {
