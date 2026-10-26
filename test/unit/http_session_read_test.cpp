@@ -122,9 +122,40 @@ static void bounded_download(bool head, bool fail = false) {
     assert(source->max_read <= 64 * 1024 && session->is_closed());
 }
 
+// 设计 §5.1 点名的 HEADER_END 分流用例：GET（无 body → RESPOND 直达）与
+// POST（有 body → WAIT_BODY）在同一 keep-alive 连接上先后到达，验证两个
+// 出口都落对、流水线单块到达也不串。
+static void get_then_post_keep_alive() {
+    auto connection = std::make_unique<mail_system::MockConnection>();
+    auto* conn = connection.get(); conn->set_deferred_read(true);
+    auto session = std::make_shared<Http>(nullptr, std::move(connection), std::make_shared<Fsm>());
+    struct Hit { std::string method, path, body; };
+    std::vector<Hit> hits;
+    session->set_api_handler([&](const pr::http::HttpRequest& request, auto complete) {
+        hits.push_back({request.method, request.path, request.body});
+        pr::http::HttpResponse response; response.body = "ok";
+        complete(std::move(response)); return true;
+    });
+    Http::start(session); conn->pump_executor();
+    // GET 与 POST 在同一个 TCP 段里流水线到达：HEADER_END 必须把 GET 分流到
+    // RESPOND（无 body），POST 分流到 WAIT_BODY（Content-Length: 3）。
+    conn->trigger_deferred_read(
+        "GET /first HTTP/1.1\r\nHost: local\r\n\r\n"
+        "POST /second HTTP/1.1\r\nHost: local\r\nContent-Length: 3\r\n\r\nabc");
+    conn->pump_executor();
+    assert(hits.size() == 2);
+    assert(hits[0].method == "GET" && hits[0].path == "/first" && hits[0].body.empty());
+    assert(hits[1].method == "POST" && hits[1].path == "/second" && hits[1].body == "abc");
+    const auto wire = conn->written();
+    assert(wire.find("HTTP/1.1 200 OK") == 0);
+    assert(wire.find("ok") != std::string::npos);
+    mail_system::finish_session(session);
+}
+
 int main() {
     handshake_gates_http_reads();
     bounded_download(false); bounded_download(true); bounded_download(false, true);
+    get_then_post_keep_alive();
     fragmented_request({"PO", "ST /api/echo HTTP/1.1\r\nHost: loc", "al\r\nConnection: close\r\nContent-Length: 7\r\n\r\n", "abc", "defg"});
     fragmented_request({"POST /api/echo HTTP/1.1\r\nHost: local\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n",
                         "7\r", "\nabc", "def", "g\r", "\n0\r", "\n", "\r", "\n"});

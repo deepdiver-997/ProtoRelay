@@ -295,15 +295,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         set_tests_properties(sqlite_driver_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     endif()
 
-    # 会话/FSM/服务基座：TestSession::close() 引用 ServerBase 成员符号
-    # （server_base.cpp），须链 COMMON_SRCS（同 smtps/imaps_fsm_test 模式）
-    pr_add_unit_test(fsm_base_test)
-
+    # FSM 引擎自身由 fsm_engine/fsm_export_test 覆盖；旧 FsmBase/FastFsmBase
+    # 及其单测已随第 4 步退役删除（fsm-extract 完成判据：全仓库 include 零命中）。
     pr_add_unit_test(fsm_engine_test LIBS protorelay_framework)
 
     pr_add_unit_test(fsm_export_test LIBS protorelay_framework)
-
-    pr_add_unit_test(fast_fsm_base_test)
 
     pr_add_unit_test(session_base_test)
 

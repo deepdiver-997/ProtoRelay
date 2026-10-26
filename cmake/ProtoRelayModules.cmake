@@ -228,7 +228,7 @@ target_link_libraries(protorelay_mail_protocols PUBLIC protorelay_mail_core)
 set(PROTORELAY_MAIL_TARGETS
     smtpsServer imapsServer mailServer pop3Server webmailServer webmail_test
     http_session_read_test persist_submission_test smtp_persist_ack_test
-    mariadb_async_test fsm_base_test fast_fsm_base_test session_base_test
+    mariadb_async_test session_base_test
     server_base_test outbound_utils_test starttls_handoff_test pipeline_deferred_test
     fsm_bench smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test pop3_fsm_test
     pop3_timer_boundary_test outbound_smoke)

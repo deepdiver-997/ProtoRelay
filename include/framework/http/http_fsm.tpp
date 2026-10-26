@@ -9,57 +9,50 @@
 namespace pr::http {
 
 template <typename ConnectionType>
+void HttpFsm<ConnectionType>::init_engine() {
+    // 表外的 (state,event) 一律 400 并关连接（承接旧 on_invalid_transition 与
+    // WAIT_BODY/RESPOND 两个 fallback handler 的合并语义）。回复文本不由引擎
+    // 写（desc 的 reply 留空，写空串是无操作），observer 独占拒绝路径。
+    engine_.set_violation_observer(
+        [](const Engine::SessionPtr& session) {
+            auto* s = static_cast<HttpSession<ConnectionType>*>(session.get());
+            s->send_error_and_close(400);
+        });
+    auto add = [this](HttpState st, HttpEvent ev,
+                      void (HttpFsm::*handler)(std::shared_ptr<Session>)) {
+        engine_.add_handler(st, ev, [this, handler](std::shared_ptr<Session> session) {
+            (this->*handler)(std::move(session));
+        });
+    };
+    add(HttpState::WAIT_REQUEST_LINE, HttpEvent::REQUEST_LINE, &HttpFsm::handle_request_line);
+    add(HttpState::WAIT_HEADERS, HttpEvent::HEADER_LINE, &HttpFsm::handle_header_line);
+    add(HttpState::WAIT_HEADERS, HttpEvent::HEADER_END, &HttpFsm::handle_header_end);
+    add(HttpState::WAIT_BODY, HttpEvent::BODY, &HttpFsm::handle_body);
+    add(HttpState::WAIT_BODY, HttpEvent::BODY_END, &HttpFsm::handle_body_end);
+}
+
+template <typename ConnectionType>
 void HttpFsm<ConnectionType>::auto_process_event(
     std::shared_ptr<Session> session)
 {
-    this->dispatch(session, static_cast<HttpState>(session->get_current_state()),
-                   static_cast<HttpEvent>(session->get_next_event()));
-}
-
-template <typename ConnectionType>
-void HttpFsm<ConnectionType>::init_transitions() {
-    using H = HttpState; using E = HttpEvent;
-    this->add_transition(H::WAIT_REQUEST_LINE, E::REQUEST_LINE, H::WAIT_HEADERS);
-    this->add_transition(H::WAIT_HEADERS,      E::HEADER_LINE, H::WAIT_HEADERS);
-    this->add_transition(H::WAIT_HEADERS,      E::HEADER_END,  H::WAIT_BODY);   // 有 body
-    this->add_transition(H::WAIT_HEADERS,      E::HEADER_END,  H::RESPOND);     // 无 body
-    this->add_transition(H::WAIT_BODY,         E::BODY,        H::WAIT_BODY);
-    this->add_transition(H::WAIT_BODY,         E::BODY_END,    H::RESPOND);
-}
-
-template <typename ConnectionType>
-void HttpFsm<ConnectionType>::init_handlers() {
-    using H = HttpState; using E = HttpEvent;
-    this->add_handler(H::WAIT_REQUEST_LINE, E::REQUEST_LINE,
-        [this](auto s){ handle_request_line(std::move(s)); });
-    this->add_handler(H::WAIT_HEADERS, E::HEADER_LINE,
-        [this](auto s){ handle_header_line(std::move(s)); });
-    this->add_handler(H::WAIT_HEADERS, E::HEADER_END,
-        [this](auto s){ handle_header_end(std::move(s)); });
-    this->add_handler(H::WAIT_BODY, E::BODY,
-        [this](auto s){ handle_body(std::move(s)); });
-    this->add_handler(H::WAIT_BODY, E::BODY_END,
-        [this](auto s){ handle_body_end(std::move(s)); });
-    // fallback：WAIT_BODY 里收到非预期（畸形/超限帧）→ 400 后关。
-    this->add_fallback_handler(H::WAIT_BODY,
-        [this](auto s){ on_invalid_transition(H::WAIT_BODY, E::ERROR, std::move(s)); });
-    this->add_fallback_handler(H::RESPOND,
-        [this](auto s){ on_invalid_transition(H::RESPOND, E::ERROR, std::move(s)); });
+    engine_.auto_process_event(std::move(session));
 }
 
 template <typename ConnectionType>
 void HttpFsm<ConnectionType>::handle_request_line(
     std::shared_ptr<Session> session)
 {
-    // 请求行已在 HttpSession::handle_read 里解析进 request_。这里只入下一态。
-    session->set_current_state(static_cast<int>(HttpState::WAIT_HEADERS));
+    // 请求行已在 HttpSession::handle_read 里解析进 request_。apply 收口：
+    // 落 WAIT_HEADERS + drain/续读（与外层读循环 auto_continue_read 的续消费
+    // 等价；重复 do_async_read 有 in-flight 守卫，是无害 no-op）。
+    engine_.apply(session, HttpState::WAIT_HEADERS);
 }
 
 template <typename ConnectionType>
 void HttpFsm<ConnectionType>::handle_header_line(
     std::shared_ptr<Session> session)
 {
-    session->set_current_state(static_cast<int>(HttpState::WAIT_HEADERS));
+    engine_.apply(session, HttpState::WAIT_HEADERS);
 }
 
 template <typename ConnectionType>
@@ -69,9 +62,12 @@ void HttpFsm<ConnectionType>::handle_header_end(
     auto* s = static_cast<HttpSession<ConnectionType>*>(session.get());
     if (s->has_body_pending()) {
         s->begin_body();                      // 武装 body 消费模式（extract 改判帧）
-        s->set_current_state(static_cast<int>(HttpState::WAIT_BODY));
+        engine_.apply(session, HttpState::WAIT_BODY);
     } else {
-        s->set_current_state(static_cast<int>(HttpState::RESPOND));
+        // RESPOND 分支不 drain：流水线上的下一个请求必须等 finish_response
+        // 复位到 WAIT_REQUEST_LINE 后再消费（提前 drain 会在 RESPOND 态把它
+        // 误派发成 400）。apply_closing = 只落态，读/消费权仍在响应管线。
+        engine_.apply_closing(session, HttpState::RESPOND);
         serve(session);
     }
 }
@@ -81,15 +77,15 @@ void HttpFsm<ConnectionType>::handle_body(
     std::shared_ptr<Session> session)
 {
     // 本段 body 已在 handle_read 消费；body 未收完，保持 WAIT_BODY。
-    session->set_current_state(static_cast<int>(HttpState::WAIT_BODY));
+    engine_.apply(session, HttpState::WAIT_BODY);
 }
 
 template <typename ConnectionType>
 void HttpFsm<ConnectionType>::handle_body_end(
     std::shared_ptr<Session> session)
 {
+    engine_.apply_closing(session, HttpState::RESPOND);
     auto* s = static_cast<HttpSession<ConnectionType>*>(session.get());
-    s->set_current_state(static_cast<int>(HttpState::RESPOND));
     s->serve();
 }
 
@@ -99,15 +95,6 @@ void HttpFsm<ConnectionType>::serve(
     std::shared_ptr<Session> session)
 {
     static_cast<HttpSession<ConnectionType>*>(session.get())->serve();
-}
-
-// 非法转换：畸形请求 → 400 并关连接。
-template <typename ConnectionType>
-void HttpFsm<ConnectionType>::on_invalid_transition(HttpState /*s*/, HttpEvent /*e*/,
-    std::shared_ptr<Session> session)
-{
-    auto* s = static_cast<HttpSession<ConnectionType>*>(session.get());
-    s->send_error_and_close(400);
 }
 
 } // namespace pr::http
