@@ -219,6 +219,10 @@ public:
         }
         const auto handler = handlers_.find({current, event});
         if (handler == handlers_.end()) {
+            // Side-effect observer fires here too: a rejection is a rejection,
+            // whether the guard table or the handler table rejected it (HTTP's
+            // retired fallback handlers both landed in its 400-and-close).
+            if (violation_observer_) violation_observer_(session);
             write_reply(session, missing_reply(current, event, session));
             bump_error_budget(session);
             return;

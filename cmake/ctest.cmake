@@ -28,8 +28,6 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         buffered_upload_stream_test
         io_error_test
         async_storage_provider_test
-        fsm_base_test
-        fast_fsm_base_test
         intrusion_detector_test
         server_config_test
         mapped_file_test
@@ -70,7 +68,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
-            async_storage_provider_test fsm_base_test fast_fsm_base_test
+            async_storage_provider_test
             intrusion_detector_test server_config_test mapped_file_test
             thread_pool_test session_base_test server_base_test
             outbound_utils_test metrics_core_test bcrypt_test
