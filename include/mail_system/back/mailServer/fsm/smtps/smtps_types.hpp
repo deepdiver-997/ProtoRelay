@@ -41,7 +41,11 @@ enum class SmtpsEvent {
     STARTTLS = 8,
     ERROR = 9,
     TIMEOUT = 10,
-    COUNT = 11
+    // 空行（fsm 引擎分离，2026-10-26）：此前空行被映射成 TIMEOUT 再靠
+    // handle_timeout 的 handle_read("") 再解析分流 —— 传输层现象不当事件用。
+    // 现在空行直接发 EMPTY，全状态自环静默吞掉。
+    EMPTY = 11,
+    COUNT = 12
 };
 
 // SMTPS 上下文

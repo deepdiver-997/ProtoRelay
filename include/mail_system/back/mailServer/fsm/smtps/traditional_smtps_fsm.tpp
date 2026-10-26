@@ -108,88 +108,67 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<pr::
 
 // ========== 初始化 ==========
 template <typename ConnectionType>
-void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
-    this->add_transition(SmtpsState::INIT, SmtpsEvent::CONNECT, SmtpsState::GREETING);
-    this->add_transition(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
-    this->add_transition(SmtpsState::GREETING, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
-    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
-        this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS, SmtpsState::INIT);
-    this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_USERNAME);
-    this->add_transition(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_PASSWORD);
-    this->add_transition(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH, SmtpsState::WAIT_MAIL_FROM);
-    this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
-    this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
-    this->add_transition(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
-    this->add_transition(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
-    this->add_transition(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO, SmtpsState::WAIT_RCPT_TO);
-    this->add_transition(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE);
-    this->add_transition(SmtpsState::WAIT_DATA, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE);
-    this->add_transition(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE);
-    this->add_transition(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END, SmtpsState::WAIT_QUIT);
-    this->add_transition(SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
-
-    for (int i = 0; i < static_cast<int>(SmtpsState::CLOSED); ++i) {
-        this->add_transition(static_cast<SmtpsState>(i), SmtpsEvent::QUIT, SmtpsState::CLOSED);
-    }
-    for (int i = 0; i < static_cast<int>(SmtpsState::CLOSED); ++i) {
-        this->add_transition(static_cast<SmtpsState>(i), SmtpsEvent::ERROR, static_cast<SmtpsState>(i));
-        this->add_transition(static_cast<SmtpsState>(i), SmtpsEvent::TIMEOUT, static_cast<SmtpsState>(i));
-    }
-}
-
-template <typename ConnectionType>
-void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
-    auto h = [this](auto handler) {
-        return [this, handler](auto s) { (this->*handler)(s); };
+void TraditionalSmtpsFsm<ConnectionType>::register_handlers() {
+    // Guards/replies live in make_smtps_desc(); handlers mirror the previous
+    // init_state_handlers registration exactly.
+    auto add = [this](SmtpsState s, SmtpsEvent e,
+                      void (TraditionalSmtpsFsm::*handler)(
+                          std::shared_ptr<pr::SessionBase<ConnectionType>>)) {
+        engine_.add_handler(s, e, [this, handler](std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
+            (this->*handler)(std::move(session));
+        });
     };
 
-    this->add_handler(SmtpsState::INIT, SmtpsEvent::CONNECT,
-        h(&TraditionalSmtpsFsm::handle_init_connect));
-    this->add_handler(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO,
-        h(&TraditionalSmtpsFsm::handle_greeting_ehlo));
-    this->add_handler(SmtpsState::GREETING, SmtpsEvent::EHLO,
-        h(&TraditionalSmtpsFsm::handle_greeting_ehlo));
+    add(SmtpsState::INIT, SmtpsEvent::CONNECT,
+        &TraditionalSmtpsFsm::handle_init_connect);
+    add(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO,
+        &TraditionalSmtpsFsm::handle_greeting_ehlo);
+    add(SmtpsState::GREETING, SmtpsEvent::EHLO,
+        &TraditionalSmtpsFsm::handle_greeting_ehlo);
 
+    // STARTTLS 行/句柄随连接类型门控（desc 侧 allow_starttls 同一条件）
     if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
-        this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS,
-            h(&TraditionalSmtpsFsm::handle_wait_auth_starttls));
+        add(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS,
+            &TraditionalSmtpsFsm::handle_wait_auth_starttls);
 
-    this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH,
-        h(&TraditionalSmtpsFsm::handle_wait_auth_auth));
-    this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO,
-        h(&TraditionalSmtpsFsm::handle_greeting_ehlo));
-    this->add_handler(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH,
-        h(&TraditionalSmtpsFsm::handle_wait_auth_username));
-    this->add_handler(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH,
-        h(&TraditionalSmtpsFsm::handle_wait_auth_password));
-    this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM,
-        h(&TraditionalSmtpsFsm::handle_wait_auth_mail_from));
-    this->add_handler(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM,
-        h(&TraditionalSmtpsFsm::handle_wait_mail_from_mail_from));
-    this->add_handler(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO,
-        h(&TraditionalSmtpsFsm::handle_wait_rcpt_to_rcpt_to));
-    this->add_handler(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA,
-        h(&TraditionalSmtpsFsm::handle_wait_data_data));
-    this->add_handler(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM,
-        h(&TraditionalSmtpsFsm::handle_wait_auth_mail_from));
-    this->add_handler(SmtpsState::WAIT_DATA, SmtpsEvent::DATA,
-        h(&TraditionalSmtpsFsm::handle_wait_data_data));
-    this->add_handler(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA,
-        h(&TraditionalSmtpsFsm::handle_in_message_data));
-    this->add_handler(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END,
-        h(&TraditionalSmtpsFsm::handle_in_message_data_end));
+    add(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH,
+        &TraditionalSmtpsFsm::handle_wait_auth_auth);
+    add(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO,
+        &TraditionalSmtpsFsm::handle_greeting_ehlo);
+    add(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH,
+        &TraditionalSmtpsFsm::handle_wait_auth_username);
+    add(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH,
+        &TraditionalSmtpsFsm::handle_wait_auth_password);
+    add(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM,
+        &TraditionalSmtpsFsm::handle_wait_auth_mail_from);
+    add(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM,
+        &TraditionalSmtpsFsm::handle_wait_mail_from_mail_from);
+    add(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO,
+        &TraditionalSmtpsFsm::handle_wait_rcpt_to_rcpt_to);
+    add(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA,
+        &TraditionalSmtpsFsm::handle_wait_data_data);
+    add(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM,
+        &TraditionalSmtpsFsm::handle_wait_auth_mail_from);
+    add(SmtpsState::WAIT_DATA, SmtpsEvent::DATA,
+        &TraditionalSmtpsFsm::handle_wait_data_data);
+    add(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA,
+        &TraditionalSmtpsFsm::handle_in_message_data);
+    add(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END,
+        &TraditionalSmtpsFsm::handle_in_message_data_end);
 
     for (int i = 1; i < static_cast<int>(SmtpsState::WAIT_QUIT) + 1; ++i)
-        this->add_handler(static_cast<SmtpsState>(i), SmtpsEvent::QUIT,
-            h(&TraditionalSmtpsFsm::handle_wait_quit_quit));
-    this->add_handler(SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM,
-        h(&TraditionalSmtpsFsm::handle_wait_auth_mail_from));
+        add(static_cast<SmtpsState>(i), SmtpsEvent::QUIT,
+            &TraditionalSmtpsFsm::handle_wait_quit_quit);
+    add(SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM,
+        &TraditionalSmtpsFsm::handle_wait_auth_mail_from);
 
     for (int i = 0; i < static_cast<int>(SmtpsState::WAIT_QUIT) + 1; ++i) {
-        this->add_handler(static_cast<SmtpsState>(i), SmtpsEvent::ERROR,
-            h(&TraditionalSmtpsFsm::handle_error));
-        this->add_handler(static_cast<SmtpsState>(i), SmtpsEvent::TIMEOUT,
-            h(&TraditionalSmtpsFsm::handle_timeout));
+        add(static_cast<SmtpsState>(i), SmtpsEvent::ERROR,
+            &TraditionalSmtpsFsm::handle_error);
+        add(static_cast<SmtpsState>(i), SmtpsEvent::TIMEOUT,
+            &TraditionalSmtpsFsm::handle_timeout);
+        add(static_cast<SmtpsState>(i), SmtpsEvent::EMPTY,
+            &TraditionalSmtpsFsm::handle_empty);
     }
 }
 
@@ -203,30 +182,13 @@ void TraditionalSmtpsFsm<ConnectionType>::process_event(
             TraditionalSmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
             TraditionalSmtpsFsm<ConnectionType>::get_event_name(event));
     }
-    this->dispatch(session, static_cast<SmtpsState>(session->get_current_state()), event);
-}
-
-template <typename ConnectionType>
-bool TraditionalSmtpsFsm<ConnectionType>::is_terminal_state(SmtpsState s) const {
-    return s == SmtpsState::CLOSED;
-}
-
-template <typename ConnectionType>
-void TraditionalSmtpsFsm<ConnectionType>::on_invalid_transition(
-    SmtpsState, SmtpsEvent,
-    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
-{
-    session->set_error(pr::SessionError::InvalidCommand);
-    session->do_async_write("500 Error: Invalid command sequence\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-            if (ec) return;
-            s->do_async_read();
-        });
+    engine_.dispatch(session, event);
 }
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::auto_process_event(std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-    process_event(session,
+    if (!session) return;
+    engine_.dispatch(session,
         static_cast<SmtpsEvent>(session->get_next_event()));
 }
 
@@ -236,13 +198,10 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_init_connect(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
-    session->set_current_state(static_cast<int>(SmtpsState::GREETING));
-    session->do_async_write("220 SMTPS Server\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> self, const std::error_code& ec) mutable {
-            if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending greeting: {}", ec.message()); return; }
-            self->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
-            self->do_async_read();
-        });
+    // 两段 banner（先 GREETING、写完 220 再 WAIT_EHLO）：第一段 apply 走引擎
+    // 收口（CONNECT 时命令缓冲必空，drain 无害），第二段 reply_then_settle。
+    engine_.apply(session, SmtpsState::GREETING);
+    engine_.reply_then_settle(session, "220 SMTPS Server", SmtpsState::WAIT_EHLO);
 }
 
 template <typename ConnectionType>
@@ -273,12 +232,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     }
     response += "250 SMTPUTF8\r\n";
 
-    session->do_async_write(response,
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-            if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending EHLO: {}", ec.message()); return; }
-            s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-            s->do_async_read();
-        });
+    engine_.reply_then_settle(session, std::move(response), SmtpsState::WAIT_AUTH);
 }
 
 template <typename ConnectionType>
@@ -288,17 +242,16 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
     // 未通告的能力不得生效（RFC 3207 §4）：显式拒绝，会话保持在 WAIT_AUTH 可继续收信
     if (auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         !ctx->listener_config.advertise_starttls) {
-        session->do_async_write("502 5.5.1 STARTTLS not supported\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "502 5.5.1 STARTTLS not supported",
+                                  SmtpsState::WAIT_AUTH);
         return;
     }
+    // 220 分支：先落 INIT（apply_closing：不 drain 不续读——连接即将交给 TLS
+    // 会话，新输入必须由对端发起），写回调里 handoff 交接连接与 trace。
+    engine_.apply_closing(session, SmtpsState::INIT);
     session->do_async_write("220 Ready to start TLS\r\n",
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> self, const std::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS: {}", ec.message()); return; }
-            self->set_current_state(static_cast<int>(SmtpsState::INIT));
             auto server = static_cast<SmtpsServer*>(static_cast<MailServerBase*>(self->get_server()));
             auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
             server->handoff_starttls(self->release_connection(), std::move(trace));
@@ -310,6 +263,25 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+    // 异步认证窗口由引擎 Transition 占据（pause 即刻生效，回调经包装的
+    // executor post 回连接线程）。成功出口 stash 的 WAIT_MAIL_FROM/235；
+    // 失败显式回 WAIT_AUTH/535；超限直接 close（转移不收口，POP3 同款）。
+    auto arm_auth = [this](std::shared_ptr<pr::SessionBase<ConnectionType>> s) {
+        return std::make_shared<typename Engine::Transition>(
+            engine_.begin_transition(s, SmtpsState::WAIT_MAIL_FROM,
+                                     "235 Authentication successful"));
+    };
+    auto on_auth_result = [](std::shared_ptr<pr::SessionBase<ConnectionType>> s,
+                             std::shared_ptr<typename Engine::Transition> transition,
+                             SmtpsContext* c, bool ok, int shard) {
+        if (ok) {
+            c->is_authenticated = true; c->shard_index = shard;
+            transition->finish(true);
+            return;
+        }
+        if (s->record_auth_failure_and_check()) { s->close_after_flush(); return; }
+        transition->finish(SmtpsState::WAIT_AUTH, "535 Authentication failed");
+    };
 
     // AUTH PLAIN step2
     if (ctx->plain_auth_expected) {
@@ -326,25 +298,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
+            auto transition = arm_auth(session);
             this->auth_user_async(session, username, password,
-                [session, ctx](bool ok, int shard) {
-                    if (ok) {
-                        ctx->is_authenticated = true; ctx->shard_index = shard;
-                        session->do_async_write("235 Authentication successful\r\n",
-                            [session](auto s, auto& ec) {
-                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                                s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                            });
-                    } else {
-                        if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
-                        session->do_async_write("535 Authentication failed\r\n",
-                            [session](auto s, auto& ec) {
-                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                                s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                            });
-                    }
+                [session, ctx, transition, on_auth_result](bool ok, int shard) {
+                    on_auth_result(session, transition, ctx, ok, shard);
                 });
             return;
         }
@@ -357,12 +314,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
         std::string token = session->get_last_command_args().length() > 6 ? session->get_last_command_args().substr(6) : "";
         if (token.empty()) {
             ctx->plain_auth_expected = true;
-            session->do_async_write("334 \r\n",
-                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                    s->do_async_read();
-                });
+            engine_.reply_then_settle(session, "334 ", SmtpsState::WAIT_AUTH);
             return;
         }
         std::string decoded = mail_system::outbound::base64_decode(token);
@@ -377,25 +329,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
+            auto transition = arm_auth(session);
             this->auth_user_async(session, username, password,
-                [session, ctx](bool ok, int shard) {
-                    if (ok) {
-                        ctx->is_authenticated = true; ctx->shard_index = shard;
-                        session->do_async_write("235 Authentication successful\r\n",
-                            [session](auto s, auto& ec) {
-                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                                s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                            });
-                    } else {
-                        if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
-                        session->do_async_write("535 Authentication failed\r\n",
-                            [session](auto s, auto& ec) {
-                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                                s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                            });
-                    }
+                [session, ctx, transition, on_auth_result](bool ok, int shard) {
+                    on_auth_result(session, transition, ctx, ok, shard);
                 });
             return;
         }
@@ -409,12 +346,7 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth_login(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
-    session->do_async_write("334 VXNlcm5hbWU6\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-            if (ec) { LOG_SMTP_DETAIL_ERROR("AUTH username prompt: {}", ec.message()); return; }
-            s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH_USERNAME));
-            s->do_async_read();
-        });
+    engine_.reply_then_settle(session, "334 VXNlcm5hbWU6", SmtpsState::WAIT_AUTH_USERNAME);
 }
 
 template <typename ConnectionType>
@@ -423,12 +355,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_username(
 {
     std::string decoded = mail_system::outbound::base64_decode(session->get_last_command_args());
     static_cast<SmtpsContext*>(session->get_context())->client_username = decoded;
-    session->do_async_write("334 UGFzc3dvcmQ6\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-            if (ec) { LOG_SMTP_DETAIL_ERROR("AUTH password prompt: {}", ec.message()); return; }
-            s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH_PASSWORD));
-            s->do_async_read();
-        });
+    engine_.reply_then_settle(session, "334 UGFzc3dvcmQ6", SmtpsState::WAIT_AUTH_PASSWORD);
 }
 
 template <typename ConnectionType>
@@ -442,25 +369,19 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
         username += "@" + cfg->system_domain;
         static_cast<SmtpsContext*>(session->get_context())->client_username = username;
     }
+    // 异步认证窗口由引擎 Transition 占据；出口语义同 handle_wait_auth_auth。
+    auto transition = std::make_shared<typename Engine::Transition>(
+        engine_.begin_transition(session, SmtpsState::WAIT_MAIL_FROM,
+                                 "235 Authentication successful"));
     this->auth_user_async(session, username, password,
-        [session](bool ok, int shard) {
+        [session, transition](bool ok, int shard) {
             auto* ctx = static_cast<SmtpsContext*>(session->get_context());
             if (ok) {
                 ctx->is_authenticated = true; ctx->shard_index = shard;
-                session->do_async_write("235 Authentication successful\r\n",
-                    [session](auto s, auto& ec) {
-                        if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                        s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                    });
+                transition->finish(true);
             } else {
                 if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
-                session->do_async_write("535 Authentication failed\r\n",
-                    [session](auto s, auto& ec) {
-                        if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                        s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                    });
+                transition->finish(SmtpsState::WAIT_AUTH, "535 Authentication failed");
             }
         });
 }
@@ -496,12 +417,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         }
 
         if (require_auth && !ctx->is_authenticated) {
-            session->do_async_write("530 5.7.1 Authentication required\r\n",
-                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                    s->do_async_read();
-                });
+            engine_.reply_then_settle(session, "530 5.7.1 Authentication required",
+                                      SmtpsState::WAIT_AUTH);
             return;
         }
     }
@@ -525,13 +442,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                 AccountPolicy::envelope_sender_is_local(envelope_sender, cfg->system_domain)) {
                 LOG_SMTP_INFO("MAIL FROM local domain sender rejected: {} (from {})",
                               envelope_sender, session->get_client_ip());
-                session->do_async_write(
-                    "550 5.7.1 Sender address rejected: local domain requires authentication\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                        if (ec) return;
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                        s->do_async_read();
-                    });
+                engine_.reply_then_settle(session,
+                    "550 5.7.1 Sender address rejected: local domain requires authentication",
+                    SmtpsState::WAIT_AUTH);
                 return;
             }
         }
@@ -556,41 +469,31 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         std::string ehlo = ctx->ehlo_domain;
         std::string spf_mode = cfg->inbound_spf_mode;
 
-        auto proceed = [session, need_spf, client_ip, sender, ehlo, spf_mode]() {
+        // 配额/SPF 异步窗口由引擎 Transition 占据（武定即 pause，替代旧手写
+        // set_paused(true)）。成功出口 stash WAIT_RCPT_TO + 250 Ok；quota/SPF
+        // 拒绝显式回 WAIT_AUTH（两出口目标不同，见 proceed 内注释）。
+        auto transition = std::make_shared<typename Engine::Transition>(
+            engine_.begin_transition(session, SmtpsState::WAIT_RCPT_TO, "250 Ok"));
+
+        auto proceed = [session, transition, need_spf, client_ip, sender, ehlo, spf_mode]() {
             // SPF check — 异步（worker 线程池执行 DNS 查询，不阻塞 io_context）
             if (!need_spf) {
-                session->do_async_write("250 Ok\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                        if (ec) return;
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        // Quota may have completed after the original input loop
-                        // paused. Resume buffered RCPT/DATA before requesting IO.
-                        s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                    });
+                transition->finish(true);   // stash: WAIT_RCPT_TO + 250 Ok
                 return;
             }
 
             auto* dns = static_cast<MailServerBase*>(session->get_server())->get_dns_resolver().get();
             if (!dns) {
-                session->do_async_write("250 Ok\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                        if (ec) return;
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        // Quota may have completed after the original input loop
-                        // paused. Resume buffered RCPT/DATA before requesting IO.
-                        s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                    });
+                transition->finish(true);
                 return;
             }
 
-            // 发起 DNS 前显式置阻塞：状态机函数返回后 io_context 线程不会继续处理本 session
-            // （do_async_read 流水线循环检查 is_paused），DNS 回调独占操作，无需 post 回 io_context
-            session->set_paused(true);
+            // DNS 窗口由 transition 占据（武定即 pause，io 线程不再消费本
+            // session，回调独占操作无需 post）。两个出口目标不同（250 →
+            // stash 的 WAIT_RCPT_TO；550 → 显式回 WAIT_AUTH —— handler 可能
+            // 从 WAIT_MAIL_FROM/WAIT_RCPT_TO 进入，非自环），用显式目标重载。
             inbound::InboundVerifier::check_spf_only_async(*dns, client_ip, sender, ehlo,
-                [session, sender, spf_mode](inbound::SpfResult spf) {
-                    session->set_paused(false);
+                [session, transition, sender, spf_mode](inbound::SpfResult spf) {
                     auto* c = static_cast<SmtpsContext*>(session->get_context());
                     c->spf_checked = true;
                     c->spf_result = spf.result;
@@ -599,39 +502,23 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                     if (spf.result == "fail" && spf_mode == "hard")
                         reject = "SPF hard-fail for " + sender;
                     if (!reject.empty()) {
-                        session->do_async_write("550 5.7.1 SPF verification failed: " + reject + "\r\n",
-                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                                if (ec) return;
-                                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                                s->do_async_read();
-                            });
+                        transition->finish(SmtpsState::WAIT_AUTH,
+                                           "550 5.7.1 SPF verification failed: " + reject);
                     } else {
-                        session->do_async_write("250 Ok\r\n",
-                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                                if (ec) return;
-                                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                                s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                            });
+                        transition->finish(true);
                     }
                 });
         };
 
         // 认证账号（465/587 提交）：MAIL FROM 时原子占用当日一个配额，超限 550 拒收。
-        // 未认证入站（25 端口 MTA 投递）无账号，不计数。
+        // 未认证入站（25 端口 MTA 投递）无账号，不计数。异步窗口（quota + SPF）
+        // 由上面的 transition 占据；包装回调经 executor post 仍在连接线程续跑。
         if (ctx->is_authenticated) {
-            session->set_paused(true);
             this->check_send_quota_async(session, ctx->sender_address,
-                [session, proceed](bool allowed) {
-                    session->set_paused(false);
+                [this, session, transition, proceed](bool allowed) {
                     if (!allowed) {
-                        session->do_async_write("550 5.7.0 Daily sending quota exceeded\r\n",
-                            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                                if (ec) return;
-                                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                                s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                            });
+                        transition->finish(SmtpsState::WAIT_AUTH,
+                                           "550 5.7.0 Daily sending quota exceeded");
                         return;
                     }
                     proceed();
@@ -640,12 +527,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
             proceed();
         }
     } else {
-        session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "501 Syntax error in parameters or arguments",
+                                  SmtpsState::WAIT_AUTH);
     }
 }
 
@@ -676,22 +559,16 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     auto addr_start = session->get_last_command_args().find('<');
     auto addr_end   = session->get_last_command_args().find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
     if (addr_start == std::string::npos || addr_end == std::string::npos) {
-        session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "501 Syntax error in parameters or arguments",
+                                  SmtpsState::WAIT_RCPT_TO);
         return;
     }
 
     std::string recipient = algorithm::trim(
         session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1));
     if (recipient.empty()) {
-        session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "501 Syntax error in parameters or arguments",
+                                  SmtpsState::WAIT_RCPT_TO);
         return;
     }
 
@@ -709,43 +586,31 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
             algorithm::to_lower(algorithm::trim(domain)) == algorithm::to_lower(cfg->system_domain);
         if (!AccountPolicy::recipient_allowed(recipient, cfg->system_domain, cfg->external_delivery_enabled)) {
             LOG_SMTP_INFO("RCPT external delivery disabled: {}", recipient);
-            session->do_async_write("550 5.7.1 External delivery disabled\r\n",
-                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                    s->do_async_read();
-                });
+            engine_.reply_then_settle(session, "550 5.7.1 External delivery disabled",
+                                      SmtpsState::WAIT_RCPT_TO);
             return;
         }
         // 本地域收件人：别名展开（邮件组，webmail/客户端 587 提交同一语义）。
         // 非别名或别名查询失败 → 原样接受：提交模式不因别名查询新增拒绝理由，
-        // 保持"未认证路径才做存在性校验"的既有语义。
+        // 保持"未认证路径才做存在性校验"的既有语义。别名查询窗口由 transition
+        // 占据（stash: WAIT_RCPT_TO + 250 Ok）。
         if (is_local) {
+            auto transition = std::make_shared<typename Engine::Transition>(
+                engine_.begin_transition(session, SmtpsState::WAIT_RCPT_TO, "250 Ok"));
             this->alias_targets_async(session, recipient,
-                [session, recipient](std::vector<std::string> targets) {
+                [session, transition, recipient](std::vector<std::string> targets) {
                     auto* c = static_cast<SmtpsContext*>(session->get_context());
                     if (targets.empty()) {
                         c->recipient_addresses.push_back(recipient);
                     } else {
                         push_recipient_deduped(c, targets);
                     }
-                    session->do_async_write("250 Ok\r\n",
-                        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                            if (ec) return;
-                            s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                            s->drain_buffered_commands();
-                            if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                        });
+                    transition->finish(true);
                 });
             return;
         }
         ctx->recipient_addresses.push_back(recipient);
-        session->do_async_write("250 Ok\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "250 Ok", SmtpsState::WAIT_RCPT_TO);
         return;
     }
 
@@ -766,61 +631,40 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
         LOG_SMTP_INFO("RCPT trusted relay accepted: {} (from {})",
                       recipient, session->get_client_ip());
         ctx->recipient_addresses.push_back(recipient);
-        session->do_async_write("250 Ok\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                s->drain_buffered_commands();
-                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-            });
+        engine_.apply(session, SmtpsState::WAIT_RCPT_TO, "250 Ok");
         return;
     }
 
     // 外部域名（非本系统域名）→ 拒绝中继
     if (algorithm::to_lower(domain) != algorithm::to_lower(cfg->system_domain)) {
         LOG_SMTP_INFO("RCPT relay denied: {} (domain {})", recipient, domain);
-        session->do_async_write("550 5.7.1 Relay access denied\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "550 5.7.1 Relay access denied",
+                                  SmtpsState::WAIT_RCPT_TO);
         return;
     }
 
     // 本地域名但无本地部分 → 语法错误
     if (local.empty()) {
-        session->do_async_write("501 Syntax error in parameters or arguments\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session, "501 Syntax error in parameters or arguments",
+                                  SmtpsState::WAIT_RCPT_TO);
         return;
     }
 
     // 本地域名 → 收件人解析：真实用户直收；别名展开为全部在用目标（邮件组）；
-    // 两者皆非 → 550 User unknown。
+    // 两者皆非 → 550 User unknown。解析链（缓存/DB/别名多跳）整体在一个
+    // transition 窗口内，出口按结果显式给回复（同一目标 WAIT_RCPT_TO）。
+    auto transition = std::make_shared<typename Engine::Transition>(
+        engine_.begin_transition(session, SmtpsState::WAIT_RCPT_TO));
     this->resolve_recipient_async(session, recipient,
-        [session, recipient](std::vector<std::string> targets) {
+        [session, transition, recipient](std::vector<std::string> targets) {
             auto* c = static_cast<SmtpsContext*>(session->get_context());
             if (targets.empty()) {
                 LOG_SMTP_WARN("RCPT user unknown: {}", recipient);
-                session->do_async_write("550 5.1.1 User unknown\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                        if (ec) return;
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                        s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                    });
+                transition->finish(SmtpsState::WAIT_RCPT_TO, "550 5.1.1 User unknown");
                 return;
             }
             push_recipient_deduped(c, targets);
-            session->do_async_write("250 Ok\r\n",
-                [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                    s->drain_buffered_commands();
-                    if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                });
+            transition->finish(SmtpsState::WAIT_RCPT_TO, "250 Ok");
         });
 }
 
@@ -831,12 +675,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_data_data(
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (smtp_session) smtp_session->create_mail_on_data_command();
 
-    session->do_async_write("354 Start mail input; end with <CRLF>.<CRLF>\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-            if (ec) return;
-            s->set_current_state(static_cast<int>(SmtpsState::IN_MESSAGE));
-            s->do_async_read();
-        });
+    // shape A 收口：354 + 落 IN_MESSAGE + 续读，不 drain（旧的"写回调里
+    // set+read"逐字等价；IN_MESSAGE 的 bulk 读取模式由 session 虚接口切换）。
+    engine_.reply_then_settle(session, "354 Start mail input; end with <CRLF>.<CRLF>",
+                              SmtpsState::IN_MESSAGE);
 }
 
 template <typename ConnectionType>
@@ -854,6 +696,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     std::string resp = ctx->abort_reason.empty() ? "552 Message size exceeds limit\r\n" : ctx->abort_reason + "\r\n";
     if (ctx->body_limit_exceeded) {
         cleanup_streamed_attachments(ctx);
+        // 收尾即关：落终态（不 drain 不续读），写完 552 由回调 close。
+        engine_.apply_closing(session, SmtpsState::WAIT_QUIT);
         session->do_async_write(resp,
             [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
         return;
@@ -866,14 +710,15 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     // 回 451 让对方稍后重投。
     //
     // commit 走异步形状：本地后端回调内联执行（与原同步版行为完全一致）；
-    // 远程后端将来覆写真异步时回调来自 provider 线程 —— pause 期间 io 线程不再
-    // 消费本 session（do_async_read 的流水线循环检查 is_paused，且不再发起新的
-    // socket 读），回调独占操作 session，无需 post 回 io_context（SPF/DNS
-    // 回调同一约定）。
-    session->set_paused(true);
+    // 远程后端将来覆写真异步时回调来自 provider 线程。整个 DATA_END 收尾链
+    // （commit → MIME 预解析 → 入站校验 → 入队/持久化等待 → 250/451）由一个
+    // 引擎 Transition 占据：武定即 pause（io 线程停止消费），任一线程的出口
+    // 经 finish（目标态 + 回复，引擎 post 回连接线程收口三件套）或
+    // finish_closing（关断路径：落态不续读）。
+    auto transition = std::make_shared<typename Engine::Transition>(
+        engine_.begin_transition(session, SmtpsState::WAIT_QUIT));
     smtp_session->commit_body_async(
-        [session](bool committed, const storage::IoError& commit_err) {
-            session->set_paused(false);
+        [session, transition](bool committed, const storage::IoError& commit_err) {
             auto* c = static_cast<SmtpsContext*>(session->get_context());
             auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
             if (!committed) {
@@ -884,6 +729,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                 const bool retry = commit_err.retryable();
                 LOG_SMTP_DETAIL_ERROR("DATA_END commit failed (retryable={}): {} {}",
                                       retry, commit_err.code, commit_err.message);
+                transition->finish_closing();
                 session->do_async_write(retry
                         ? "451 4.3.0 Failed to store message, try again later\r\n"
                         : "550 5.3.0 Failed to store message\r\n",
@@ -892,16 +738,18 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
                     });
                 return;
             }
-            finish_data_end_after_commit(session);
+            finish_data_end_after_commit(session, transition);
         });
 }
 
 // DATA_END 在正文确认落盘之后的处理：MIME 预解析（异步读）→ 入站校验
 // （可选异步）→ 入队 + 250/451。commit_body 的回调（本地内联 / 远程
-// provider 线程）在这里续跑。
+// provider 线程）在这里续跑。整链仍处于 handle_in_message_data_end 武定的
+// transition 窗口内（pause 持续到出口收口）。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
-    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+    std::shared_ptr<typename Engine::Transition> transition)
 {
     auto* ctx = static_cast<SmtpsContext*>(session->get_context());
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
@@ -915,8 +763,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
     // 走 provider 的只读句柄：这里只解析、不修改内容，因此用 open_read。
     // 本地后端会把它实现成 mmap（零拷贝）；远程后端退化成下载进缓冲区。
     // 读走异步形状：本地内联（行为与同步版一致），远程将来覆写真异步时
-    // 回调来自 provider 线程 —— pause 期间回调独占 session，无需 post 回
-    // （与 commit 回调同一约定）。
+    // 回调来自 provider 线程 —— transition 的 pause 期间回调独占 session。
     const bool has_body = smtp_session->get_mail() &&
                           !smtp_session->get_mail()->body_path.empty();
     auto provider = has_body ? static_cast<MailServerBase*>(session->get_server())->m_shardRouter->get_storage(
@@ -944,19 +791,18 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
         LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
         auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
         if (smtp_s) smtp_s->discard_current_mail();
+        transition->finish_closing();
         session->do_async_write("451 Requested action aborted: local processing error\r\n",
             [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
         return;
     }
-        finish_data_end_after_read(session);
+        finish_data_end_after_read(session, transition);
         return;
     }
 
-    session->set_paused(true);
     provider->async_open_read(smtp_session->get_mail()->body_path,
-        [session, cfg](std::unique_ptr<pr::IReadStream> stream,
+        [session, transition, cfg](std::unique_ptr<pr::IReadStream> stream,
                        const storage::IoError& read_err) {
-            session->set_paused(false);
             try {
                 if (!stream && !read_err.message.empty()) {
                     LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}",
@@ -972,11 +818,12 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
         LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
         auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
         if (smtp_s) smtp_s->discard_current_mail();
+        transition->finish_closing();
         session->do_async_write("451 Requested action aborted: local processing error\r\n",
             [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
         return;
     }
-            finish_data_end_after_read(session);
+            finish_data_end_after_read(session, transition);
         });
 }
 
@@ -1004,12 +851,14 @@ void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
 // MIME 预解析之后的收尾：本域发件人边界（规则 2/3）→ 入站校验（可选异步）→ 入队 + 250/451。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
-    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+    std::shared_ptr<typename Engine::Transition> transition)
 {
     // 收尾主体（边界检查通过后续跑）：入站校验（可选异步）→ 入队 + 250/451。
-    // 以值捕获 session：规则 3 的别名分支会在 DB/缓存回调线程重入本 lambda
-    // （与下方 verify 回调同一形状，style 11.2），故内部自行重取 ctx/cfg。
-    auto finish_after_sender_boundary = [session]() {
+    // 以值捕获 session/transition：规则 3 的别名分支会在 DB/缓存回调线程重入
+    // 本 lambda（与下方 verify 回调同一形状，style 11.2），故内部自行重取
+    // ctx/cfg；transition 的 finish/finish_closing 任意线程可调。
+    auto finish_after_sender_boundary = [session, transition]() {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
         if (!smtp_session) { session->close(); return; }
@@ -1023,7 +872,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
          cfg->inbound_dkim_mode != "off" || cfg->inbound_dmarc_mode != "off");
 
     // 入队 + 响应（after_enqueue / after_persist）。vr 有值则先记录校验结果。
-    auto finalize_mail = [session, smtp_session](std::optional<inbound::VerificationResult> vr) {
+    auto finalize_mail = [session, smtp_session, transition](std::optional<inbound::VerificationResult> vr) {
         try {
             if (vr) {
                 auto* c = static_cast<SmtpsContext*>(session->get_context());
@@ -1035,6 +884,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
             auto submit_result = smtp_session->submit_mail_to_queue();
             if (!submit_result.accepted) {
                 smtp_session->discard_current_mail();
+                transition->finish_closing();
                 session->do_async_write("451 Requested action aborted: insufficient storage or backend pressure\r\n",
                     [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
                 return;
@@ -1042,24 +892,20 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
             const bool ack_after_enqueue =
                 std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
             if (ack_after_enqueue) {
-                session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                 smtp_session->reset_mail_state();
                 static_cast<MailServerBase*>(session->get_server())->increment_mails_accepted();
-                session->do_async_write("250 OK\r\n",
-                    [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                        if (ec) return;
-                        s->do_async_read();
-                    });
+                // stash 目标 WAIT_QUIT 不适用：DATA_END 成功的真实写点是下一
+                // 事务的 WAIT_MAIL_FROM（desc 已按实际行为修订），显式给出。
+                transition->finish(SmtpsState::WAIT_MAIL_FROM, "250 OK");
                 return;
             }
             // 在连接 executor 上等待完成/超时，不占用持久化需要的 worker。
-            session->set_paused(true);
+            // transition 的 pause 已在 DATA_END 武定时生效，无需再 set_paused。
             const auto timeout = std::chrono::milliseconds(
                 std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config)->inbound_persist_wait_timeout_ms);
-            smtp_session->async_wait_pending_mail(timeout, [session](persist_storage::PersistResult result) {
+            smtp_session->async_wait_pending_mail(timeout, [session, transition](persist_storage::PersistResult result) {
                 auto* smtp = static_cast<SmtpsSession<ConnectionType>*>(session.get());
                 if (session->is_closed()) { smtp->clear_pending_mail_submission(); return; }
-                session->set_paused(false);
                 if (!result.timed_out && result.status == persist_storage::PersistStatus::SUCCESS) {
                     // IDLE 推送钩子：投递事务已提交（mails / mail_recipients /
                     // mail_mailbox 关联行落库）。对每个 RCPT 收件人地址通知注册表；
@@ -1073,19 +919,16 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                             IdlePushRegistry::instance().notify_account(rcpt);
                         }
                     }
-                    session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                     smtp->reset_mail_state();
                     static_cast<MailServerBase*>(session->get_server())->increment_mails_accepted();
-                    session->do_async_write("250 OK\r\n",
-                        [](auto s, const std::error_code& ec) {
-                            if (!ec) s->do_async_read();
-                        });
+                    transition->finish(SmtpsState::WAIT_MAIL_FROM, "250 OK");
                     return;
                 }
                 LOG_SMTP_WARN("Persistence acknowledgement failed mail_id={} timeout={} reason={}",
                               result.mail_id, result.timed_out, result.error);
                 if (result.timed_out) smtp->cancel_pending_mail_submission();
                 smtp->clear_pending_mail_submission();
+                transition->finish_closing();
                 session->do_async_write(result.timed_out
                     ? "451 Requested action aborted: local processing timeout\r\n"
                     : "451 Requested action aborted: local processing error\r\n",
@@ -1094,6 +937,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
         } catch (const std::exception& e) {
             LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
             if (smtp_session) smtp_session->discard_current_mail();
+            transition->finish_closing();
             session->do_async_write("451 Requested action aborted: local processing error\r\n",
                 [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
         }
@@ -1110,12 +954,11 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
         auto* dns = static_cast<MailServerBase*>(session->get_server())->get_dns_resolver().get();
         if (dns && !body_path.empty()) {
             inbound::SpfResult pre_spf{ctx->spf_result, ""};
-            session->set_paused(true);   // 校验期间暂停流水线，回调中恢复
+            // 校验窗口由 transition 占据（pause 已生效），c-ares 回调独占
+            // 操作 session，直接续跑 finalize_mail。
             inbound::InboundVerifier::verify_all_from_file_async(*dns,
                 client_ip, mail_from, helo, headers, body_path, *cfg,
                 [session, finalize_mail = std::move(finalize_mail)](inbound::VerificationResult vr) mutable {
-                    // c-ares 回调独占操作（session 已 paused），直接执行，无需 post 回 io_context
-                    session->set_paused(false);
                     finalize_mail(std::move(vr));
                 },
                 ctx->spf_checked ? &pre_spf : nullptr);
@@ -1129,6 +972,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
     } catch (const std::exception& e) {
         LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
         if (smtp_session) smtp_session->discard_current_mail();
+        transition->finish_closing();
         session->do_async_write("451 Requested action aborted: local processing error\r\n",
             [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable { s->close(); });
         return;
@@ -1149,8 +993,9 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
     if (!smtp_session) { session->close(); return; }
     auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
 
-    auto reject_and_close = [session, smtp_session](const char* reply) {
+    auto reject_and_close = [session, smtp_session, transition](const char* reply) {
         smtp_session->discard_current_mail();
+        transition->finish_closing();
         session->do_async_write(reply,
             [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code&) mutable {
                 s->close();
@@ -1182,10 +1027,9 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
                 reject_and_close("550 5.7.1 From header does not match authenticated user\r\n");
                 return;
             }
-            // 本域 From：别名感知。alias_targets_async 包装器先 set_paused(true)；
-            // 缓存（TTL 300s）命中在当前线程同步回调，DB 路径回调在 DB 线程 ——
-            // pause 期间 io 流水线不消费本 session，回调独占操作，无需 post 回
-            // io_context（与上方 verify 的 worker 续跑同一约定）。
+            // 本域 From：别名感知。别名查询窗口由 DATA_END 的 transition 占据
+            // （pause 已生效；缓存 TTL 300s 命中在当前线程同步回调，DB 路径回调
+            // 经包装的 executor post 回连接线程）—— 回调独占操作本 session。
             // 空目标（非别名 / DB 不可用 / 查询失败）= 不匹配，fail-closed 拒绝。
             // 本函数为 static（DATA_END 回调链无 this），经 session 取回 FSM 实例
             //（session 持有 fsm shared_ptr，回调存活期内 FSM 必存活）。
@@ -1193,7 +1037,6 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
             fsm->alias_targets_async(session, from_addr,
                 [session, from_addr, auth_user, reject_and_close,
                  pass = std::move(finish_after_sender_boundary)](std::vector<std::string> targets) {
-                    session->set_paused(false);
                     if (AccountPolicy::account_in_alias_targets(targets, auth_user)) {
                         LOG_SMTP_INFO("DATA_END From header alias accepted: from={} as alias of {} (from {})",
                                       from_addr, auth_user, session->get_client_ip());
@@ -1216,6 +1059,10 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     session->set_trace_clean_close();   // 正常 QUIT → 连接追踪丢弃
+    // 旧实现不写 CLOSED（守卫表 QUIT→CLOSED 行从未生效，靠 close 兜底）；
+    // 引擎化后统一"完成即落终态"：apply_closing 不 drain 不续读，缓冲命令
+    // 随连接死掉，随后写回调 close。
+    engine_.apply_closing(session, SmtpsState::CLOSED);
     session->do_async_write("221 Bye\r\n",
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) LOG_SMTP_DETAIL_ERROR("QUIT reply error: {}", ec.message());
@@ -1227,12 +1074,22 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_timeout(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
-    session->handle_read("");
-    if (static_cast<SmtpsEvent>(session->get_next_event()) != SmtpsEvent::TIMEOUT) {
-        auto_process_event(session);
-        return;
-    }
-    session->do_async_read();
+    // 空行已分离为 EMPTY 事件（2026-10-26），TIMEOUT 不再做 handle_read("")
+    // 再解析。真正的闲置超时由 SessionBase watchdog 直接收口（不走本事件）；
+    // 本 handler 只处理 STARTTLS 握手后的 next_event_ 占位等防御场景：
+    // 自环收口续读，不写不关。
+    engine_.apply(session,
+        static_cast<SmtpsState>(session->get_current_state()));
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::handle_empty(
+    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
+{
+    // 空行：静默吞掉（旧行为 = 空行映射 TIMEOUT → handle_timeout 再解析 →
+    // 仍 TIMEOUT → 仅续读）。自环收口保持连接与读循环。
+    engine_.apply(session,
+        static_cast<SmtpsState>(session->get_current_state()));
 }
 
 template <typename ConnectionType>
@@ -1246,11 +1103,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_error(
     if (session->stay_times_ > 3) {
         session->close();
     } else {
-        session->do_async_write("500 Error: " + session->get_last_command_args() + "\r\n",
-            [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
+        engine_.reply_then_settle(session,
+            "500 Error: " + session->get_last_command_args(),
+            static_cast<SmtpsState>(session->get_current_state()));
     }
 }
 
@@ -1292,7 +1147,8 @@ std::string TraditionalSmtpsFsm<ConnectionType>::get_event_name(SmtpsEvent event
         {SmtpsEvent::DATA_END, "DATA_END"},
         {SmtpsEvent::QUIT, "QUIT"},
         {SmtpsEvent::ERROR, "ERROR"},
-        {SmtpsEvent::TIMEOUT, "TIMEOUT"}
+        {SmtpsEvent::TIMEOUT, "TIMEOUT"},
+        {SmtpsEvent::EMPTY, "EMPTY"}
     };
     auto it = event_names.find(event);
     if (it != event_names.end()) {
@@ -1308,13 +1164,12 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
 {
     if (!cb) return;
     if (!session) { cb(false, 0); return; }
-    session->set_paused(true);
+    // pause 由调用方武定的引擎 Transition 承担（fsm 2b）；这里只负责把密码
+    // 工作的完成 post 回连接 executor —— 回调（状态收口、失败计数、关断）
+    // 全部留在连接线程，与迁移前一致。
     auto executor = session->get_connection().executor();
     account_policy_->login_async(mail_address, password,
         [session, executor, cb = std::move(cb)](AccountAuthResult out) mutable {
-            // Password work completes on a worker/DB thread. Resume protocol
-            // state and buffered commands on the connection's serial executor,
-            // after the input-dispatch loop which paused this session has exited.
             executor->post([session, cb = std::move(cb), out = std::move(out)]() mutable {
                 if (session->is_closed()) return;
                 cb(out.ok, out.ok ? out.shard : 0);
@@ -1330,7 +1185,7 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
 {
     if (!cb) return;
     if (!session) { cb(false); return; }
-    session->set_paused(true);
+    // pause 由调用方的 Transition 承担（fsm 2b），此处仅 post 回连接线程。
     auto executor = session->get_connection().executor();
     account_policy_->user_exists_async(mail_address,
         [session, executor, cb = std::move(cb)](bool exists) mutable {
@@ -1342,8 +1197,8 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
 }
 
 // RCPT TO 收件人解析：用户（缓存→DB）→ 别名（缓存→DB）→ 空（550）。
-// pause 语义与 user_exists_async 一致：DB 查询前 set_paused(true)，回调不恢复，
-// 统一由调用方写完成回调的 drain_buffered_commands() 收口。
+// pause 由调用方武定的 Transition 承担（fsm 2b）；查询链的完成回调统一经
+// executor post 回连接线程，由调用方回调里的 transition.finish 收口。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::resolve_recipient_async(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, const std::string& mail_address,
@@ -1376,7 +1231,7 @@ void TraditionalSmtpsFsm<ConnectionType>::alias_targets_async(
         account_policy_->alias_targets_async(alias_address, std::move(cb));
         return;
     }
-    session->set_paused(true);
+    // pause 由调用方的 Transition 承担（fsm 2b），此处仅 post 回连接线程。
     auto executor = session->get_connection().executor();
     account_policy_->alias_targets_async(alias_address,
         [session, executor, cb = std::move(cb)](std::vector<std::string> targets) mutable {
@@ -1403,7 +1258,7 @@ void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
     if (!cb) return;
     if (!session) { cb(true); return; }
     auto cfg = std::atomic_load(&static_cast<MailServerBase*>(session->get_server())->m_config);
-    session->set_paused(true);
+    // pause 由调用方的 Transition 承担（fsm 2b），此处仅 post 回连接线程。
     auto executor = session->get_connection().executor();
     auto complete = [session, executor, cb = std::move(cb)](bool allowed) mutable {
         executor->post([session, cb = std::move(cb), allowed]() mutable {

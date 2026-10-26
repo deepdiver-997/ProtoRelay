@@ -1,0 +1,28 @@
+digraph fsm {
+  rankdir=LR;
+  node [shape=box fontname="monospace"];
+  "INIT";
+  "AUTHORIZATION";
+  "TRANSACTION";
+  "UPDATE";
+  "CLOSED" [peripheries=2];
+  "INIT" -> "AUTHORIZATION" [label="CONNECT"];
+  "AUTHORIZATION" -> "AUTHORIZATION" [label="USER {USER}"];
+  "AUTHORIZATION" -> "TRANSACTION" [label="PASS {PASS}"];
+  "AUTHORIZATION" -> "AUTHORIZATION" [label="CAPA {CAPA}"];
+  "AUTHORIZATION" -> "AUTHORIZATION" [label="NOOP {NOOP}"];
+  "AUTHORIZATION" -> "UPDATE" [label="QUIT {QUIT}"];
+  "TRANSACTION" -> "TRANSACTION" [label="STAT {STAT}"];
+  "TRANSACTION" -> "TRANSACTION" [label="LIST {LIST}"];
+  "TRANSACTION" -> "TRANSACTION" [label="UIDL {UIDL}"];
+  "TRANSACTION" -> "TRANSACTION" [label="RETR {RETR}"];
+  "TRANSACTION" -> "TRANSACTION" [label="DELE {DELE}"];
+  "TRANSACTION" -> "TRANSACTION" [label="NOOP {NOOP}"];
+  "TRANSACTION" -> "TRANSACTION" [label="RSET {RSET}"];
+  "TRANSACTION" -> "TRANSACTION" [label="CAPA {CAPA}"];
+  "TRANSACTION" -> "UPDATE" [label="QUIT {QUIT}"];
+  "INIT" -> "INIT" [label="ERROR"];
+  "AUTHORIZATION" -> "AUTHORIZATION" [label="ERROR"];
+  "TRANSACTION" -> "TRANSACTION" [label="ERROR"];
+  "UPDATE" -> "UPDATE" [label="ERROR"];
+}

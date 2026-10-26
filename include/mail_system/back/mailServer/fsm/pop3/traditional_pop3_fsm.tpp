@@ -235,94 +235,41 @@ void TraditionalPop3Fsm<ConnectionType>::apply_deletions_async(
 }
 
 template <typename ConnectionType>
-void TraditionalPop3Fsm<ConnectionType>::init_transition_table() {
-    this->add_transition(Pop3State::INIT, Pop3Event::CONNECT, Pop3State::AUTHORIZATION);
-    this->add_transition(Pop3State::AUTHORIZATION, Pop3Event::USER, Pop3State::AUTHORIZATION);
-    this->add_transition(Pop3State::AUTHORIZATION, Pop3Event::PASS, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::AUTHORIZATION, Pop3Event::CAPA, Pop3State::AUTHORIZATION);
-    this->add_transition(Pop3State::AUTHORIZATION, Pop3Event::NOOP, Pop3State::AUTHORIZATION);
-    this->add_transition(Pop3State::AUTHORIZATION, Pop3Event::QUIT, Pop3State::UPDATE);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::STAT, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::LIST, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::UIDL, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::RETR, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::DELE, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::NOOP, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::RSET, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::CAPA, Pop3State::TRANSACTION);
-    this->add_transition(Pop3State::TRANSACTION, Pop3Event::QUIT, Pop3State::UPDATE);
-    // ERROR = 未知命令/空行：回 -ERR 并留在当前状态（不自闭）
+void TraditionalPop3Fsm<ConnectionType>::register_handlers() {
+    // Guards/replies live in make_pop3_desc(); handlers mirror the previous
+    // init_state_handlers registration exactly.
+    auto add = [this](Pop3State s, Pop3Event e,
+                      void (TraditionalPop3Fsm::*handler)(
+                          std::shared_ptr<pr::SessionBase<ConnectionType>>)) {
+        engine_.add_handler(s, e, [this, handler](std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
+            (this->*handler)(std::move(session));
+        });
+    };
+    add(Pop3State::INIT, Pop3Event::CONNECT, &TraditionalPop3Fsm::handle_init_connect);
+    add(Pop3State::AUTHORIZATION, Pop3Event::USER, &TraditionalPop3Fsm::handle_user);
+    add(Pop3State::AUTHORIZATION, Pop3Event::PASS, &TraditionalPop3Fsm::handle_pass);
+    add(Pop3State::AUTHORIZATION, Pop3Event::CAPA, &TraditionalPop3Fsm::handle_capa);
+    add(Pop3State::AUTHORIZATION, Pop3Event::NOOP, &TraditionalPop3Fsm::handle_noop);
+    add(Pop3State::AUTHORIZATION, Pop3Event::QUIT, &TraditionalPop3Fsm::handle_quit);
+    add(Pop3State::TRANSACTION, Pop3Event::STAT, &TraditionalPop3Fsm::handle_stat);
+    add(Pop3State::TRANSACTION, Pop3Event::LIST, &TraditionalPop3Fsm::handle_list);
+    add(Pop3State::TRANSACTION, Pop3Event::UIDL, &TraditionalPop3Fsm::handle_uidl);
+    add(Pop3State::TRANSACTION, Pop3Event::RETR, &TraditionalPop3Fsm::handle_retr);
+    add(Pop3State::TRANSACTION, Pop3Event::DELE, &TraditionalPop3Fsm::handle_dele);
+    add(Pop3State::TRANSACTION, Pop3Event::NOOP, &TraditionalPop3Fsm::handle_noop);
+    add(Pop3State::TRANSACTION, Pop3Event::RSET, &TraditionalPop3Fsm::handle_rset);
+    add(Pop3State::TRANSACTION, Pop3Event::CAPA, &TraditionalPop3Fsm::handle_capa);
+    add(Pop3State::TRANSACTION, Pop3Event::QUIT, &TraditionalPop3Fsm::handle_quit);
     for (int i = 0; i <= static_cast<int>(Pop3State::UPDATE); ++i) {
-        auto s = static_cast<Pop3State>(i);
-        this->add_transition(s, Pop3Event::ERROR, s);
+        add(static_cast<Pop3State>(i), Pop3Event::ERROR, &TraditionalPop3Fsm::handle_error);
     }
-}
-
-template <typename ConnectionType>
-void TraditionalPop3Fsm<ConnectionType>::init_state_handlers() {
-    this->add_handler(Pop3State::INIT, Pop3Event::CONNECT,
-        [this](auto session) { handle_init_connect(session); });
-    this->add_handler(Pop3State::AUTHORIZATION, Pop3Event::USER,
-        [this](auto session) { handle_user(session); });
-    this->add_handler(Pop3State::AUTHORIZATION, Pop3Event::PASS,
-        [this](auto session) { handle_pass(session); });
-    this->add_handler(Pop3State::AUTHORIZATION, Pop3Event::CAPA,
-        [this](auto session) { handle_capa(session); });
-    this->add_handler(Pop3State::AUTHORIZATION, Pop3Event::NOOP,
-        [this](auto session) { handle_noop(session); });
-    this->add_handler(Pop3State::AUTHORIZATION, Pop3Event::QUIT,
-        [this](auto session) { handle_quit(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::STAT,
-        [this](auto session) { handle_stat(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::LIST,
-        [this](auto session) { handle_list(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::UIDL,
-        [this](auto session) { handle_uidl(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::RETR,
-        [this](auto session) { handle_retr(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::DELE,
-        [this](auto session) { handle_dele(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::NOOP,
-        [this](auto session) { handle_noop(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::RSET,
-        [this](auto session) { handle_rset(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::CAPA,
-        [this](auto session) { handle_capa(session); });
-    this->add_handler(Pop3State::TRANSACTION, Pop3Event::QUIT,
-        [this](auto session) { handle_quit(session); });
-    for (int i = 0; i <= static_cast<int>(Pop3State::UPDATE); ++i) {
-        auto s = static_cast<Pop3State>(i);
-        this->add_handler(s, Pop3Event::ERROR,
-            [this](auto session) { handle_error(session); });
-    }
-}
-
-template <typename ConnectionType>
-bool TraditionalPop3Fsm<ConnectionType>::is_terminal_state(Pop3State s) const {
-    return s == Pop3State::CLOSED;
-}
-
-template <typename ConnectionType>
-void TraditionalPop3Fsm<ConnectionType>::on_invalid_transition(
-    Pop3State, Pop3Event, std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-    if (!session || session->is_closed()) return;
-    send_line(session, "-ERR Command not allowed in current state");
-}
-
-template <typename ConnectionType>
-void TraditionalPop3Fsm<ConnectionType>::on_handler_not_found(
-    Pop3State, Pop3Event, std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
-    if (!session || session->is_closed()) return;
-    send_line(session, "-ERR Internal: handler missing");
 }
 
 template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::process_event(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session, Pop3Event event)
 {
-    if (!session) return;
-    Pop3State cur = static_cast<Pop3State>(session->get_current_state());
-    this->dispatch(session, cur, event);
+    engine_.dispatch(session, event);
 }
 
 template <typename ConnectionType>
@@ -330,7 +277,7 @@ void TraditionalPop3Fsm<ConnectionType>::auto_process_event(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
     if (!session) return;
-    process_event(session, static_cast<Pop3Event>(session->get_next_event()));
+    engine_.dispatch(session, static_cast<Pop3Event>(session->get_next_event()));
 }
 
 // ====================================================================
@@ -345,7 +292,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_init_connect(
     char ts[32];
     snprintf(ts, sizeof(ts), "%ld", now);
     send_line(session, std::string("+OK ProtoRelay POP3 server ready <") + ts + "@pop3>");
-    session->set_current_state(static_cast<int>(Pop3State::AUTHORIZATION));
+    engine_.apply(session, Pop3State::AUTHORIZATION);
 }
 
 template <typename ConnectionType>
@@ -386,7 +333,13 @@ struct TraditionalPop3Fsm<ConnectionType>::LoginOperation
     uint64_t user = 0, inbox = 0;
     int shard = 0;
     bool lock_attempted = false;
-    std::atomic<bool> stopping{false}, replied{false};
+    std::atomic<bool> stopping{false};
+    // Engine transition (target TRANSACTION): pause was taken by
+    // begin_transition in handle_pass; success finishes with true (settle:
+    // unpause + state + drain), recoverable failures finish with false
+    // (unpause + drain), closing failures simply never finish. Replaces the
+    // old replied single-flight atom with the transition's exactly-once.
+    typename Engine::Transition transition;
 
     template <typename Task> void guard(Task task) {
         if (stopping.load()) return;
@@ -407,12 +360,10 @@ struct TraditionalPop3Fsm<ConnectionType>::LoginOperation
         } catch (...) { fail("-ERR Server not ready", "no_worker"); }
     }
     void reply_failure(std::string reply, std::string label, bool auth_failure) {
-        if (replied.exchange(true)) return;
         auto self = this->shared_from_this();
         session->get_connection().executor()->post([self, reply = std::move(reply), label = std::move(label), auth_failure]() mutable {
-            if (self->session->is_closed() || reply.empty()) return;
             auto session = self->session;
-            session->set_paused(false);
+            if (session->is_closed() || reply.empty()) return;
             auto* srv = static_cast<MailServerBase*>(session->get_server());
             const bool close = auth_failure && session->record_auth_failure_and_check();
             if (close) { reply = "-ERR Too many auth failures, closing connection"; label = "fail_too_many"; }
@@ -420,7 +371,7 @@ struct TraditionalPop3Fsm<ConnectionType>::LoginOperation
             if (srv) if (auto metrics = srv->get_metrics().lock())
                 metrics->inc_counter("protorelay_pop3_auth_total", {{"result", label}}, 1);
             if (close) session->close_after_flush();
-            else session->drain_buffered_commands();
+            else self->transition.finish(false);
         });
     }
     void fail(std::string reply, std::string label, bool auth_failure = false) {
@@ -528,14 +479,14 @@ struct TraditionalPop3Fsm<ConnectionType>::LoginOperation
         start_heartbeat(session, router, worker, interval, locks);
         uint64_t total = 0;
         for (const auto& message : ctx->messages) total += message.size;
-        session->set_paused(false);
         send_line(session, "+OK Mailbox locked and loaded, " + std::to_string(ctx->messages.size()) +
             " messages (" + std::to_string(total) + " octets)");
-        session->set_current_state(static_cast<int>(Pop3State::TRANSACTION));
-        stopping.store(true); replied.store(true);
+        stopping.store(true);
         auto* srv = static_cast<MailServerBase*>(session->get_server());
         if (srv) if (auto metrics = srv->get_metrics().lock()) metrics->inc_counter("protorelay_pop3_auth_total", {{"result", "ok"}}, 1);
-        session->drain_buffered_commands();
+        // Success收口: unpause + TRANSACTION + drain (was set_paused(false) +
+        // set_current_state + drain_buffered_commands inlined here).
+        transition.finish(true);
     }
 };
 
@@ -551,17 +502,21 @@ struct TraditionalPop3Fsm<ConnectionType>::QuitOperation
     repository::Pop3DeletionRequest request;
     repository::Pop3LockKey key;
     int shard = 0;
-    std::atomic<bool> releasing{false}, replied{false};
+    std::atomic<bool> releasing{false};
+    // Engine transition (target UPDATE, closing variant): armed by
+    // handle_quit's begin_transition; finish_closing applies the state with
+    // NO drain/re-arm so buffered commands die with the connection. The
+    // armed() flag replaces the old replied single-flight atom.
+    typename Engine::Transition transition;
     void finish(bool deleted, bool released) {
-        if (replied.exchange(true)) return;
+        if (!transition.armed()) return;
         auto self = this->shared_from_this();
         session->get_connection().executor()->post([self, deleted, released] {
             auto session = self->session;
             if (session->is_closed()) return;
-            session->set_paused(false);
-            session->set_current_state(static_cast<int>(Pop3State::UPDATE));
-            if (deleted && released) { session->set_trace_clean_close(); send_line(session, "+OK Bye"); }
-            else send_line(session, "-ERR Unable to complete mailbox update");
+            if (deleted && released) session->set_trace_clean_close();
+            send_line(session, deleted && released ? "+OK Bye" : "-ERR Unable to complete mailbox update");
+            self->transition.finish_closing();
             session->close_after_flush();
         });
     }
@@ -597,12 +552,12 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(std::shared_ptr<pr::Session
     if (!ctx->is_authenticated && ctx->username.empty()) { send_line(session, "-ERR USER first"); return; }
     auto password = session->get_last_command_args();
     if (password.empty()) { send_line(session, "-ERR PASS requires a password"); return; }
-    session->set_paused(true);
     auto operation = std::make_shared<LoginOperation>();
-    operation->session = std::move(session); operation->router = m_shardRouter; operation->worker = m_workerThreadPool;
+    operation->session = session; operation->router = m_shardRouter; operation->worker = m_workerThreadPool;
     operation->authenticator = authenticator_; operation->mailboxes = mailbox_repository_; operation->locks = lock_repository_;
     operation->interval = heartbeat_interval_; operation->email = ctx->username; operation->password = std::move(password);
     operation->sid = std::to_string(algorithm::get_snowflake_generator().next_id());
+    operation->transition = engine_.begin_transition(session, Pop3State::TRANSACTION);
     operation->start();
 }
 
@@ -718,17 +673,20 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
     if (!found) { send_line(session, "-ERR no such message"); return; }
 
     // 在 worker 线程读 body + dot-stuffing（避免 io 线程被大邮件卡住）
-    session->set_paused(true);
+    // Transition 是 move-only，而 worker/executor 的 post 收 std::function
+    //（可拷贝闭包）——经 shared_ptr 持有传递。
+    auto transition = std::make_shared<typename Engine::Transition>(
+        engine_.begin_transition(session, std::nullopt)); // stay in TRANSACTION
     auto self = session->shared_from_this();
     auto router = m_shardRouter;
     auto worker = m_workerThreadPool;
     int shard = ctx->shard_index;
     if (!worker) {
-        session->set_paused(false);
         send_line(session, "-ERR Server not ready");
+        transition->finish(false);
         return;
     }
-    worker->post([self, router, shard, target]() {
+    worker->post([self, router, shard, target, transition]() {
         std::string body;
         bool read_ok = false;
         if (router) {
@@ -738,11 +696,10 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
             }
         }
         if (!read_ok) {
-            self->get_connection().executor()->post([self] {
+            self->get_connection().executor()->post([self, transition] {
                 if (self->is_closed()) return;
-                self->set_paused(false);
                 send_line(self, "-ERR Failed to read message body");
-                self->drain_buffered_commands();
+                transition->finish(false);
             });
             return;
         }
@@ -762,14 +719,13 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
             if (eol == std::string::npos) break;
             start = eol + 1;
         }
-        self->get_connection().executor()->post([self, target, out = std::move(out)] {
+        self->get_connection().executor()->post([self, target, out = std::move(out), transition]() mutable {
             if (self->is_closed()) return;
             send_line(self, "+OK " + std::to_string(target.size) + " octets\r\n" + out + ".\r\n");
             auto* srv = static_cast<MailServerBase*>(self->get_server());
             if (srv) if (auto metrics = srv->get_metrics().lock())
                 metrics->inc_counter("protorelay_pop3_retr_total", {}, 1);
-            self->set_paused(false);
-            self->drain_buffered_commands();
+            transition->finish(true); // unpause + drain (+guarded re-arm)
         });
     });
 }
@@ -830,22 +786,22 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(std::shared_ptr<pr::Session
     auto* ctx = ctx_of(session);
     if (!ctx || !ctx->is_authenticated) {
         session->set_trace_clean_close();
+        engine_.apply_closing(session, Pop3State::UPDATE);
         send_line(session, "+OK Bye");
-        session->set_current_state(static_cast<int>(Pop3State::UPDATE));
         session->close_after_flush();
         return;
     }
-    session->set_paused(true);
     ctx->dropped = true;
     // Do not rearm a heartbeat (including an already pending renewal) after
     // QUIT has begun. Timer and context ownership remain with the adapter.
     if (auto timer = std::move(ctx->heartbeat_timer)) timer->cancel();
     ctx->heartbeat_handler.reset();
     auto operation = std::make_shared<QuitOperation>();
-    operation->session = std::move(session); operation->router = m_shardRouter; operation->worker = m_workerThreadPool;
+    operation->session = session; operation->router = m_shardRouter; operation->worker = m_workerThreadPool;
     operation->mailboxes = mailbox_repository_; operation->locks = lock_repository_;
     operation->request = {ctx->user_id, ctx->mailbox_id, ctx->deleted};
     operation->key = {ctx->user_id, ctx->session_id}; operation->shard = ctx->shard_index;
+    operation->transition = engine_.begin_transition(session, Pop3State::UPDATE);
     operation->start();
 }
 

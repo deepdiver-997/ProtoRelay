@@ -2,7 +2,7 @@
 #define TRADITIONAL_SMTPS_FSM_H
 
 #include "framework/session_base.h"
-#include "framework/fsm_base.h"
+#include "framework/fsm/fsm_engine.h"
 #include "framework/storage/i_read_stream.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
@@ -11,6 +11,7 @@
 #include "mail_system/back/common/account_policy.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_desc.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
@@ -36,8 +37,15 @@ namespace mail_system {
 template <typename ConnectionType>
 class SmtpsSession;  // 前向声明
 
+// Holds the fsm engine instead of inheriting pr::FsmBase: dispatch, guard
+// replies and the transition write points now live in the engine (design
+// §3.2/§4 step 2a). Protocol behavior (handlers, policies, async wrappers) is
+// unchanged; the guard/handler tables moved to make_smtps_desc + register_.
 template <typename ConnectionType>
-class TraditionalSmtpsFsm : public pr::FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
+class TraditionalSmtpsFsm {
+public:
+    using Engine = pr::fsm::Engine<ConnectionType, SmtpsState, SmtpsEvent>;
+
 protected:
     std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
@@ -55,7 +63,9 @@ public:
         std::make_shared<LruCache<std::string, std::vector<std::string>>>(10000, std::chrono::seconds(300));
 
     std::shared_ptr<AccountPolicy> account_policy_;
+    Engine engine_;
 
+public:
     TraditionalSmtpsFsm(
         std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
         std::shared_ptr<pr::ThreadPoolBase> worker_thread_pool,
@@ -64,14 +74,18 @@ public:
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
         m_shardRouter(std::move(shard_router)),
-        m_persistentQueue(persistent_queue) {
+        m_persistentQueue(persistent_queue),
+        engine_(make_smtps_desc(/*allow_starttls=*/!std::is_same_v<ConnectionType, pr::SslConnection>)) {
         account_policy_ = std::make_shared<AccountPolicy>(m_shardRouter, m_authCache, m_workerThreadPool);
         account_policy_->set_recipient_caches(m_recipientCache, m_aliasCache);
-        init_transition_table();
-        init_state_handlers();
+        // 旧 on_invalid_transition 在回 500 之外还 set_error(InvalidCommand)；
+        // desc 的回复格式化器拿不到 session，经引擎 violation observer 补上。
+        engine_.set_violation_observer(
+            [](const Engine::SessionPtr& s) { s->set_error(pr::SessionError::InvalidCommand); });
+        register_handlers();
     }
 
-    ~TraditionalSmtpsFsm() override = default;
+    ~TraditionalSmtpsFsm() = default;
     void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
         account_policy_->set_authenticator(std::move(authenticator));
     }
@@ -116,7 +130,8 @@ public:
 
     // 每日发信配额：认证账号 MAIL FROM 时原子占用今日一个配额（条件 UPDATE + ROW_COUNT）。
     // 回调 allowed=true 表示占用成功（或配额关闭/DB 故障 fail-open）；false = 超限。
-    // 调用方负责 session pause 语义（与 SPF 检查一致：前置 set_paused(true)，回调起点恢复）。
+    // session pause 由调用方武定的引擎 Transition 承担（fsm 2b：包装不再自带 pause，
+    // 回调经 executor post 仍在连接线程执行）。
     void check_send_quota_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                 const std::string& mail_address,
                                 std::function<void(bool allowed)> cb);
@@ -129,12 +144,7 @@ private:
     bool persist_mails_sync(SmtpsSession<ConnectionType>* session, std::string& error);
     bool persist_and_reply(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
-    void init_transition_table();
-    void init_state_handlers();
-
-    bool is_terminal_state(SmtpsState s) const override;
-    void on_invalid_transition(SmtpsState s, SmtpsEvent e,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
+    void register_handlers();
 
     void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_greeting_ehlo(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
@@ -151,18 +161,26 @@ private:
     void handle_in_message_data_end(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // DATA_END 在 commit_body_async 回调（本地内联 / 远程 provider 线程）之后的
-    // 收尾：MIME 预解析（异步读）→ 入站校验 → 入队 + 250/451。
-    static void finish_data_end_after_commit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    // 收尾：MIME 预解析（异步读）→ 入站校验 → 入队 + 250/451。transition 是
+    // handle_in_message_data_end 武定的引擎转移（pause 即刻生效），全链出口经
+    // finish/finish_closing 收口。
+    static void finish_data_end_after_commit(
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+        std::shared_ptr<typename Engine::Transition> transition);
 
     // 在只读视图上做 MIME 预解析并写 sidecar。static：回调里无 this 可用。
     static void parse_and_save_mime_tree(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                          std::unique_ptr<pr::IReadStream> body_read);
 
     // MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
-    static void finish_data_end_after_read(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    static void finish_data_end_after_read(
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+        std::shared_ptr<typename Engine::Transition> transition);
     void handle_wait_quit_quit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_timeout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_error(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    // 空行（EMPTY 事件）：静默吞掉，自环收口续读。
+    void handle_empty(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 };
 
 } // namespace mail_system

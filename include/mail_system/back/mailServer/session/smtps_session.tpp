@@ -48,7 +48,9 @@ void SmtpsSession<ConnectionType>::start_after_starttls(std::shared_ptr<SmtpsSes
         [](std::shared_ptr<pr::SessionBase<ConnectionType>> s, const std::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("STARTTLS handshake failed: {}", ec.message()); return; }
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
-            s->set_next_event(static_cast<int>(SmtpsEvent::TIMEOUT));
+            // 防御性空输入占位（被真实命令的 parse 覆盖前若被派发，EMPTY 自环
+            // 静默吞掉；此前占位为 TIMEOUT，空行分离后统一 EMPTY 语义）
+            s->set_next_event(static_cast<int>(SmtpsEvent::EMPTY));
             LOG_SMTP_DETAIL_INFO("STARTTLS handshake complete, waiting for EHLO on TLS session");
             s->rearm(s->config_read_timeout());
             s->do_async_read();
@@ -535,7 +537,9 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
         trimmed = algorithm::trim(data);
 
         if (trimmed.empty()) {
-            next_event_ = SmtpsEvent::TIMEOUT;
+            // 空行 → EMPTY 事件（fsm 引擎分离，2026-10-26）：此前空行被重载成
+            // TIMEOUT 再靠 handle_timeout 的 handle_read("") 再解析分流。
+            next_event_ = SmtpsEvent::EMPTY;
             last_command_args_.clear();
             return;
         }
