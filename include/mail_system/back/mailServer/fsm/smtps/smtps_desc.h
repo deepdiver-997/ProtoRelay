@@ -52,6 +52,12 @@ inline pr::fsm::Desc<SmtpsState, SmtpsEvent> make_smtps_desc(bool allow_starttls
         {SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE},
         {SmtpsState::WAIT_DATA, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE},
         {SmtpsState::IN_MESSAGE, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE},
+        // DATA_END 双出口（同键两行，均为真实写点）：成功回 250 进下一事务的
+        // WAIT_MAIL_FROM（multiple_transactions 形态）；关断出口（552 超限 /
+        // commit 失败 451·550 / 持久化失败 451 / From 头规则 2·3 拒绝）经
+        // finish_closing 落 WAIT_QUIT 后写回复关连接。旧表单行 WAIT_QUIT 从未
+        // 覆盖成功路径 —— strict-guard 收集到的漂移点，2026-10-26 按真实行为修订。
+        {SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END, SmtpsState::WAIT_MAIL_FROM},
         {SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END, SmtpsState::WAIT_QUIT},
         {SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO},
     };

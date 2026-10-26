@@ -1240,7 +1240,11 @@ TEST(account_policy_completions_resume_on_connection_executor) {
             assert(ok && shard == 3);
             ++completed;
         });
-    assert(session->is_paused() && authenticator->pending && completed == 0);
+    // fsm 2b: the session pause belongs to the engine Transition the calling
+    // handler arms (exercised end-to-end by
+    // delayed_auth_and_quota_resume_buffered_pipeline); the wrapper itself is
+    // only the executor-marshal boundary under test here.
+    assert(!session->is_paused() && authenticator->pending && completed == 0);
     AccountAuthResult result;
     result.ok = true;
     result.shard = 3;

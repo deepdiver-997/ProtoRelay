@@ -130,7 +130,8 @@ public:
 
     // 每日发信配额：认证账号 MAIL FROM 时原子占用今日一个配额（条件 UPDATE + ROW_COUNT）。
     // 回调 allowed=true 表示占用成功（或配额关闭/DB 故障 fail-open）；false = 超限。
-    // 调用方负责 session pause 语义（与 SPF 检查一致：前置 set_paused(true)，回调起点恢复）。
+    // session pause 由调用方武定的引擎 Transition 承担（fsm 2b：包装不再自带 pause，
+    // 回调经 executor post 仍在连接线程执行）。
     void check_send_quota_async(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                 const std::string& mail_address,
                                 std::function<void(bool allowed)> cb);
@@ -160,15 +161,21 @@ private:
     void handle_in_message_data_end(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
     // DATA_END 在 commit_body_async 回调（本地内联 / 远程 provider 线程）之后的
-    // 收尾：MIME 预解析（异步读）→ 入站校验 → 入队 + 250/451。
-    static void finish_data_end_after_commit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    // 收尾：MIME 预解析（异步读）→ 入站校验 → 入队 + 250/451。transition 是
+    // handle_in_message_data_end 武定的引擎转移（pause 即刻生效），全链出口经
+    // finish/finish_closing 收口。
+    static void finish_data_end_after_commit(
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+        std::shared_ptr<typename Engine::Transition> transition);
 
     // 在只读视图上做 MIME 预解析并写 sidecar。static：回调里无 this 可用。
     static void parse_and_save_mime_tree(std::shared_ptr<pr::SessionBase<ConnectionType>> session,
                                          std::unique_ptr<pr::IReadStream> body_read);
 
     // MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
-    static void finish_data_end_after_read(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    static void finish_data_end_after_read(
+        std::shared_ptr<pr::SessionBase<ConnectionType>> session,
+        std::shared_ptr<typename Engine::Transition> transition);
     void handle_wait_quit_quit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_timeout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_error(std::shared_ptr<pr::SessionBase<ConnectionType>> session);

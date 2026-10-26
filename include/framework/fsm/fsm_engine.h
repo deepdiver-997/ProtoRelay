@@ -66,6 +66,24 @@ public:
             });
         }
 
+        // Complete with an explicit outcome target/reply: for async handlers
+        // whose exit state depends on the result (SMTP AUTH failure backs up
+        // to WAIT_AUTH while success advances to WAIT_MAIL_FROM — a single
+        // stashed target cannot express both). Same收口 as finish(ok), any
+        // thread.
+        void finish(State target, std::optional<std::string> reply = std::nullopt) {
+            if (!engine_ || !session_) return;
+            Engine* engine = engine_;
+            SessionPtr session = session_;
+            release();
+            if (session->is_closed()) return;
+            post(session, [engine, session, target,
+                           reply = std::move(reply)]() mutable {
+                if (session->is_closed()) return;
+                engine->settle(session, std::optional<State>(target), std::move(reply));
+            });
+        }
+
         // Reply an error line, then resume with the state unchanged.
         void fail(std::string error_reply) {
             if (!engine_ || !session_) return;
