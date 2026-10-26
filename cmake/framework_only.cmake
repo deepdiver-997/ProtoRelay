@@ -10,7 +10,7 @@
     target_link_libraries(h2web PRIVATE protorelay_h2 protorelay_runtime)
     if(BUILD_TESTS)
         enable_testing()
-        foreach(_test logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test)
+        foreach(_test ${PROTORELAY_FRAMEWORK_UNIT_TESTS})
             add_executable(${_test} test/unit/${_test}.cpp)
             target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
             target_link_libraries(${_test} PRIVATE protorelay_framework protorelay_runtime)
@@ -19,7 +19,7 @@
         endforeach()
         # Native (non-Asio) network backend: builds and runs in this reduced
         # configuration too — it must not depend on Boost/OpenSSL/spdlog.
-        foreach(_test native_poller_test native_runtime_test native_transport_test)
+        foreach(_test ${PROTORELAY_NATIVE_UNIT_TESTS})
             add_executable(${_test} test/unit/${_test}.cpp)
             target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
             target_link_libraries(${_test} PRIVATE protorelay_native_net)
@@ -87,8 +87,8 @@
         add_test(NAME quic_contract_test COMMAND quic_contract_test)
         set_tests_properties(quic_contract_test PROPERTIES TIMEOUT 20)
         list(APPEND NODE_UNIT_TESTS quic_contract_test)
-        add_custom_target(unit_tests DEPENDS logger_test std_thread_pool_test connection_interface_test server_transport_test metrics_core_test
-            native_poller_test native_runtime_test native_transport_test ${NODE_UNIT_TESTS})
+        add_custom_target(unit_tests DEPENDS ${PROTORELAY_FRAMEWORK_UNIT_TESTS}
+            ${PROTORELAY_NATIVE_UNIT_TESTS} ${NODE_UNIT_TESTS})
         if(TARGET protorelay_native_tls)
             add_dependencies(unit_tests native_tls_test)
         endif()

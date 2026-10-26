@@ -11,10 +11,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
     # 显式 target 列表缺了新增的 4 个测试，ctest 因二进制缺失而红）
     add_custom_target(unit_tests DEPENDS
-        logger_test
-        std_thread_pool_test
-        connection_interface_test
-        server_transport_test
+        ${PROTORELAY_FRAMEWORK_UNIT_TESTS}
         asio_executor_test
         asio_error_test
         asio_server_transport_test
@@ -42,7 +39,6 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         outbound_utils_test
         starttls_handoff_test
         pipeline_deferred_test
-        metrics_core_test
         bcrypt_test
         password_rehash_test
         safe_parse_test

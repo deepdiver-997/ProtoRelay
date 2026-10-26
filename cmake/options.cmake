@@ -144,3 +144,17 @@ add_compile_definitions(
     ENABLE_AUTH_DEBUG_LOG=${LOG_DEF}
 )
 
+
+# ===== 共享测试清单（CMake 卫生任务 4）=====
+# framework-only（PROTORELAY_BUILD_MAIL=OFF）与主分支注册同名测试，但链接集合
+# 不同（约简配置不依赖 Boost/OpenSSL/spdlog）——共享的是名单，不是注册块。
+set(PROTORELAY_FRAMEWORK_UNIT_TESTS
+    logger_test
+    std_thread_pool_test
+    connection_interface_test
+    server_transport_test
+    metrics_core_test)
+set(PROTORELAY_NATIVE_UNIT_TESTS
+    native_poller_test
+    native_runtime_test
+    native_transport_test)
