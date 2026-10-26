@@ -3,7 +3,7 @@
 
 #include "framework/session_base.h"
 #include "mail_system/back/common/account_authentication.h"
-#include "framework/fsm_base.h"
+#include "framework/fsm/fsm_engine.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/repository/mailbox_repository.h"
 #include "mail_system/back/repository/imap_mutation_repository.h"
@@ -14,6 +14,7 @@
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
+#include "mail_system/back/mailServer/fsm/imaps/imaps_desc.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/common/auth_cache.h"
@@ -56,9 +57,16 @@ struct MailboxListEntry {
     std::vector<MailboxMailInfo> mails;
 };
 
+// Holds the fsm engine instead of inheriting pr::FsmBase: dispatch, guard
+// replies, the exception barrier and the transition write points now live in
+// the engine (design §3.2/§4 step 3). The tagged BAD/NO replies (tag in the
+// session context) are wired via the engine's session-aware reply formatter.
+// Command handlers are unchanged; the guard/handler tables moved to
+// make_imaps_desc + register_handlers.
 template <typename ConnectionType>
-class TraditionalImapsFsm : public pr::FsmBase<ConnectionType, ImapState, ImapEvent> {
+class TraditionalImapsFsm {
 public:
+    using Engine = pr::fsm::Engine<ConnectionType, ImapState, ImapEvent>;
     using MailboxStatsCache = LruCache<std::string, MailboxCacheEntry>;
     using MailboxListCache = LruCache<std::string, MailboxListEntry>;
 
@@ -81,6 +89,7 @@ protected:
     std::shared_ptr<IImapAppendService> m_appendService;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
     std::shared_ptr<MailboxListCache> m_mailboxListCache;
+    Engine engine_;
     // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
     // 在途，其余并发 SELECT 挂到等待列表上（owner 完成后统一通知），防缓存
     // miss/stale 时 N 个连接各自查库打爆数据库。
@@ -97,15 +106,35 @@ public:
         std::shared_ptr<router::IShardRouter> shard_router
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
-        m_shardRouter(std::move(shard_router)) {
+        m_shardRouter(std::move(shard_router)),
+        engine_(make_imaps_desc(/*allow_starttls=*/!std::is_same_v<ConnectionType, pr::SslConnection>)) {
         authenticator_ = std::make_shared<AccountAuthenticationService>(
             m_shardRouter, m_authCache, m_workerThreadPool);
         m_appendService = make_imap_append_service(m_workerThreadPool, m_messageRepository);
-        init_transition_table();
-        init_state_handlers();
+        // tagged BAD/NO 需要回显 ctx 里的 tag（desc 是纯数据拿不到 session，
+        // 经引擎的 session 感知 formatter 注入；"* " 是旧实现 ctx 缺失时的形态）。
+        engine_.set_reply_formatter(
+            [](Engine::ReplyKind kind, const Engine::SessionPtr& session,
+               ImapState, ImapEvent) -> std::string {
+                const char* status = kind == Engine::ReplyKind::violation ? "BAD"
+                                   : kind == Engine::ReplyKind::missing   ? "BAD"
+                                                                          : "NO";
+                auto* ctx = session ? static_cast<ImapContext*>(session->get_context()) : nullptr;
+                std::string tag = ctx ? ctx->current_tag : "*";
+                switch (kind) {
+                case Engine::ReplyKind::violation:
+                    return tag + " BAD Invalid command sequence";
+                case Engine::ReplyKind::missing:
+                    return tag + " BAD Unsupported command in current state";
+                case Engine::ReplyKind::internal_error:
+                    return tag + " NO Internal server error";
+                }
+                return tag + " " + status;
+            });
+        register_handlers();
     }
 
-    ~TraditionalImapsFsm() override = default;
+    ~TraditionalImapsFsm() = default;
     void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
         if (authenticator) authenticator_ = std::move(authenticator);
     }
@@ -323,19 +352,7 @@ public:
 
 private:
     // 初始化
-    void init_transition_table();
-    void init_state_handlers();
-
-    // pr::FsmBase hooks
-    using BaseFsm = pr::FsmBase<ConnectionType, ImapState, ImapEvent>;
-    using Handler = typename BaseFsm::Handler;
-    bool is_terminal_state(ImapState s) const override;
-    void on_invalid_transition(ImapState s, ImapEvent e,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
-    void on_handler_not_found(ImapState s, ImapEvent e,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
-    void invoke_handler(Handler& h,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
+    void register_handlers();
 
     // ========== 状态处理器 ==========
     void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);

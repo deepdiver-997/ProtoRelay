@@ -69,140 +69,89 @@ void TraditionalImapsFsm<ConnectionType>::send_continuation(
 }
 
 // ====================================================================
-// 初始化：转换表 / 处理器
+// 初始化：守卫表在 make_imaps_desc()；这里只镜像处理器注册
 // ====================================================================
 
 template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
-    // INIT → NOT_AUTHENTICATED (on CONNECT)
-    this->add_transition(ImapState::INIT, ImapEvent::CONNECT, ImapState::NOT_AUTHENTICATED);
+void TraditionalImapsFsm<ConnectionType>::register_handlers() {
+    auto add = [this](ImapState s, ImapEvent e,
+                      void (TraditionalImapsFsm::*handler)(
+                          std::shared_ptr<pr::SessionBase<ConnectionType>>)) {
+        engine_.add_handler(s, e, [this, handler](std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
+            (this->*handler)(std::move(session));
+        });
+    };
+    // handle_fetch / handle_search 带 is_uid 实参（默认 false）
+    auto add_uid = [this](ImapState s, ImapEvent e,
+                          void (TraditionalImapsFsm::*handler)(
+                              std::shared_ptr<pr::SessionBase<ConnectionType>>, bool)) {
+        engine_.add_handler(s, e, [this, handler](std::shared_ptr<pr::SessionBase<ConnectionType>> session) {
+            (this->*handler)(std::move(session), false);
+        });
+    };
 
-    // NOT_AUTHENTICATED: stay on same state for most commands
-    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, ImapState::NOT_AUTHENTICATED);
-    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, ImapState::NOT_AUTHENTICATED); // may transition in handler
-    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, ImapState::NOT_AUTHENTICATED);
-    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, ImapState::NOT_AUTHENTICATED);
-    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, ImapState::LOGOUT);
-    if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
-        this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, ImapState::NOT_AUTHENTICATED);
-
-    // AUTHENTICATED
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::SELECT, ImapState::SELECTED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, ImapState::SELECTED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LIST, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LSUB, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CREATE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::DELETE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::RENAME, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::APPEND, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CHECK, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::NOOP, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::IDLE, ImapState::AUTHENTICATED);
-    // DONE 走 FSM 收口（同 IDLE：无 transition 则 dispatch 直接 BAD，handler 不可达）
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::DONE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, ImapState::LOGOUT);
-
-    // SELECTED
-    this->add_transition(ImapState::SELECTED, ImapEvent::FETCH, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::STORE, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::SEARCH, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::COPY, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::MOVE, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::UID, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::EXPUNGE, ImapState::SELECTED);
-    // RFC 3501 §6.3.1/§6.3.2：SELECT/EXAMINE 在 selected 态同样合法（切换邮箱）。
-    // 缺失导致 APPEND 等命令之后同会话 SELECT 直接落 BAD（2026-10-21 生产实测挂死链一环）。
-    this->add_transition(ImapState::SELECTED, ImapEvent::SELECT, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::EXAMINE, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::CHECK, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::CAPABILITY, ImapState::SELECTED);
-    // RFC 3501 §6：SELECTED 态可用 AUTHENTICATED 态全部命令，STATUS 也不例外
-    //（§6.3.10 仅要求不得用于"当前选中的邮箱"，见 handle_status 里的拒绝逻辑）。
-    // 缺注册导致选中邮箱后 STATUS 落 BAD，Thunderbird 等客户端轮询其他邮箱状态即挂。
-    this->add_transition(ImapState::SELECTED, ImapEvent::IMAP_STATUS, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::NOOP, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::APPEND, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::IDLE, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::DONE, ImapState::SELECTED);
-    this->add_transition(ImapState::SELECTED, ImapEvent::LOGOUT, ImapState::LOGOUT);
-
-    // ERROR / TIMEOUT everywhere (remain in current state)
-    for (int i = 0; i <= static_cast<int>(ImapState::SELECTED); ++i) {
-        auto s = static_cast<ImapState>(i);
-        this->add_transition(s, ImapEvent::ERROR, s);
-        this->add_transition(s, ImapEvent::TIMEOUT, s);
-    }
-}
-
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     // INIT
-    this->add_handler(ImapState::INIT, ImapEvent::CONNECT, [this](auto session) { handle_init_connect(session); });
+    add(ImapState::INIT, ImapEvent::CONNECT, &TraditionalImapsFsm::handle_init_connect);
 
     // NOT_AUTHENTICATED
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, &TraditionalImapsFsm::handle_capability);
+    // STARTTLS 行随连接类型门控（desc 侧 allow_starttls 同一条件）
     if constexpr (!std::is_same_v<ConnectionType, pr::SslConnection>)
-        this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, [this](auto session) { handle_starttls(session); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, [this](auto session) { handle_login(session); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, [this](auto session) { handle_authenticate(session); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
+        add(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, &TraditionalImapsFsm::handle_starttls);
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, &TraditionalImapsFsm::handle_login);
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, &TraditionalImapsFsm::handle_authenticate);
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, &TraditionalImapsFsm::handle_noop);
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, &TraditionalImapsFsm::handle_logout);
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::ERROR, &TraditionalImapsFsm::handle_error);
+    add(ImapState::NOT_AUTHENTICATED, ImapEvent::TIMEOUT, &TraditionalImapsFsm::handle_timeout);
 
     // AUTHENTICATED
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SELECT, [this](auto session) { handle_select(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, [this](auto session) { handle_examine(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LIST, [this](auto session) { handle_list(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LSUB, [this](auto session) { handle_lsub(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, [this](auto session) { handle_status(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CREATE, [this](auto session) { handle_create(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::DELETE, [this](auto session) { handle_delete(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::RENAME, [this](auto session) { handle_rename(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, [this](auto session) { handle_subscribe(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, [this](auto session) { handle_unsubscribe(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::APPEND, [this](auto session) { handle_append(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CHECK, [this](auto session) { handle_check(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CLOSE, [this](auto session) { handle_close(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
+    add(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, &TraditionalImapsFsm::handle_capability);
+    add(ImapState::AUTHENTICATED, ImapEvent::SELECT, &TraditionalImapsFsm::handle_select);
+    add(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, &TraditionalImapsFsm::handle_examine);
+    add(ImapState::AUTHENTICATED, ImapEvent::LIST, &TraditionalImapsFsm::handle_list);
+    add(ImapState::AUTHENTICATED, ImapEvent::LSUB, &TraditionalImapsFsm::handle_lsub);
+    add(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, &TraditionalImapsFsm::handle_status);
+    add(ImapState::AUTHENTICATED, ImapEvent::CREATE, &TraditionalImapsFsm::handle_create);
+    add(ImapState::AUTHENTICATED, ImapEvent::DELETE, &TraditionalImapsFsm::handle_delete);
+    add(ImapState::AUTHENTICATED, ImapEvent::RENAME, &TraditionalImapsFsm::handle_rename);
+    add(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, &TraditionalImapsFsm::handle_subscribe);
+    add(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, &TraditionalImapsFsm::handle_unsubscribe);
+    add(ImapState::AUTHENTICATED, ImapEvent::APPEND, &TraditionalImapsFsm::handle_append);
+    add(ImapState::AUTHENTICATED, ImapEvent::CHECK, &TraditionalImapsFsm::handle_check);
+    add(ImapState::AUTHENTICATED, ImapEvent::CLOSE, &TraditionalImapsFsm::handle_close);
+    add(ImapState::AUTHENTICATED, ImapEvent::NOOP, &TraditionalImapsFsm::handle_noop);
+    add(ImapState::AUTHENTICATED, ImapEvent::IDLE, &TraditionalImapsFsm::handle_idle);
     // DONE 走 FSM 统一收口（注销 IDLE 推送注册 + 重新 arm 看门狗 + 回 OK）。
     // 之前 DONE 无 handler，生产路径由 ImapsSession::process_read 内联处理，
     // handle_done 实际不可达：rearm 从未在真实 DONE 上发生（2026-10-22 IDLE
     // 推送改造时收口，见 imaps_session.tpp process_read）。
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
+    add(ImapState::AUTHENTICATED, ImapEvent::DONE, &TraditionalImapsFsm::handle_done);
+    add(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, &TraditionalImapsFsm::handle_logout);
+    add(ImapState::AUTHENTICATED, ImapEvent::ERROR, &TraditionalImapsFsm::handle_error);
+    add(ImapState::AUTHENTICATED, ImapEvent::TIMEOUT, &TraditionalImapsFsm::handle_timeout);
 
     // SELECTED
-    this->add_handler(ImapState::SELECTED, ImapEvent::FETCH, [this](auto session) { handle_fetch(session, false); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::STORE, [this](auto session) { handle_store(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::SEARCH, [this](auto session) { handle_search(session, false); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::COPY, [this](auto session) { handle_copy(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::MOVE, [this](auto session) { handle_move(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::UID, [this](auto session) { handle_uid(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::EXPUNGE, [this](auto session) { handle_expunge(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::SELECT, [this](auto session) { handle_select(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::EXAMINE, [this](auto session) { handle_examine(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::CLOSE, [this](auto session) { handle_close(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::CHECK, [this](auto session) { handle_check(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::APPEND, [this](auto session) { handle_append(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::IMAP_STATUS, [this](auto session) { handle_status(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::DONE, [this](auto session) { handle_done(session); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::DONE, [this](auto session) { handle_done(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
+    add_uid(ImapState::SELECTED, ImapEvent::FETCH, &TraditionalImapsFsm::handle_fetch);
+    add(ImapState::SELECTED, ImapEvent::STORE, &TraditionalImapsFsm::handle_store);
+    add_uid(ImapState::SELECTED, ImapEvent::SEARCH, &TraditionalImapsFsm::handle_search);
+    add(ImapState::SELECTED, ImapEvent::COPY, &TraditionalImapsFsm::handle_copy);
+    add(ImapState::SELECTED, ImapEvent::MOVE, &TraditionalImapsFsm::handle_move);
+    add(ImapState::SELECTED, ImapEvent::UID, &TraditionalImapsFsm::handle_uid);
+    add(ImapState::SELECTED, ImapEvent::EXPUNGE, &TraditionalImapsFsm::handle_expunge);
+    add(ImapState::SELECTED, ImapEvent::SELECT, &TraditionalImapsFsm::handle_select);
+    add(ImapState::SELECTED, ImapEvent::EXAMINE, &TraditionalImapsFsm::handle_examine);
+    add(ImapState::SELECTED, ImapEvent::CLOSE, &TraditionalImapsFsm::handle_close);
+    add(ImapState::SELECTED, ImapEvent::CHECK, &TraditionalImapsFsm::handle_check);
+    add(ImapState::SELECTED, ImapEvent::APPEND, &TraditionalImapsFsm::handle_append);
+    add(ImapState::SELECTED, ImapEvent::CAPABILITY, &TraditionalImapsFsm::handle_capability);
+    add(ImapState::SELECTED, ImapEvent::IMAP_STATUS, &TraditionalImapsFsm::handle_status);
+    add(ImapState::SELECTED, ImapEvent::NOOP, &TraditionalImapsFsm::handle_noop);
+    add(ImapState::SELECTED, ImapEvent::IDLE, &TraditionalImapsFsm::handle_idle);
+    add(ImapState::SELECTED, ImapEvent::DONE, &TraditionalImapsFsm::handle_done);
+    add(ImapState::SELECTED, ImapEvent::LOGOUT, &TraditionalImapsFsm::handle_logout);
+    add(ImapState::SELECTED, ImapEvent::ERROR, &TraditionalImapsFsm::handle_error);
+    add(ImapState::SELECTED, ImapEvent::TIMEOUT, &TraditionalImapsFsm::handle_timeout);
 }
 
 // ====================================================================
@@ -229,51 +178,12 @@ void TraditionalImapsFsm<ConnectionType>::process_event(
         ctx->current_tag = tag;
     }
 
-    this->dispatch(session, static_cast<ImapState>(session->get_current_state()), event);
+    engine_.dispatch(session, event);
 }
-template <typename ConnectionType>
-bool TraditionalImapsFsm<ConnectionType>::is_terminal_state(ImapState s) const {
-    return s == ImapState::LOGOUT || s == ImapState::CLOSED;
-}
-
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::on_invalid_transition(
-    ImapState, ImapEvent,
-    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
-{
-    auto* ctx = static_cast<ImapContext*>(session->get_context());
-    send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Invalid command sequence");
-}
-
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::on_handler_not_found(
-    ImapState, ImapEvent,
-    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
-{
-    auto* ctx = static_cast<ImapContext*>(session->get_context());
-    send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Unsupported command in current state");
-}
-
-template <typename ConnectionType>
-void TraditionalImapsFsm<ConnectionType>::invoke_handler(
-    typename pr::FsmBase<ConnectionType, ImapState, ImapEvent>::Handler& h,
-    std::shared_ptr<pr::SessionBase<ConnectionType>> session)
-{
-    try {
-        h(session);
-    } catch (const std::exception& e) {
-        auto* ctx = static_cast<ImapContext*>(session->get_context());
-        LOG_IMAP_ERROR("IMAP handler exception: {} tag={}", e.what(),
-                       ctx ? ctx->current_tag : "?");
-        send_tagged(session, ctx ? ctx->current_tag : "*", "NO", "Internal server error");
-    } catch (...) {
-        auto* ctx = static_cast<ImapContext*>(session->get_context());
-        LOG_IMAP_ERROR("IMAP handler unknown exception tag={}",
-                       ctx ? ctx->current_tag : "?");
-        send_tagged(session, ctx ? ctx->current_tag : "*", "NO", "Internal server error");
-    }
-}
-
+// 终态集合 {LOGOUT, CLOSED}、tagged BAD（violation/missing）、tagged NO
+// （handler 异常屏障）都在 make_imaps_desc + 引擎 reply formatter 内
+// （原 is_terminal_state / on_invalid_transition / on_handler_not_found /
+// invoke_handler 覆写全部删除，语义由引擎内建承接）。
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::auto_process_event(
@@ -282,20 +192,16 @@ void TraditionalImapsFsm<ConnectionType>::auto_process_event(
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     if (!ctx) return;
 
-    // 如果是 IDLE 状态的特殊处理
+    // IDLE 态的输入只可能是 DONE（session handle_read 拦截）：走真实 DONE
+    // 事件派发，与 AUTHENTICATED/SELECTED 的 DONE handler 同一条收口路径
+    // （原直接调 handle_done 的绕行消失）。
     if (ctx->idle_mode) {
-        handle_done(session);
+        engine_.dispatch(session, ImapEvent::DONE);
         return;
     }
 
-    // 从 session 获取待处理事件
-    // 注意：session 中 event 和 args 在 parse 阶段已设置好
-    // 这里需要一个适配: 从 session 获取 event type 和 args
-    // ImapsSession 会在 parse 时设置这些值
-    // 但现在 process_event 签名多了 tag 参数，auto_process_event 需要适配
-
-    // 对于 IMAP，会话解析完命令后直接调用 process_event，
-    // 这里留空作为兼容接口
+    // 对于 IMAP，会话解析完命令后直接调用 process_event（带 tag），
+    // 这里留空作为兼容接口。
 }
 
 // ====================================================================
@@ -307,20 +213,9 @@ template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_init_connect(
     std::shared_ptr<pr::SessionBase<ConnectionType>> session)
 {
-    session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-
-    // 发送 IMAP 欢迎语
-    session->do_async_write("* OK IMAP4rev1 Server Ready\r\n",
-        [](std::shared_ptr<pr::SessionBase<ConnectionType>> self,
-           const std::error_code& ec) mutable {
-            if (ec) {
-                LOG_IMAP_ERROR("Error sending IMAP greeting: {}", ec.message());
-                return;
-            }
-            LOG_IMAP_DEBUG("Sent IMAP greeting, waiting for commands...");
-            self->do_async_read();
-        }
-    );
+    // banner 文本在 desc.greeting；引擎 start() 写出后收口落
+    // NOT_AUTHENTICATED（CONNECT 时命令缓冲必空，drain 无害）。
+    engine_.start(session, ImapState::NOT_AUTHENTICATED);
 }
 
 // ---------- CAPABILITY ----------
@@ -399,19 +294,23 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
 
     // bcrypt 是几十到几百毫秒的纯 CPU：绝不能在共享 io 线程上算 ——
     // 那会把同线程上所有其他会话的读写/握手/定时器全部卡住。
-    // pause 后把「查 DB + 验密码」整体丢给 worker 线程池；回调在 worker
-    // 线程触发，pause 期间独占 session（SPF/DNS/commit 回调同一约定）。
-    // 登录者自己的延迟不变（bcrypt 该算多久还是多久），变的是别人不再陪等。
+    // 验证窗口由引擎 Transition 占据（武定即 pause）：把「查 DB + 验密码」
+    // 整体丢给 worker 线程池；回调在 worker 线程触发，pause 期间独占 session
+    // （SPF/DNS/commit 回调同一约定）。成功出口 stash AUTHENTICATED + tagged OK；
+    // 失败显式回 NOT_AUTHENTICATED + tagged NO（自环，但回复文本依赖结果）；
+    // 超限直接 close，转移不收口（POP3/SMTP 同款）。
     auto authenticator = this->authenticator_;
     auto worker = this->m_workerThreadPool;
     if (!worker) {
         send_tagged(session, tag, "NO", "Server not ready");
         return;
     }
-    session->set_paused(true);
+    auto transition = std::make_shared<typename Engine::Transition>(
+        engine_.begin_transition(session, ImapState::AUTHENTICATED,
+                                 std::string(tag) + " OK " + ok_text));
     auto self = session->shared_from_this();
     worker->post(
-        [self, tag, username = std::move(username), password = std::move(password),
+        [self, transition, tag, username = std::move(username), password = std::move(password),
          authenticator, ok_text, fail_text]() mutable {
             // 委托应用认证服务，完成后继续协议响应。
             // 底层 MySQL async_* 是默认同步包装（回调内联执行），链在 worker
@@ -419,7 +318,7 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
             // shared ScopedConnection 保活，调用方结构无需改动。
             TraditionalImapsFsm<ConnectionType>::auth_user_async(
                 authenticator, username, password,
-                [self, tag, username = username, ok_text, fail_text](
+                [self, transition, tag, username = username, ok_text, fail_text](
                     bool ok, uint64_t user_id, int shard) mutable {
                     if (!self || self->is_closed()) return;
                     if (ok) {
@@ -431,18 +330,17 @@ void TraditionalImapsFsm<ConnectionType>::start_auth_verify(
                             c->shard_index = shard;
                         }
                         self->set_authenticated(true); // close()/trace/metrics 不能等析构才同步
-                        self->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
-                        send_tagged(self, tag, "OK", ok_text);
                         LOG_IMAP_INFO("IMAP login successful: {} (user_id={})", username, user_id);
+                        transition->finish(true);   // stash: AUTHENTICATED + tagged OK
                     } else {
                         LOG_IMAP_WARN("IMAP login failed: {}", username);
                         if (self->record_auth_failure_and_check()) {
                             self->close_after_flush();   // 阈值关闭走 io 线程,且不与在途写竞争
                             return;
                         }
-                        send_tagged(self, tag, "NO", fail_text);
+                        transition->finish(ImapState::NOT_AUTHENTICATED,
+                                           std::string(tag) + " NO " + fail_text);
                     }
-                    self->drain_buffered_commands();
                 });
         });
 }
@@ -534,7 +432,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
     ctx->clear();
 
     session->set_trace_clean_close();   // 正常 LOGOUT → 连接追踪丢弃
-    session->set_current_state(static_cast<int>(ImapState::LOGOUT));
+    // 完成即落终态（LOGOUT 是终态集合成员）：apply_closing 不 drain 不续读，
+    // 缓冲命令随连接死掉；BYE + tagged OK 写完后由回调定时 close。
+    engine_.apply_closing(session, ImapState::LOGOUT);
 
     std::string response = "* BYE IMAP4rev1 Server logging out\r\n";
     response += current_tag + " OK LOGOUT completed\r\n";
@@ -2092,7 +1992,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
     }
-    session->set_paused(true);
+    // APPEND 在 AUTHENTICATED/SELECTED 都是自环（进入态即离开态）；验证窗口
+    // 由引擎 Transition 占据（武定即 pause）。目标武定为进入态（自环写回同值
+    // 无害，strict-guard 的 from==target 直接过）；出口回复依赖结果，用显式
+    // 目标 finish / fail。
+    const auto entry_state = static_cast<ImapState>(session->get_current_state());
+    auto transition = std::make_shared<typename Engine::Transition>(
+        engine_.begin_transition(session, entry_state));
     auto self = session->shared_from_this();
     ImapAppendRequest request;
     request.user_id = ctx->user_id;
@@ -2102,36 +2008,41 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
     request.authenticated_address = ctx->username;
     const auto user_id = request.user_id;
     find_mailbox_id_async(conn, user_id, mailbox_name,
-        [this, self, conn, tag = std::move(tag), request = std::move(request)](uint64_t mailbox_id) mutable {
+        [this, self, transition, conn, tag = std::move(tag), entry_state,
+         request = std::move(request)](uint64_t mailbox_id) mutable {
             if (self->is_closed()) return;
             if (!mailbox_id) {
-                self->get_connection().executor()->post([self, tag = std::move(tag)] {
+                // 出口保持在连接 executor 上串行（旧 post 结构不变；缓存失效
+                // 与回复必须晚于回调返回，imaps_fsm_test 契约断言）。
+                self->get_connection().executor()->post([self, transition, tag = std::move(tag)] {
                     if (self->is_closed()) return;
-                    send_tagged(self, tag, "NO", "APPEND failed: mailbox not found");
-                    self->drain_buffered_commands();
+                    transition->fail(tag + " NO APPEND failed: mailbox not found");
                 });
                 return;
             }
             const auto user = request.user_id;
             request.mailbox_id = mailbox_id;
             m_appendService->append_async(conn, get_storage(0), std::move(request),
-                [this, self, tag = std::move(tag), user, mailbox_id](ImapAppendResult result) mutable {
+                [this, self, transition, tag = std::move(tag), user, mailbox_id, entry_state]
+                (ImapAppendResult result) mutable {
                     if (self->is_closed()) return;
                     self->get_connection().executor()->post(
-                        [this, self, tag = std::move(tag), user, mailbox_id, result = std::move(result)]() mutable {
+                        [this, self, transition, tag = std::move(tag), user, mailbox_id, entry_state,
+                         result = std::move(result)]() mutable {
                             if (self->is_closed()) return;
                             invalidate_mailbox_list(user, mailbox_id);
                             if (!result.ok) {
                                 if (!result.cleanup_complete) LOG_IMAP_ERROR("APPEND: rollback incomplete, orphan may remain");
-                                if (result.error == "Server not ready") send_tagged(self, tag, "NO", result.error);
-                                else send_tagged(self, tag, "NO", "[SERVERBUG] APPEND failed" +
-                                    (result.error.empty() ? std::string{} : ": " + result.error));
+                                if (result.error == "Server not ready")
+                                    transition->fail(tag + " NO " + result.error);
+                                else
+                                    transition->fail(tag + " NO [SERVERBUG] APPEND failed" +
+                                        (result.error.empty() ? std::string{} : ": " + result.error));
                             } else {
-                                const std::string response = tag + " OK [APPENDUID " + std::to_string(mailbox_id)
-                                    + " " + std::to_string(result.mail_id) + "] APPEND completed\r\n";
-                                self->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
+                                transition->finish(entry_state,
+                                    tag + " OK [APPENDUID " + std::to_string(mailbox_id)
+                                        + " " + std::to_string(result.mail_id) + "] APPEND completed");
                             }
-                            self->drain_buffered_commands();
                         });
                 });
         });

@@ -40,6 +40,16 @@ public:
     using SessionPtr = std::shared_ptr<SessionBase<ConnectionType>>;
     using Handler = std::function<void(SessionPtr)>;
 
+    // Which fallback chain a reply_formatter entry overrides. The desc's
+    // formatters are pure functions of (state, event) — they cannot reach
+    // per-session data (IMAP's tag lives in the context); a protocol FSM
+    // registers this session-aware hook instead. Return "" to fall through
+    // to the desc chain (format_violation/format_missing → error_policy /
+    // internal_error_reply).
+    enum class ReplyKind { violation, missing, internal_error };
+    using ReplyFormatter =
+        std::function<std::string(ReplyKind, const SessionPtr&, State, Event)>;
+
     class Transition {
     public:
         Transition() = default;
@@ -174,6 +184,11 @@ public:
     void set_violation_observer(std::function<void(SessionPtr)> hook) {
         violation_observer_ = std::move(hook);
     }
+    // Session-aware reply override (e.g. IMAP's tag echo on BAD/NO). See
+    // ReplyKind for the fallback chain.
+    void set_reply_formatter(ReplyFormatter hook) {
+        reply_formatter_ = std::move(hook);
+    }
     // Guard-table drift check (design §3.2-3): apply/finish abort when the
     // written target is not the `to` of any guard row leaving the current
     // state. Off by default; PR_FSM_STRICT_GUARDS=1 flips the default.
@@ -204,7 +219,7 @@ public:
         }
         const auto handler = handlers_.find({current, event});
         if (handler == handlers_.end()) {
-            write_reply(session, missing_reply(current, event));
+            write_reply(session, missing_reply(current, event, session));
             bump_error_budget(session);
             return;
         }
@@ -219,12 +234,12 @@ public:
             LOG_SESSION_ERROR("FSM handler threw (state={} event={}): {}",
                               std::string(desc_.name_of(current)),
                               std::string(desc_.name_of(event)), error.what());
-            write_reply(session, desc_.internal_error_reply);
+            write_reply(session, internal_error_reply(current, event, session));
         } catch (...) {
             LOG_SESSION_ERROR("FSM handler threw a non-standard exception (state={} event={})",
                               std::string(desc_.name_of(current)),
                               std::string(desc_.name_of(event)));
-            write_reply(session, desc_.internal_error_reply);
+            write_reply(session, internal_error_reply(current, event, session));
         }
     }
 
@@ -304,7 +319,7 @@ private:
 
     void violate(const SessionPtr& session, State state, Event event) {
         if (violation_observer_) violation_observer_(session);
-        write_reply(session, violation_reply(state, event));
+        write_reply(session, violation_reply(state, event, session));
         bump_error_budget(session);
     }
 
@@ -326,19 +341,38 @@ private:
         session->do_async_write(out, nullptr);
     }
 
-    std::string violation_reply(State state, Event event) const {
+    std::string violation_reply(State state, Event event, const SessionPtr& session) const {
+        if (reply_formatter_) {
+            std::string formatted =
+                reply_formatter_(ReplyKind::violation, session, state, event);
+            if (!formatted.empty()) return formatted;
+        }
         if (desc_.format_violation) {
             std::string formatted = desc_.format_violation(state, event);
             if (!formatted.empty()) return formatted;
         }
         return desc_.error_policy.reply;
     }
-    std::string missing_reply(State state, Event event) const {
+    std::string missing_reply(State state, Event event, const SessionPtr& session) const {
+        if (reply_formatter_) {
+            std::string formatted =
+                reply_formatter_(ReplyKind::missing, session, state, event);
+            if (!formatted.empty()) return formatted;
+        }
         if (desc_.format_missing) {
             std::string formatted = desc_.format_missing(state, event);
             if (!formatted.empty()) return formatted;
         }
         return desc_.error_policy.reply;
+    }
+    std::string internal_error_reply(State state, Event event,
+                                     const SessionPtr& session) const {
+        if (reply_formatter_) {
+            std::string formatted =
+                reply_formatter_(ReplyKind::internal_error, session, state, event);
+            if (!formatted.empty()) return formatted;
+        }
+        return desc_.internal_error_reply;
     }
 
     void bump_error_budget(const SessionPtr& session) {
@@ -366,6 +400,7 @@ private:
     std::function<void(State, Event, SessionPtr)> event_begin_;
     std::function<void(State, Event, SessionPtr)> pre_dispatch_;
     std::function<void(SessionPtr)> violation_observer_;
+    ReplyFormatter reply_formatter_;
     bool strict_guards_ = false;
 };
 
