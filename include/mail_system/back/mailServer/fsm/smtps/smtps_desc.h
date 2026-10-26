@@ -37,8 +37,10 @@ inline pr::fsm::Desc<SmtpsState, SmtpsEvent> make_smtps_desc(bool allow_starttls
         {SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_USERNAME},
         {SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH, SmtpsState::WAIT_MAIL_FROM},
         {SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH},
+        // USERNAME 步只做解码 + 334 提示，恒去 WAIT_AUTH_PASSWORD——验证与
+        // 失败回退发生在 PASSWORD 步（"每键一行、每行有写入者"审计，
+        // 2026-10-26：此处曾有一行幻觉出口 → WAIT_AUTH，已删）。
         {SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_PASSWORD},
-        {SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH},
         {SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH, SmtpsState::WAIT_MAIL_FROM},
         {SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH},
         // MAIL FROM：成功出口进 RCPT 阶段；策略拒绝（530/550/501）回
