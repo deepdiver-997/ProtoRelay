@@ -1,0 +1,68 @@
+# ================================================================
+# 输出目录 / setup_mail_target / 模块表（原样拆出）
+# ================================================================
+# ===== 输出目录 =====
+set(TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
+file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
+
+# ================================================================
+# setup_mail_target — 为 target 注入公共 include/lib
+# ================================================================
+function(setup_mail_target NAME)
+    target_include_directories(${NAME} PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(${NAME} PRIVATE "${CMAKE_BINARY_DIR}/generated")
+    target_include_directories(${NAME} PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
+    target_include_directories(${NAME} PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    target_compile_features(${NAME} PRIVATE cxx_std_17)
+    target_compile_definitions(${NAME} PRIVATE
+        PROTORELAY_HAS_SPDLOG=${PROTORELAY_HAS_SPDLOG}
+        PROTORELAY_LOG_NONE=${PROTORELAY_LOG_NONE})
+
+    if(SYSROOT_INCLUDE)
+        target_include_directories(${NAME} BEFORE PRIVATE SYSTEM ${SYSROOT_INCLUDE})
+    endif()
+    if(BUILD_OBJECT_ONLY AND MYSQL_INCLUDE_DIRS)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+    endif()
+    if(BUILD_OBJECT_ONLY AND MARIADB_INCLUDE_DIR)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${MARIADB_INCLUDE_DIR})
+        target_compile_definitions(${NAME} PRIVATE HAVE_MARIADB=1)
+    endif()
+    if(BUILD_OBJECT_ONLY AND CARES_INCLUDE_DIRS)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
+    endif()
+    if(CARES_LIBRARY_DIRS AND NOT BUILD_OBJECT_ONLY)
+        target_link_directories(${NAME} PRIVATE ${CARES_LIBRARY_DIRS})
+    endif()
+    if(USE_SSL)
+        if(DEFINED OPENSSL_INCLUDE_DIRS AND OPENSSL_INCLUDE_DIRS)
+            target_include_directories(${NAME} PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIRS})
+        elseif(DEFINED OPENSSL_INCLUDE_DIR AND OPENSSL_INCLUDE_DIR)
+            target_include_directories(${NAME} PRIVATE SYSTEM ${OPENSSL_INCLUDE_DIR})
+        endif()
+    endif()
+    if(ENABLE_HDFS_WEB_STORAGE AND CURL_FOUND)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${CURL_INCLUDE_DIRS})
+    endif()
+    if(NOT BUILD_OBJECT_ONLY)
+        target_link_libraries(${NAME} PRIVATE protorelay_logging Threads::Threads nlohmann_json::nlohmann_json)
+        if(USE_SSL)
+            target_link_libraries(${NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+        endif()
+        if(NAME IN_LIST PROTORELAY_MAIL_TARGETS)
+            target_link_libraries(${NAME} PRIVATE protorelay_mail_protocols)
+        elseif(NAME STREQUAL "smtp_client_test" OR NAME STREQUAL "smtp_submitter_test")
+            target_link_libraries(${NAME} PRIVATE protorelay_smtp_client)
+        elseif(NAME STREQUAL "thread_pool_test")
+            target_link_libraries(${NAME} PRIVATE protorelay_runtime)
+        endif()
+    endif()
+    if(ENABLE_INBOUND_DEDUP_CHECK)
+        target_compile_definitions(${NAME} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=1)
+    else()
+        target_compile_definitions(${NAME} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=0)
+    endif()
+endfunction()
+
+include(cmake/ProtoRelayModules.cmake)
