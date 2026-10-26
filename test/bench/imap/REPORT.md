@@ -345,3 +345,72 @@ value`（SMTP 路径的 build_insert_mail 一直用 FROM_UNIXTIME，唯独这条
 外部直插 DB（模拟 SMTP 投递）TTL 后自愈可见 ✓；进程内 APPEND 立即可见 ✓；
 STORE \Deleted FLAGS 立即可见 ✓；EXPUNGE 立即摘除 ✓。
 ctest 24/24；ASan 压测 0 报告、tripwire 0 触发。
+
+## 2026-10-26 — IMAP FSM 迁移后读路径复测（main@45e5663）
+
+### 测试条件（边界）
+
+```
+构建:      Release (-O3 -DNDEBUG)
+服务端:    imapsServer -c test/config/imaps_real.json
+           20103/tcp（无鉴权）；use_database=true → 本机 MySQL `mail_agent_1`
+           （unix socket）；local storage（/tmp/protorelay_agent_1/protorelay_test）；
+           perf_mode=true；4 io + 4 worker
+数据:      5 个 bench 账号（test2/t1/test@scut.email、alice@a.local、bob@b.local），
+           每人 INBOX 200 封 × 2KB body（seed_imap_data.py INSERT IGNORE 幂等，
+           body 文件落在 storage/mail/，与 SMTP 压测目录隔离）
+每轮:      LOGIN（每连接一次）→ SELECT INBOX → FETCH 1:200 (FLAGS RFC822.SIZE)
+           读路径不产生新数据
+预热:      建号密码为明文，首次 LOGIN 触发 rehash-to-bcrypt + 账号缓存——
+           所有 ramp 前已对 5 个账号各做一次人工 LOGIN，测量不含 rehash 成本
+机器:      Apple M2 Pro 12 核 / 16GB / macOS 15.8.1
+```
+
+### FETCH 1:200 吞吐
+
+| 并发连接 | rounds/s | P50 (ms) | P95 (ms) | P99 (ms) |
+|---------|----------|----------|----------|----------|
+| 1 | 1075 | 0.78 | 0.93 | 1.05 |
+| 4 | 3105 | 1.11 | 1.61 | 1.76 |
+| 16 | 3301 | 4.54 | 5.66 | 6.20 |
+| 64 | 3432 | 4.49 | 5.65 | 6.11 |
+
+对照 2026-08-29（同规模邮箱、mysql sync）：天花板 ~1950 → **~3400（+70%）**，
+封顶形态仍在（并发 > io 线程数后吞吐走平、延迟线性涨）。提升是 8/29 以来读路径
+累计改造的合并效果（fetch_drive 续作链迭代化 + 异步 storage + 元数据缓存 + FSM 迁移）。
+
+### SELECT-only 对照（stats 缓存路径）
+
+| 并发 | 2026-10-26 | 2026-08-29 | Δ |
+|------|-----------|------------|---|
+| 4 | 18,022 | 44,663 | **-60%** |
+| 16 | 21,383 | 91,072 | **-77%** |
+
+**回归证据**（SELECT c16 负载下 `sample` 5s 调用树）：
+
+```
+Engine::dispatch → handle_select                        3475 采样
+  └ find_mailbox_id_async → SqlMailboxRepository
+      └ IDBConnection::async_query → mysql_stmt_execute 1004 采样（等 DB 应答）
+  └ get_mailbox_stats_cached_async                        44 采样（缓存命中路径）
+```
+
+即**现在每次 SELECT 都对 DB 发一条 mailbox id 查询**，命中缓存之前先过一次
+`mysql_stmt_execute`。8/29 基线 91K rps 的前提是 SELECT 近零 DB——当时 mailbox id
+解析不在每轮路径上（回归窗口在 8/29 之后的 mailbox repository / FSM 迁移改造中，
+未逐提交定位）。**本轮只记录不修**；修复方向：session 级缓存 mailbox id
+（会话内重复 SELECT 同一邮箱是主流形态），或与 stats 同一个 TTL 缓存。
+
+### FETCH 热点（64 并发负载，`sample` 8s）
+
+| 采样计数 | 热点函数 |
+|---------|---------|
+| 23779 | `__psynch_cvwait` |
+| 15917 | `stat`（每轮 200 封 × object_size，元数据缓存仍以 stat 校验有效性） |
+| 7429 | `kevent` |
+| 5471 | `recvfrom` |
+| 2744 | `bf_encrypt`（读路径 Blowfish 解密） |
+| 127 | `fetch_drive`（迭代化后已不是热点） |
+
+下一轮优化目标按采样序：① SELECT 的 mailbox id 查询缓存化（修复上表回归）；
+② object_size 的 stat 校验降频；③ bf_encrypt 占 FETCH 路径 ~8% 采样，评估必要性。
