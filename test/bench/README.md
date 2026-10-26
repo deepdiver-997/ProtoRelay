@@ -37,6 +37,17 @@ test/bench/
 消息量、象限选择、ack 模式、入队上限、本地 IP 列表）用环境变量覆盖。默认值对齐
 各 REPORT.md 最近一轮的口径，直接跑即可复现。结果打 stdout，誊进对应 REPORT.md。
 
+**per-conn 大并发的前置条件（仅 SMTP）**：macOS 单个回环 IP 只有 16K ephemeral
+端口（TIME_WAIT 30s ≈ 546 新建连接/秒/IP），端口池耗尽会伪装成服务端崩塌。跑
+象限 1/3 前挂一次性别名（重启失效，不持久化）：
+
+```bash
+for i in $(seq 2 17); do sudo ifconfig lo0 alias 127.0.0.$i 255.255.255.255 up; done
+```
+
+然后 `LOCAL_IPS=127.0.0.2,127.0.0.3,... bash test/bench/smtp/round.sh`。round.sh
+预检 LOCAL_IPS：缺别名会直接退出并原样打印缺的那几条补挂命令。
+
 
 ## 快速开始
 

@@ -16,8 +16,8 @@
 #   T_PERCONN       per-conn 线程 ramp（默认 "1 2 4 8 16"）
 #   T_REUSE         reuse 线程 ramp（默认 "1 2 4 8 16 32 64"）
 #   LOCAL_IPS       逗号分隔回环地址，透传 --local-ips（每 worker 绑一个 IP 扩
-#                   四元组空间）。macOS 默认只能绑 127.0.0.1，其余地址需一次性
-#                   sudo ifconfig lo0 alias 127.0.0.X up；脚本预检不可绑则告警跳过
+#                   四元组空间，每 IP 独立 16K 端口池）。地址需先挂 lo0 别名
+#                   （一次性，重启失效）；预检发现缺别名会退出并打印补挂命令
 #   QUADRANTS       跑哪些象限（默认 "1 2 3 4"；只关心满吞吐给 "4"）
 #   SKIP_DRAIN=1    跳过 per-conn 象限后的 TIME_WAIT 排空（不推荐）
 #
@@ -68,11 +68,11 @@ PY
 echo "SMTP round: config=$EFF_CONFIG port=$PORT storage=$MAIL_DIR overrides=$EFFECTIVE"
 case "$MAIL_DIR" in ""|"/"|"$HOME") echo "拒绝清空可疑存储目录: $MAIL_DIR" >&2; exit 1;; esac
 
-# ── LOCAL_IPS 预检：可绑才透传 ─────────────────────────────────────────
+# ── LOCAL_IPS 预检：缺别名直接退出并给出补挂命令（不做开机持久化） ────────
 LOCAL_IPS="${LOCAL_IPS:-}"
 IPS_ARGS=()
 if [[ -n "$LOCAL_IPS" ]]; then
-    ok_ips=()
+    ok_ips=(); missing=()
     IFS=',' read -ra cand <<< "$LOCAL_IPS"
     for ip in "${cand[@]}"; do
         if python3 - "$ip" <<'PY'
@@ -82,9 +82,24 @@ try: s.bind((sys.argv[1], 0))
 except OSError: sys.exit(1)
 s.close()
 PY
-        then ok_ips+=("$ip"); else echo "⚠ $ip 不可绑（macOS 需 sudo ifconfig lo0 alias $ip up），跳过" >&2; fi
+        then ok_ips+=("$ip"); else missing+=("$ip"); fi
     done
-    [[ ${#ok_ips[@]} -gt 0 ]] && IPS_ARGS=(--local-ips "$(IFS=,; echo "${ok_ips[*]}")")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "以下回环地址缺别名（${#missing[@]} 个），无法扩四元组空间，退出：" >&2
+        echo "  ${missing[*]}" >&2
+        echo "补挂（一次性，重启失效；每 IP 独立扩 16K 端口池）：" >&2
+        for ip in "${missing[@]}"; do
+            echo "  sudo ifconfig lo0 alias $ip 255.255.255.255 up" >&2
+        done
+        echo "或批量补挂 2..17:" >&2
+        echo '  for i in $(seq 2 17); do sudo ifconfig lo0 alias 127.0.0.$i 255.255.255.255 up; done' >&2
+        echo "不挂别名也可去掉 LOCAL_IPS 用 127.0.0.1 继续（per-conn t≥8 会受端口池限制）。" >&2
+        exit 1
+    fi
+    IPS_ARGS=(--local-ips "$(IFS=,; echo "${ok_ips[*]}")")
+elif [[ " $QUADRANTS " == *" 1 "* || " $QUADRANTS " == *" 3 "* ]]; then
+    echo "提示: per-conn 象限受单 IP 16K 端口池限制（≈546 连接/秒/IP，t≥8 会塌）。"
+    echo "      挂别名后可用 LOCAL_IPS=127.0.0.2,127.0.0.3,... 破除，详见 smtp/REPORT.md。"
 fi
 
 # ── 服务端生命周期 ──────────────────────────────────────────────────────
