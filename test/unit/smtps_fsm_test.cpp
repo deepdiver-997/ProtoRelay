@@ -993,11 +993,14 @@ TEST(timeout_handler) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::TIMEOUT);
     h.conn->pump_executor();
-    // The FSM's empty-input TIMEOUT event arms a read. Actual watchdog expiry
-    // is a separate SessionBase timer path; lack of script data is not EOF.
+    // The TIMEOUT event is now an inert self-loop (empty lines split off to a
+    // dedicated EMPTY event, fsm-extract step 2a): it re-arms the read, keeps
+    // the session open, and no longer rewrites next_event via the retired
+    // handle_read("") re-parse. Actual watchdog expiry is a separate
+    // SessionBase timer path; lack of script data is not EOF.
     assert(h.conn->is_open());
     assert(h.conn->has_pending_read());
-    assert(static_cast<SmtpsEvent>(h.session->get_next_event()) == SmtpsEvent::TIMEOUT);
+    assert(static_cast<SmtpsEvent>(h.session->get_next_event()) == SmtpsEvent::CONNECT);
     std::cout << "  [PASS] timeout_handler" << std::endl;
 }
 

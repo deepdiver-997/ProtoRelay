@@ -2,7 +2,7 @@
 #define TRADITIONAL_SMTPS_FSM_H
 
 #include "framework/session_base.h"
-#include "framework/fsm_base.h"
+#include "framework/fsm/fsm_engine.h"
 #include "framework/storage/i_read_stream.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
@@ -11,6 +11,7 @@
 #include "mail_system/back/common/account_policy.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_desc.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
@@ -36,8 +37,15 @@ namespace mail_system {
 template <typename ConnectionType>
 class SmtpsSession;  // 前向声明
 
+// Holds the fsm engine instead of inheriting pr::FsmBase: dispatch, guard
+// replies and the transition write points now live in the engine (design
+// §3.2/§4 step 2a). Protocol behavior (handlers, policies, async wrappers) is
+// unchanged; the guard/handler tables moved to make_smtps_desc + register_.
 template <typename ConnectionType>
-class TraditionalSmtpsFsm : public pr::FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
+class TraditionalSmtpsFsm {
+public:
+    using Engine = pr::fsm::Engine<ConnectionType, SmtpsState, SmtpsEvent>;
+
 protected:
     std::shared_ptr<pr::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<pr::ThreadPoolBase> m_workerThreadPool;
@@ -55,7 +63,9 @@ public:
         std::make_shared<LruCache<std::string, std::vector<std::string>>>(10000, std::chrono::seconds(300));
 
     std::shared_ptr<AccountPolicy> account_policy_;
+    Engine engine_;
 
+public:
     TraditionalSmtpsFsm(
         std::shared_ptr<pr::ThreadPoolBase> io_thread_pool,
         std::shared_ptr<pr::ThreadPoolBase> worker_thread_pool,
@@ -64,14 +74,18 @@ public:
     ) : m_ioThreadPool(io_thread_pool),
         m_workerThreadPool(worker_thread_pool),
         m_shardRouter(std::move(shard_router)),
-        m_persistentQueue(persistent_queue) {
+        m_persistentQueue(persistent_queue),
+        engine_(make_smtps_desc(/*allow_starttls=*/!std::is_same_v<ConnectionType, pr::SslConnection>)) {
         account_policy_ = std::make_shared<AccountPolicy>(m_shardRouter, m_authCache, m_workerThreadPool);
         account_policy_->set_recipient_caches(m_recipientCache, m_aliasCache);
-        init_transition_table();
-        init_state_handlers();
+        // 旧 on_invalid_transition 在回 500 之外还 set_error(InvalidCommand)；
+        // desc 的回复格式化器拿不到 session，经引擎 violation observer 补上。
+        engine_.set_violation_observer(
+            [](const Engine::SessionPtr& s) { s->set_error(pr::SessionError::InvalidCommand); });
+        register_handlers();
     }
 
-    ~TraditionalSmtpsFsm() override = default;
+    ~TraditionalSmtpsFsm() = default;
     void set_authenticator(std::shared_ptr<IAccountAuthenticator> authenticator) {
         account_policy_->set_authenticator(std::move(authenticator));
     }
@@ -129,12 +143,7 @@ private:
     bool persist_mails_sync(SmtpsSession<ConnectionType>* session, std::string& error);
     bool persist_and_reply(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 
-    void init_transition_table();
-    void init_state_handlers();
-
-    bool is_terminal_state(SmtpsState s) const override;
-    void on_invalid_transition(SmtpsState s, SmtpsEvent e,
-        std::shared_ptr<pr::SessionBase<ConnectionType>> session) override;
+    void register_handlers();
 
     void handle_init_connect(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_greeting_ehlo(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
@@ -163,6 +172,8 @@ private:
     void handle_wait_quit_quit(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_timeout(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
     void handle_error(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
+    // 空行（EMPTY 事件）：静默吞掉，自环收口续读。
+    void handle_empty(std::shared_ptr<pr::SessionBase<ConnectionType>> session);
 };
 
 } // namespace mail_system

@@ -177,6 +177,12 @@ struct ConcurrencyTestFixture {
         auto conn_u = std::make_unique<MockConnection>();
         h->conn = conn_u.get();
         h->conn->capture_to(&h->captured);   // 写缓冲镜像到外部 string（session 析构后仍可断言）
+        // 脚本数据耗尽 = idle、连接保持的 peer（与 smtps_fsm_test 同语义）：EOF 是
+        // peer 的显式动作（trigger_deferred_read("")），不是"暂时没有更多字节"。
+        // 引擎收口显式续读与写完成自动续读会武装第二个读；非 deferred mock 把
+        // 耗尽报成 end_of_stream → handle_error → close，异步链（SPF/DB）完成时
+        // session 已死、回复丢失（fsm-extract 2a 迁移暴露的 fixture 缺口）。
+        h->conn->set_deferred_read(true);
         if (!preload.empty())
             h->conn->set_read_data(preload);
 
@@ -644,11 +650,16 @@ TEST(boundary_callback_after_session_release) {
     // 触发回调：应能在 session 上完成状态机操作而不悬垂
     fx.dns->fire_txt("attacker.com");
 
-    // 回调完成后所有 shared_ptr 释放 → session 干净析构
+    // 回调期间完成写响应（session 存活，读镜像安全）
+    assert(wait_until([&] { return HAS(h->captured, "550 5.7.1 SPF verification failed"); }));
+    // idle-peer 语义（make_session 的 set_deferred_read(true)）下，写完成自动
+    // 续读的下一个读挂起侍立、其 handler 持 self —— session 由读保活，这正是
+    // 生产现状（连接挂着读，session 活到对端断开/超时）。此前旧断言
+    // "fire 后 session 自然析构"依赖非 deferred mock 的数据耗尽 EOF 把 session
+    // 顺手关掉。显式模拟 peer 断开（EOF）释放最后的引用：
+    assert(wait_until([&] { return h->conn->has_pending_read(); }));
+    h->conn->trigger_deferred_read("");
     assert(wait_until([&] { return weak.expired(); }));
-    // 此处 session/connection 已析构（weak 过期），不再有写入者，读镜像安全；
-    // h->conn 已悬垂，绝不能在这里改用 written()。
-    assert(wait_until([&] { return HAS(h->captured, "550 5.7.1 SPF verification failed"); }));   // 回调期间完成写响应
     std::cout << "  [PASS] boundary_callback_after_session_release (shared_ptr 保活，无悬垂)" << std::endl;
 }
 

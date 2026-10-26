@@ -83,6 +83,12 @@ def main():
     parser.add_argument('--server', default='./build/smtpsServer')
     parser.add_argument('--config', default='config/smtpsConfig.json')
     parser.add_argument('--host', default='127.0.0.1')
+    # agent worktree 的 test/config/*_test.json 监听非标端口段（20000+）。
+    # 默认值保持 hub 标准端口的既有行为；按 listener 角色对应：
+    # smtp=明文 MTA 口(25)、submission=认证提交口(587)、ssl=隐式 TLS 口(465)。
+    parser.add_argument('--port-smtp', type=int, default=25)
+    parser.add_argument('--port-submission', type=int, default=587)
+    parser.add_argument('--port-ssl', type=int, default=465)
     parser.add_argument('--keep-temp', action='store_true', help='keep temp config dir')
     args = parser.parse_args()
 
@@ -135,15 +141,18 @@ def main():
     host = args.host
     r = TestResult()
     perf_mode = cfg.get('perf_mode', False)
+    port_smtp = args.port_smtp
+    port_submission = args.port_submission
+    port_ssl = args.port_ssl
 
-    # 找出各端口
+    # 找出各端口对应的 listener（按 CLI 给出的实际监听端口查表）
     listeners = {l['port']: l for l in cfg.get('listeners', [])}
-    port_25 = listeners.get(25, {})
-    port_587 = listeners.get(587, {})
-    port_465 = listeners.get(465, {})
+    port_25 = listeners.get(port_smtp, {})
+    port_587 = listeners.get(port_submission, {})
+    port_465 = listeners.get(port_ssl, {})
 
     print(f"Config: {config_path}")
-    print(f"Listeners: {list(listeners.keys())}")
+    print(f"Listeners: {list(listeners.keys())} (smtp={port_smtp} submission={port_submission} ssl={port_ssl})")
     print(f"Starting server: {server_bin}")
 
     print(f"Temp config: {tmp_config}")
@@ -157,54 +166,54 @@ def main():
 
     try:
         # ================================================================
-        # Test 1: 端口 25 — MTA 投递，免认证
+        # Test 1: 端口 25（smtp） — MTA 投递，免认证
         # ================================================================
-        r.test("Port 25 accepts TCP connection", lambda: _tcp_connect(host, 25))
+        r.test("Port 25 accepts TCP connection", lambda: _tcp_connect(host, port_smtp))
 
-        r.test("Port 25 sends greeting banner", lambda: _expect_banner(host, 25, '220'))
+        r.test("Port 25 sends greeting banner", lambda: _expect_banner(host, port_smtp, '220'))
 
-        r.test("Port 25 EHLO without AUTH", lambda: _smtp_ehlo(host, 25))
+        r.test("Port 25 EHLO without AUTH", lambda: _smtp_ehlo(host, port_smtp))
 
         r.test("Port 25 MAIL FROM without prior AUTH", lambda:
-            _smtp_cmd(host, 25, 'MAIL FROM:<test@extern.com>', '250'))
+            _smtp_cmd(host, port_smtp, 'MAIL FROM:<test@extern.com>', '250'))
 
         r.test("Port 25 RCPT TO after MAIL FROM", lambda:
-            _smtp_rcpt(host, 25))
+            _smtp_rcpt(host, port_smtp))
 
         r.test("Port 25 DATA command accepted", lambda:
-            _smtp_data(host, 25))
+            _smtp_data(host, port_smtp))
 
         # ================================================================
-        # Test 2: 端口 587 — 客户端提交，必须 AUTH
+        # Test 2: 端口 587（submission） — 客户端提交，必须 AUTH
         # ================================================================
-        r.test("Port 587 accepts TCP", lambda: _tcp_connect(host, 587))
+        r.test("Port 587 accepts TCP", lambda: _tcp_connect(host, port_submission))
 
-        r.test("Port 587 greeting banner", lambda: _expect_banner(host, 587, '220'))
+        r.test("Port 587 greeting banner", lambda: _expect_banner(host, port_submission, '220'))
 
         if perf_mode:
             r.skip("Port 587 rejects MAIL FROM before AUTH", "perf_mode disables AUTH checks")
             r.skip("Port 587 EHLO advertises AUTH", "perf_mode disables AUTH")
         else:
             r.test("Port 587 rejects MAIL FROM before AUTH", lambda:
-                _smtp_cmd(host, 587, 'MAIL FROM:<user@test.local>', '530'))
+                _smtp_cmd(host, port_submission, 'MAIL FROM:<user@test.local>', '530'))
             r.test("Port 587 EHLO advertises AUTH", lambda:
-                _smtp_ehlo_check_auth(host, 587))
+                _smtp_ehlo_check_auth(host, port_submission))
 
         # ================================================================
-        # Test 3: 端口 465 — SSL + AUTH
+        # Test 3: 端口 465（ssl） — SSL + AUTH
         # ================================================================
         if port_465:
             r.test("Port 465 SSL handshake", lambda:
-                _ssl_connect(host, 465))
+                _ssl_connect(host, port_ssl))
 
             r.test("Port 465 SSL greeting", lambda:
-                _ssl_expect_banner(host, 465, '220'))
+                _ssl_expect_banner(host, port_ssl, '220'))
 
             if perf_mode:
                 r.skip("Port 465 rejects MAIL FROM before AUTH", "perf_mode disables AUTH")
             else:
                 r.test("Port 465 rejects MAIL FROM before AUTH", lambda:
-                    _ssl_cmd(host, 465, 'MAIL FROM:<user@test.local>', '530'))
+                    _ssl_cmd(host, port_ssl, 'MAIL FROM:<user@test.local>', '530'))
         else:
             r.skip("Port 465 SSL", "no SSL listener configured")
 
@@ -216,7 +225,7 @@ def main():
             r.skip("smtplib auth+send on port 587", "perf_mode skips AUTH advertisement")
         elif db_cfg:
             r.test("smtplib auth + send on port 587", lambda:
-                _smtplib_send(host, 587, db_cfg))
+                _smtplib_send(host, port_submission, db_cfg))
             time.sleep(1)  # wait for async persist
             r.test("mail file exists on disk", lambda: _verify_mail_on_disk(mail_dir))
         else:
@@ -228,9 +237,9 @@ def main():
         # ================================================================
         if db_cfg and not perf_mode:
             r.test("external delivery disabled: RCPT external 550, internal 250", lambda:
-                _ext_delivery_test(host, 587, cfg, db_cfg))
+                _ext_delivery_test(host, port_submission, cfg, db_cfg))
             r.test("daily send quota: within-limit 250, over-limit 550", lambda:
-                _quota_test(host, 587, cfg, db_cfg))
+                _quota_test(host, port_submission, cfg, db_cfg))
         else:
             r.skip("daily send quota", "no DB config (or perf_mode)")
 

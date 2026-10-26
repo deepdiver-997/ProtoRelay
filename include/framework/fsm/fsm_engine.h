@@ -149,6 +149,13 @@ public:
     void set_pre_dispatch(std::function<void(State, Event, SessionPtr)> hook) {
         pre_dispatch_ = std::move(hook);
     }
+    // Side effect to run when a guard violation is replied (e.g. SMTP's
+    // session->set_error(InvalidCommand) alongside the 500). The desc's reply
+    // formatters are pure functions of (state, event); anything needing the
+    // session goes here.
+    void set_violation_observer(std::function<void(SessionPtr)> hook) {
+        violation_observer_ = std::move(hook);
+    }
     // Guard-table drift check (design §3.2-3): apply/finish abort when the
     // written target is not the `to` of any guard row leaving the current
     // state. Off by default; PR_FSM_STRICT_GUARDS=1 flips the default.
@@ -224,6 +231,20 @@ public:
         settle_closing(session, std::optional<State>(target));
     }
 
+    // Shape-A收口 (banner / prompts / policy rejections): reply, land the
+    // target state and re-arm the read — but do NOT drain buffered commands.
+    // This is today's "write callback: ec→log+return, else set_state+read"
+    // family verbatim (SMTP greeting/EHLO/334/5xx and POP3-style rejects);
+    // the settle() drain is the strictly safer superset used elsewhere.
+    void reply_then_settle(const SessionPtr& session, std::string text, State target) {
+        if (!session || session->is_closed()) return;
+        check_strict_guard(session, target);
+        write_reply(session, text);
+        session->set_paused(false);
+        session->set_current_state(static_cast<int>(target));
+        session->do_async_read();
+    }
+
     // Async: pause takes effect immediately (the IO pipeline stops consuming
     // while the work runs); finish()/fail() may come from any thread.
     [[nodiscard]] Transition begin_transition(const SessionPtr& session,
@@ -255,7 +276,7 @@ private:
         if (target) check_strict_guard(session, *target);
         session->set_paused(false);
         if (target) session->set_current_state(static_cast<int>(*target));
-        if (reply && !reply->empty()) session->do_async_write(*reply, nullptr);
+        if (reply && !reply->empty()) write_reply(session, *reply);
         session->drain_buffered_commands();
         // drain never arms new reads (its own header note); re-arm when the
         // pipeline is idle. do_async_read's own guards make this a no-op
@@ -264,6 +285,7 @@ private:
     }
 
     void violate(const SessionPtr& session, State state, Event event) {
+        if (violation_observer_) violation_observer_(session);
         write_reply(session, violation_reply(state, event));
         bump_error_budget(session);
     }
@@ -325,6 +347,7 @@ private:
     std::map<std::pair<State, Event>, Handler> handlers_;
     std::function<void(State, Event, SessionPtr)> event_begin_;
     std::function<void(State, Event, SessionPtr)> pre_dispatch_;
+    std::function<void(SessionPtr)> violation_observer_;
     bool strict_guards_ = false;
 };
 
