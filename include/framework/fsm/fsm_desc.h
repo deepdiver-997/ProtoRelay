@@ -66,6 +66,18 @@ struct Desc {
     std::function<std::string(State, Event)> format_violation;
     std::function<std::string(State, Event)> format_missing;
 
+    // Registration-time diagnostic: two entries carrying the same word
+    // (case-insensitive) would silently shadow each other in match_command
+    // (first match wins). Legal tables have none.
+    bool has_conflicting_command() const {
+        for (std::size_t i = 0; i < commands.size(); ++i)
+            for (std::size_t j = i + 1; j < commands.size(); ++j)
+                if (commands[i].word.size() == commands[j].word.size() &&
+                    icase_equal(commands[i].word, commands[j].word))
+                    return true;
+        return false;
+    }
+
     // Case-insensitive first-token lookup. Returns nullopt for unknown words.
     std::optional<Event> match_command(const std::string& word) const {
         if (word.empty()) return std::nullopt;
@@ -84,7 +96,11 @@ struct Desc {
     }
 
     // Guard lookup: nullopt = no row (violation); otherwise the row's target
-    // (which may itself be nullopt for a documented self loop).
+    // (which may itself be nullopt for a documented self loop). Duplicate
+    // (from, on) rows are LEGAL multi-exit documentation (SMTP AUTH/DATA_END,
+    // HTTP HEADER_END): only presence is consumed by dispatch, strict-guard
+    // scans every row, and the export draws all of them. If a consumer ever
+    // needs "the" target, note this returns the FIRST matching row.
     std::optional<std::optional<State>> guard_target(State from, Event on) const {
         for (const auto& row : guards) {
             if (row.from == from && row.on == on) return row.to;

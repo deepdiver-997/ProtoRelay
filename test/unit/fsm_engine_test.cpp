@@ -174,6 +174,41 @@ void test_match_command_and_auto() {
                 "auto_process_event dispatches the session's next event");
 }
 
+// ---- engine: registration-time duplicate detection (silent shadowing) ----
+
+void test_duplicate_handler_registration_throws() {
+    pr::fsm::Desc<St, Ev> desc;
+    desc.terminals = {St::BYE};
+    desc.state_names = {"INIT", "READY", "BUSY", "BYE"};
+    desc.event_names = {"CONNECT", "PING", "QUIT"};
+    Engine engine(std::move(desc));
+    engine.add_handler(St::READY, Ev::PING, [](SessionPtr) {});
+    bool threw = false;
+    try {
+        // One cell, two behaviors: the map assignment would silently shadow
+        // the first — registration must fail fast instead.
+        engine.add_handler(St::READY, Ev::PING, [](SessionPtr) {});
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    expect_true(threw, "duplicate handler registration throws logic_error");
+}
+
+void test_duplicate_command_word_throws() {
+    pr::fsm::Desc<St, Ev> desc;
+    desc.commands = {{"PING", Ev::PING}, {"ping", Ev::QUIT}};  // icase duplicate
+    desc.state_names = {"INIT", "READY", "BUSY", "BYE"};
+    desc.event_names = {"CONNECT", "PING", "QUIT"};
+    bool threw = false;
+    try {
+        Engine engine(std::move(desc));
+        (void)engine;
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    expect_true(threw, "duplicate command word throws at construction");
+}
+
 // ---- engine: the two sanctioned write points ----
 
 void test_apply_settles() {
@@ -355,6 +390,8 @@ int main() {
     test_terminal_close();
     test_error_budget();
     test_match_command_and_auto();
+    test_duplicate_handler_registration_throws();
+    test_duplicate_command_word_throws();
     test_apply_settles();
     test_begin_transition_sync_path();
     test_transition_failure_path();

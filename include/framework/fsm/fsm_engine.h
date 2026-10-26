@@ -26,6 +26,7 @@
 
 #include <cstdlib>
 #include <functional>
+#include <stdexcept>
 #include <map>
 #include <memory>
 #include <optional>
@@ -162,12 +163,27 @@ public:
     explicit Engine(Desc<State, Event> desc) : desc_(std::move(desc)) {
         const char* strict = std::getenv("PR_FSM_STRICT_GUARDS");
         strict_guards_ = strict && strict[0] == '1';
+        if (desc_.has_conflicting_command()) {
+            throw std::logic_error(
+                "fsm desc: duplicate command word (match_command would shadow)");
+        }
     }
 
     // ---- registration (protocol FSM object, at construction) ----
 
     void add_handler(State state, Event event, Handler handler) {
-        handlers_[{state, event}] = std::move(handler);
+        // Registration overlap is always a bug: one cell, two behaviors — the
+        // map assignment would silently shadow the first (the same hazard the
+        // retired array engine had in add_transition). Fail at registration —
+        // protocol FSMs register at startup, so this is fail-fast.
+        const auto [it, inserted] = handlers_.try_emplace(
+            std::pair<State, Event>{state, event}, std::move(handler));
+        if (!inserted) {
+            throw std::logic_error(
+                "fsm duplicate handler registration: " +
+                std::string(desc_.name_of(state)) + "/" +
+                std::string(desc_.name_of(event)));
+        }
     }
     // e.g. IMAP tag storage before dispatch (design §3.4-B).
     void set_event_begin(std::function<void(State, Event, SessionPtr)> hook) {
