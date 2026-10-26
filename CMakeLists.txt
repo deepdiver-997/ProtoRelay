@@ -920,17 +920,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(logger_test test/unit/logger_test.cpp)
     target_link_libraries(logger_test PRIVATE protorelay_logging)
-    add_test(NAME logger_test COMMAND logger_test)
 
     # This target intentionally has no Boost include/library requirements.
     add_executable(std_thread_pool_test
         src/framework/thread_pool/std_thread_pool.cpp test/unit/std_thread_pool_test.cpp)
     target_link_libraries(std_thread_pool_test PRIVATE protorelay_logging)
-    add_test(NAME std_thread_pool_test COMMAND std_thread_pool_test)
 
     add_executable(connection_interface_test test/unit/connection_interface_test.cpp)
     target_include_directories(connection_interface_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
-    add_test(NAME connection_interface_test COMMAND connection_interface_test)
 
     # QUIC 多路复用契约：header-only，不链任何后端与第三方 QUIC/TLS 库；
     # nlohmann 仅为在测试里构造完整 TlsConfig（server_transport.h）而链，
@@ -944,8 +941,6 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(server_transport_test src/framework/server_base.cpp test/unit/server_transport_test.cpp)
     target_include_directories(server_transport_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     target_link_libraries(server_transport_test PRIVATE protorelay_logging nlohmann_json::nlohmann_json)
-    add_test(NAME server_transport_test COMMAND server_transport_test)
-    set_tests_properties(server_transport_test PROPERTIES TIMEOUT 20)
 
     # Native (non-Asio) network backend tests: parallel optional module, the
     # Asio production wiring is untouched. Registered like every other unit
@@ -995,21 +990,16 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(asio_executor_test test/unit/asio_executor_test.cpp)
     target_include_directories(asio_executor_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(asio_executor_test PRIVATE Threads::Threads protorelay_asio)
-    add_test(NAME asio_executor_test COMMAND asio_executor_test)
     add_executable(asio_error_test test/unit/asio_error_test.cpp)
     target_include_directories(asio_error_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(asio_error_test PRIVATE Threads::Threads)
     if(TARGET OpenSSL::Crypto)
         target_link_libraries(asio_error_test PRIVATE OpenSSL::Crypto)
     endif()
-    add_test(NAME asio_error_test COMMAND asio_error_test)
     add_executable(asio_server_transport_test
         src/framework/thread_pool/io_thread_pool.cpp src/framework/thread_pool/io_context_registry.cpp
         test/unit/asio_server_transport_test.cpp)
     target_link_libraries(asio_server_transport_test PRIVATE protorelay_asio protorelay_logging Threads::Threads)
-    add_test(NAME asio_server_transport_test COMMAND asio_server_transport_test)
-    set_tests_properties(asio_server_transport_test PROPERTIES TIMEOUT 20)
-    set_tests_properties(logger_test std_thread_pool_test connection_interface_test asio_executor_test PROPERTIES TIMEOUT 20)
 
     # MariaDB 非阻塞 async 回归（阶段 2）：连接池 available 在批量 async 查询后回基线
     if(HAVE_MARIADB)
@@ -1091,8 +1081,6 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     pr_add_unit_test(pop3_timer_boundary_test
         SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/pop3/pop3_server.cpp
              test/unit/pop3_timer_boundary_test.cpp)
-    add_test(NAME pop3_timer_boundary_test COMMAND pop3_timer_boundary_test)
-    set_tests_properties(pop3_timer_boundary_test asio_error_test PROPERTIES TIMEOUT 20)
 
     add_executable(smtp_client test/bench/smtp/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
@@ -1112,45 +1100,6 @@ endif()
 # ================================================================
 if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     enable_testing()
-    add_test(NAME smtps_fsm_test   COMMAND smtps_fsm_test)
-    add_test(NAME smtps_fsm_concurrency_test COMMAND smtps_fsm_concurrency_test)
-    add_test(NAME imaps_fsm_test   COMMAND imaps_fsm_test)
-    add_test(NAME pop3_fsm_test    COMMAND pop3_fsm_test)
-    add_test(NAME test_inbound_verifier COMMAND test_inbound_verifier)
-    add_test(NAME outbound_smoke   COMMAND outbound_smoke)
-    set_tests_properties(outbound_smoke PROPERTIES TIMEOUT 20)
-    add_test(NAME sql_queries_test COMMAND sql_queries_test)
-    add_test(NAME mime_parser_test COMMAND mime_parser_test)
-    add_test(NAME mail_body_writer_test COMMAND mail_body_writer_test)
-    add_test(NAME buffered_upload_stream_test COMMAND buffered_upload_stream_test)
-    add_test(NAME io_error_test COMMAND io_error_test)
-    add_test(NAME async_storage_provider_test COMMAND async_storage_provider_test)
-    add_test(NAME fsm_base_test COMMAND fsm_base_test)
-    add_test(NAME fast_fsm_base_test COMMAND fast_fsm_base_test)
-    add_test(NAME intrusion_detector_test COMMAND intrusion_detector_test)
-    add_test(NAME server_config_test COMMAND server_config_test)
-    add_test(NAME mapped_file_test COMMAND mapped_file_test)
-    add_test(NAME thread_pool_test COMMAND thread_pool_test)
-    add_test(NAME session_base_test COMMAND session_base_test)
-    add_test(NAME server_base_test COMMAND server_base_test)
-    add_test(NAME outbound_utils_test COMMAND outbound_utils_test)
-    add_test(NAME starttls_handoff_test COMMAND starttls_handoff_test)
-    add_test(NAME pipeline_deferred_test COMMAND pipeline_deferred_test)
-    add_test(NAME metrics_core_test COMMAND metrics_core_test)
-    add_test(NAME bcrypt_test COMMAND bcrypt_test)
-    add_test(NAME password_rehash_test COMMAND password_rehash_test)
-    add_test(NAME safe_parse_test COMMAND safe_parse_test)
-    add_test(NAME account_policy_boundary_test COMMAND account_policy_boundary_test)
-    add_test(NAME webmail_test COMMAND webmail_test)
-    add_test(NAME persist_submission_test COMMAND persist_submission_test)
-    set_tests_properties(persist_submission_test PROPERTIES TIMEOUT 20)
-    add_test(NAME smtp_persist_ack_test COMMAND smtp_persist_ack_test)
-    set_tests_properties(smtp_persist_ack_test PROPERTIES TIMEOUT 15)
-    add_test(NAME smtp_client_test COMMAND smtp_client_test)
-    set_tests_properties(smtp_client_test PROPERTIES TIMEOUT 20)
-    add_test(NAME smtp_submitter_test COMMAND smtp_submitter_test)
-    add_test(NAME http_session_read_test COMMAND http_session_read_test)
-    set_tests_properties(smtp_submitter_test PROPERTIES TIMEOUT 15)
 
     # 聚合 target：新增单测只需在上面 add_executable/add_test，
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
@@ -1257,6 +1206,21 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             endif()
         endif()
     endforeach()
+endif()
+
+# 特殊属性覆盖：在 catch-all 注册之后执行（CMake 卫生任务 2——中段显式
+# add_test 已删，注册以 catch-all 扫描为权威；条件编译块内的 add_test+属性对
+# （mariadb_async/sqlite_driver/node_auth）原样保留，属性依赖存在性）。
+if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
+    set_tests_properties(outbound_smoke PROPERTIES TIMEOUT 20)
+    set_tests_properties(persist_submission_test PROPERTIES TIMEOUT 20)
+    set_tests_properties(smtp_persist_ack_test PROPERTIES TIMEOUT 15)
+    set_tests_properties(smtp_client_test PROPERTIES TIMEOUT 20)
+    set_tests_properties(smtp_submitter_test PROPERTIES TIMEOUT 15)
+    set_tests_properties(server_transport_test PROPERTIES TIMEOUT 20)
+    set_tests_properties(logger_test std_thread_pool_test connection_interface_test asio_executor_test PROPERTIES TIMEOUT 20)
+    set_tests_properties(asio_server_transport_test PROPERTIES TIMEOUT 20)
+    set_tests_properties(pop3_timer_boundary_test asio_error_test PROPERTIES TIMEOUT 20)
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
