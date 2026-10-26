@@ -24,8 +24,10 @@
 #include "framework/log/log_macros.h"
 #include "framework/session_base.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <functional>
+#include <ostream>
 #include <stdexcept>
 #include <map>
 #include <memory>
@@ -311,6 +313,57 @@ public:
     void reply(const SessionPtr& session, std::string data) {
         if (!session || data.empty()) return;
         session->do_async_write(data, nullptr);
+    }
+
+    // Registration audit (code-review companion): one deterministic line per
+    // finding. MULTI-EXIT keys are legal — async outcomes choose the exit at
+    // completion time — but every declared exit must have a writer. DUPLICATE
+    // rows are pure redundancy. NO-GUARD handlers are unreachable (dispatch
+    // checks the guard table first and rejects). NO-HANDLER rows fall to the
+    // missing/rejection reply path (sometimes intentional: defensive
+    // legality rows).
+    void write_registration_audit(std::ostream& out) const {
+        std::map<std::pair<State, Event>, std::vector<std::optional<State>>> by_key;
+        for (const auto& row : desc_.guards)
+            by_key[{row.from, row.on}].push_back(row.to);
+
+        for (const auto& [key, targets] : by_key) {
+            const auto& [state, event] = key;
+            const bool handler = handlers_.count(key) != 0;
+            std::vector<std::string> distinct;   // first-seen order
+            for (const auto& t : targets) {
+                std::string n = t ? std::string(desc_.name_of(*t)) : "(self)";
+                if (std::find(distinct.begin(), distinct.end(), n) == distinct.end())
+                    distinct.push_back(std::move(n));
+            }
+            if (targets.size() >= 2) {
+                if (distinct.size() == 1) {
+                    out << "DUPLICATE   " << desc_.name_of(state) << " + "
+                        << desc_.name_of(event) << ": " << targets.size()
+                        << " identical rows (" << distinct.front()
+                        << "); handler: " << (handler ? "yes" : "no") << "\n";
+                } else {
+                    out << "MULTI-EXIT  " << desc_.name_of(state) << " + "
+                        << desc_.name_of(event) << ": " << distinct.size()
+                        << " exits from " << targets.size() << " rows (";
+                    for (std::size_t i = 0; i < distinct.size(); ++i)
+                        out << (i ? ", " : "") << distinct[i];
+                    out << "); handler: " << (handler ? "yes" : "no") << "\n";
+                }
+            } else if (!handler) {
+                out << "NO-HANDLER  " << desc_.name_of(state) << " + "
+                    << desc_.name_of(event) << ": guard row without handler"
+                    << " (dispatch falls to the missing/rejection reply)\n";
+            }
+        }
+        for (const auto& [key, handler] : handlers_) {
+            (void)handler;
+            if (!desc_.guard_target(key.first, key.second).has_value())
+                out << "NO-GUARD    " << desc_.name_of(key.first) << " + "
+                    << desc_.name_of(key.second)
+                    << ": handler without guard row"
+                    << " (unreachable — dispatch rejects first)\n";
+        }
     }
 
     const Desc<State, Event>& desc() const { return desc_; }

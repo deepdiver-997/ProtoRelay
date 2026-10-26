@@ -17,9 +17,15 @@
 #include <thread>
 
 #include <boost/asio.hpp>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "framework/fsm/fsm_completion.h"
 #include "framework/fsm/fsm_engine.h"
+#include "mail_system/back/mailServer/fsm/pop3/pop3_desc.h"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_desc.h"
+#include "mail_system/back/mailServer/fsm/imaps/imaps_desc.h"
+#include "framework/http/http_fsm.h"
 #include "framework/net/asio_executor.h"
 #include "mock_connection.h"
 #include "test_session.h"
@@ -209,6 +215,104 @@ void test_duplicate_command_word_throws() {
     expect_true(threw, "duplicate command word throws at construction");
 }
 
+// ---- engine: registration audit (multi-exit / duplicate / unreachable) ----
+
+void test_registration_audit_report() {
+    pr::fsm::Desc<St, Ev> desc;
+    desc.commands = {{"PING", Ev::PING}};
+    desc.guards = {
+        {St::INIT, Ev::CONNECT, St::READY},
+        {St::READY, Ev::QUIT, St::BYE},
+        {St::READY, Ev::QUIT, St::BUSY},      // multi-exit: two real targets
+        {St::READY, Ev::QUIT, St::BYE},       // redundant row inside the key
+        {St::BUSY, Ev::PING, std::nullopt},
+        {St::INIT, Ev::QUIT, std::nullopt},   // no handler -> defensive row
+        {St::BUSY, Ev::QUIT, St::BUSY},
+        {St::BUSY, Ev::QUIT, St::BUSY},       // fully duplicated key
+    };
+    desc.state_names = {"INIT", "READY", "BUSY", "BYE"};
+    desc.event_names = {"CONNECT", "PING", "QUIT"};
+    Engine engine(std::move(desc));
+    engine.add_handler(St::INIT, Ev::CONNECT, [](SessionPtr) {});
+    engine.add_handler(St::READY, Ev::QUIT, [](SessionPtr) {});
+    engine.add_handler(St::BUSY, Ev::PING, [](SessionPtr) {});
+    engine.add_handler(St::BUSY, Ev::QUIT, [](SessionPtr) {});
+    engine.add_handler(St::READY, Ev::PING, [](SessionPtr) {});   // no guard row
+
+    std::ostringstream out;
+    engine.write_registration_audit(out);
+    const std::string report = out.str();
+    expect_true(report.find("MULTI-EXIT  READY + QUIT: 2 exits from 3 rows (BYE, BUSY); handler: yes") !=
+                    std::string::npos,
+                "audit lists multi-exit keys with distinct exits and row count");
+    expect_true(report.find("DUPLICATE   BUSY + QUIT: 2 identical rows (BUSY); handler: yes") !=
+                    std::string::npos,
+                "audit lists fully duplicated keys");
+    expect_true(report.find("NO-HANDLER  INIT + QUIT") != std::string::npos,
+                "audit lists guard rows without handlers");
+    expect_true(report.find("NO-GUARD    READY + PING") != std::string::npos,
+                "audit lists handlers without guard rows (unreachable)");
+}
+
+void test_registration_audit_real_protocols() {
+    using Mc = mail_system::MockConnection;
+    std::ostringstream pop3_out, smtps_out, imap_out, http_out;
+    namespace fsmp = mail_system;
+    pr::fsm::Engine<Mc, fsmp::Pop3State, fsmp::Pop3Event>(fsmp::make_pop3_desc())
+        .write_registration_audit(pop3_out);
+    pr::fsm::Engine<Mc, fsmp::SmtpsState, fsmp::SmtpsEvent>(fsmp::make_smtps_desc(true))
+        .write_registration_audit(smtps_out);
+    pr::fsm::Engine<Mc, fsmp::ImapState, fsmp::ImapEvent>(fsmp::make_imaps_desc(true))
+        .write_registration_audit(imap_out);
+    pr::fsm::Engine<Mc, pr::http::HttpState, pr::http::HttpEvent>(pr::http::make_http_desc())
+        .write_registration_audit(http_out);
+
+    // No redundant duplicate rows and no unreachable handlers anywhere.
+    const std::string pop3_report = pop3_out.str();
+    const std::string smtps_report = smtps_out.str();
+    const std::string imap_report = imap_out.str();
+    const std::string http_report = http_out.str();
+    for (const auto* report : {&pop3_report, &smtps_report, &imap_report, &http_report}) {
+        expect_true(report->find("DUPLICATE") == std::string::npos,
+                    "real protocol descs have no duplicated guard rows");
+        expect_true(report->find("NO-GUARD") == std::string::npos,
+                    "real protocol descs have no handler without a guard row");
+    }
+    // The intended multi-exit inventory: SMTP 5 keys (AUTH x3-exits,
+    // PASSWORD-AUTH, MAIL FROM x2, RCPT-MAIL FROM, DATA_END), IMAP 2
+    // (LOGIN/AUTHENTICATE success rows), HTTP 1 (HEADER_END), POP3 0.
+    auto count = [](const std::string& r) {
+        size_t n = 0, pos = 0;
+        while ((pos = r.find("MULTI-EXIT", pos)) != std::string::npos) { ++n; ++pos; }
+        return n;
+    };
+    expect_true(count(pop3_out.str()) == 0, "POP3 has no multi-exit keys");
+    expect_true(count(smtps_out.str()) == 5, "SMTPS has exactly 5 multi-exit keys");
+    expect_true(smtps_out.str().find(
+                    "MULTI-EXIT  WAIT_AUTH + AUTH: 3 exits from 3 rows") != std::string::npos,
+                "SMTPS AUTH keeps its three documented exits");
+    expect_true(count(imap_out.str()) == 2, "IMAP has exactly 2 multi-exit keys");
+    expect_true(count(http_out.str()) == 1, "HTTP has exactly 1 multi-exit key");
+}
+
+// ---- engine: strict guards reject an off-table transition (abort path) ----
+
+void test_strict_guard_rejects_unknown_target() {
+    // The violation path ends in std::abort; exercise it in a forked child so
+    // the deliberate off-table transition doesn't take down the test runner.
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        Fixture f(0, /*strict=*/true);
+        f.session->set_current_state(static_cast<int>(St::INIT));
+        f.engine->apply(f.session, St::BUSY);   // INIT -> BUSY: no guard row
+        std::_Exit(0);                          // not reached when the check fires
+    }
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    expect_true(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
+                "strict guards abort on an off-table transition target");
+}
+
 // ---- engine: the two sanctioned write points ----
 
 void test_apply_settles() {
@@ -392,6 +496,9 @@ int main() {
     test_match_command_and_auto();
     test_duplicate_handler_registration_throws();
     test_duplicate_command_word_throws();
+    test_registration_audit_report();
+    test_registration_audit_real_protocols();
+    test_strict_guard_rejects_unknown_target();
     test_apply_settles();
     test_begin_transition_sync_path();
     test_transition_failure_path();
