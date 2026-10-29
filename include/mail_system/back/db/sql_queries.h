@@ -25,6 +25,22 @@ inline constexpr std::size_t kMaxSubjectChars = 998;
 // 且不切断 UTF-8 多字节序列。未超限时原样返回。
 std::string clip_subject_for_db(const std::string& subject);
 
+// attachments.mime_type / attachments.filename 列宽（utf8mb4 字符数）。
+// 2026-10-29 入站附件事故：MIME 头按原文整串入库，`application/pdf; name=`
+// 连同 RFC 2047 编码文件名远超 100 字符，1406 报错导致持久化事务回滚丢信
+// （发件方已收 250）。与 subject 同族，入库前一律先经下方 clip 兜底。
+inline constexpr std::size_t kMaxMimeChars = 100;
+inline constexpr std::size_t kMaxFilenameChars = 255;
+
+// mime_type 入库前规整：只保留 type/subtype（首个 ';' 前的 token，去尾随空白；
+// name 等参数由 filename 列与正文 sidecar 承载），再按列宽做 escape 预算截断。
+// 注意 IMAP BODYSTRUCTURE/BODY[] 从正文 sidecar 重建，从不查本列，截断只影响
+// webmail 索引层展示，拉取无损。
+std::string clip_mime_type_for_db(const std::string& mime_type);
+
+// filename 入库前按列宽截断（escape 预算 + UTF-8 边界安全）。
+std::string clip_filename_for_db(const std::string& filename);
+
 // 插入邮件元数据 (完整版: 含 send_time)
 std::string build_insert_mail(std::uint64_t mail_id,
                                const std::string& subject,
