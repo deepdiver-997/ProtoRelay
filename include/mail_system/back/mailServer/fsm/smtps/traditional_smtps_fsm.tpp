@@ -279,6 +279,12 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
             transition->finish(true);
             return;
         }
+        // AUTH 失败必须留痕：DEBUG 级在 Release 被编译掉，465 上的爆破/空转会话
+        // 在 info 日志里完全不可见（2026-10-29 例行检查结论）。只记账号名与来源，
+        // 不记原始 AUTH 行（含凭据，与 trace 脱敏策略一致）。
+        LOG_SMTP_WARN("SMTP auth failed: user={} peer={}",
+                      c->client_username.empty() ? "(unknown)" : c->client_username,
+                      s->get_client_ip());
         if (s->record_auth_failure_and_check()) { s->close_after_flush(); return; }
         transition->finish(SmtpsState::WAIT_AUTH, "535 Authentication failed");
     };
@@ -380,6 +386,11 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                 ctx->is_authenticated = true; ctx->shard_index = shard;
                 transition->finish(true);
             } else {
+                // 同 handle_wait_auth_auth：AUTH 失败留痕（只记账号名与来源）。
+                const std::string& uname = ctx->client_username;
+                LOG_SMTP_WARN("SMTP auth failed: user={} peer={}",
+                              uname.empty() ? "(unknown)" : uname,
+                              session->get_client_ip());
                 if (session->record_auth_failure_and_check()) { session->close_after_flush(); return; }
                 transition->finish(SmtpsState::WAIT_AUTH, "535 Authentication failed");
             }
