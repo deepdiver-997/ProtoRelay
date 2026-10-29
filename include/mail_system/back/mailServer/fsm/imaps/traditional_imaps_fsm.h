@@ -113,20 +113,23 @@ public:
         m_appendService = make_imap_append_service(m_workerThreadPool, m_messageRepository);
         // tagged BAD/NO 需要回显 ctx 里的 tag（desc 是纯数据拿不到 session，
         // 经引擎的 session 感知 formatter 注入；"* " 是旧实现 ctx 缺失时的形态）。
+        // Engine 是依赖别名：嵌套类型须经 typename 引入局部别名（GCC 生产工具链强制）。
+        using ReplyKind = typename Engine::ReplyKind;
+        using SessionPtr = typename Engine::SessionPtr;
         engine_.set_reply_formatter(
-            [](Engine::ReplyKind kind, const Engine::SessionPtr& session,
+            [](ReplyKind kind, const SessionPtr& session,
                ImapState, ImapEvent) -> std::string {
-                const char* status = kind == Engine::ReplyKind::violation ? "BAD"
-                                   : kind == Engine::ReplyKind::missing   ? "BAD"
-                                                                          : "NO";
+                const char* status = kind == ReplyKind::violation ? "BAD"
+                                   : kind == ReplyKind::missing   ? "BAD"
+                                                                  : "NO";
                 auto* ctx = session ? static_cast<ImapContext*>(session->get_context()) : nullptr;
                 std::string tag = ctx ? ctx->current_tag : "*";
                 switch (kind) {
-                case Engine::ReplyKind::violation:
+                case ReplyKind::violation:
                     return tag + " BAD Invalid command sequence";
-                case Engine::ReplyKind::missing:
+                case ReplyKind::missing:
                     return tag + " BAD Unsupported command in current state";
-                case Engine::ReplyKind::internal_error:
+                case ReplyKind::internal_error:
                     return tag + " NO Internal server error";
                 }
                 return tag + " " + status;

@@ -80,8 +80,10 @@ public:
         account_policy_->set_recipient_caches(m_recipientCache, m_aliasCache);
         // 旧 on_invalid_transition 在回 500 之外还 set_error(InvalidCommand)；
         // desc 的回复格式化器拿不到 session，经引擎 violation observer 补上。
+        // Engine 是依赖别名：嵌套类型须经 typename 引入局部别名（GCC 生产工具链强制）。
+        using SessionPtr = typename Engine::SessionPtr;
         engine_.set_violation_observer(
-            [](const Engine::SessionPtr& s) { s->set_error(pr::SessionError::InvalidCommand); });
+            [](const SessionPtr& s) { s->set_error(pr::SessionError::InvalidCommand); });
         register_handlers();
     }
 
