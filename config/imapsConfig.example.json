@@ -53,6 +53,10 @@
 
   "dnsbl_enabled": false,
   "intrusion_detection_enabled": false,
+  "intrusion_fail_window_sec": 600,
+  "intrusion_ban_duration_sec": 3600,
+  "ip_blacklist_file": "",
+  "ip_whitelist": [],
 
   "outbound": {
     "helo_domain": "smtp.example.com",

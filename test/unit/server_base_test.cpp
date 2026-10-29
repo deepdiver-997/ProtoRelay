@@ -265,6 +265,8 @@ int main() {
         auto cfg = make_cfg();
         cfg.intrusion_detection_enabled = true;
         cfg.intrusion_ban_threshold      = 3;
+        // ctor 会 restore data_file（默认相对 CWD），指向测试临时目录保证隔离
+        cfg.intrusion_data_file = (dir / "intrusion_reload_state.json").string();
         TestServerBase server(cfg, io_pool, wk_pool, null_router);
         server.m_intrusionDetector.set_enabled(true);
         server.m_intrusionDetector.set_ban_threshold(3);
@@ -316,6 +318,8 @@ int main() {
         auto cfg = make_cfg();
         cfg.intrusion_detection_enabled = true;
         cfg.intrusion_ban_threshold      = 3;
+        // ctor 会 restore data_file（默认相对 CWD），指向测试临时目录保证隔离
+        cfg.intrusion_data_file = (dir / "intrusion_reload_state9.json").string();
         TestServerBase server(cfg, io_pool, wk_pool, null_router);
         server.m_intrusionDetector.set_enabled(true);
         server.m_intrusionDetector.set_ban_threshold(3);
@@ -325,7 +329,7 @@ int main() {
 
         // reload 保留 intrusion_detection_enabled=true（loadFromFile 用 default 0/false）
         auto good = dir / "after_ban.json";
-        std::ofstream(good) << R"({"address":"0.0.0.0","listeners":[{"type":"tcp","port":25}],"log_level":"info","intrusion_detection_enabled":true,"intrusion_ban_threshold":3})";
+        std::ofstream(good) << R"({"address":"0.0.0.0","listeners":[{"type":"tcp","port":25}],"log_level":"info","intrusion_detection_enabled":true,"intrusion_ban_threshold":3,"intrusion_data_file":")" + (dir / "intrusion_reload_state9.json").string() + R"("})";
         expect_true(server.reload_config(good.string()), "reload after ban (keeps intrusion cfg)");
 
         expect_true(server.m_intrusionDetector.size() == 1,
