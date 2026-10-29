@@ -24,28 +24,48 @@ namespace {
 // 邮件持久化
 // ============================================================
 
-std::string clip_subject_for_db(const std::string& subject) {
-    // 预算按 escape_string 后的字符数计：mysql_real_escape_string 会把
-    // ' " \ NUL \r \n ^Z 各变成 2 字符，其余（含多字节 UTF-8）按 1 计。
-    // 逐字符扣预算保证拼接后的 SQL 里 subject 段不超 kMaxSubjectChars，
-    // 并在不完整的多字节序列边界停住，避免截出半个字符。
-    std::size_t budget = kMaxSubjectChars;
+namespace {
+// escape 预算截断的共享实现：预算按 escape_string 后的字符数计——
+// mysql_real_escape_string 会把 ' " \ NUL \r \n ^Z 各变成 2 字符，其余
+// （含多字节 UTF-8）按 1 计。逐字符扣预算保证拼接后的 SQL 里该段不超
+// 列宽，并在不完整的多字节序列边界停住，避免截出半个字符。
+std::string clip_by_escape_budget(const std::string& value, std::size_t budget) {
     std::size_t end = 0;
-    while (end < subject.size() && budget > 0) {
-        const unsigned char c = static_cast<unsigned char>(subject[end]);
+    while (end < value.size() && budget > 0) {
+        const unsigned char c = static_cast<unsigned char>(value[end]);
         std::size_t seq_len = 1;
         if ((c & 0xE0) == 0xC0) seq_len = 2;
         else if ((c & 0xF0) == 0xE0) seq_len = 3;
         else if ((c & 0xF8) == 0xF0) seq_len = 4;
-        if (end + seq_len > subject.size()) break;  // 尾部不完整序列
+        if (end + seq_len > value.size()) break;  // 尾部不完整序列
         const std::size_t cost =
             (c == '\'' || c == '"' || c == '\\' || c == 0 || c == '\n' || c == '\r' || c == 0x1A) ? 2 : 1;
         if (cost > budget) break;
         budget -= cost;
         end += seq_len;
     }
-    if (end == subject.size()) return subject;
-    return subject.substr(0, end);
+    if (end == value.size()) return value;
+    return value.substr(0, end);
+}
+}  // namespace
+
+std::string clip_subject_for_db(const std::string& subject) {
+    return clip_by_escape_budget(subject, kMaxSubjectChars);
+}
+
+std::string clip_mime_type_for_db(const std::string& mime_type) {
+    // 只留 type/subtype：参数段（; 之后）不入库，name 等由 filename 列与
+    // 正文 sidecar 承载。畸形值（无 ';' 的超长 token）退化为列宽兜底截断。
+    const auto semi = mime_type.find(';');
+    std::string base = mime_type.substr(0, semi == std::string::npos ? mime_type.size() : semi);
+    while (!base.empty() &&
+           (base.back() == ' ' || base.back() == '\t' || base.back() == '\r' || base.back() == '\n'))
+        base.pop_back();
+    return clip_by_escape_budget(base, kMaxMimeChars);
+}
+
+std::string clip_filename_for_db(const std::string& filename) {
+    return clip_by_escape_budget(filename, kMaxFilenameChars);
 }
 
 std::string build_insert_mail(std::uint64_t mail_id,
@@ -133,11 +153,13 @@ std::string build_insert_attachments(std::uint64_t mail_id,
     if (attachments.empty()) return {};
     std::string sql = "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type) VALUES";
     for (const auto& att : attachments) {
+        const auto filename = clip_filename_for_db(att.filename);
+        const auto mime_type = clip_mime_type_for_db(att.mime_type);
         sql += " (" + std::to_string(mail_id) + ", '" +
-               (conn ? conn->escape_string(att.filename) : att.filename) + "', '" +
+               (conn ? conn->escape_string(filename) : filename) + "', '" +
                (conn ? conn->escape_string(att.filepath) : att.filepath) + "', " +
                std::to_string(att.file_size) + ", '" +
-               (conn ? conn->escape_string(att.mime_type) : att.mime_type) + "'),";
+               (conn ? conn->escape_string(mime_type) : mime_type) + "'),";
     }
     sql.back() = ';';
     return sql;
@@ -665,12 +687,14 @@ std::string build_delete_mail_by_body_path() {
 std::string build_insert_attachment_single(std::uint64_t mail_id,
                                             const attachment& att,
                                             IDBConnection* conn) {
+    const auto filename = clip_filename_for_db(att.filename);
+    const auto mime_type = clip_mime_type_for_db(att.mime_type);
     return "INSERT INTO attachments (mail_id, filename, filepath, file_size, mime_type, upload_time) VALUES (" +
            std::to_string(mail_id) + ", '" +
-           (conn ? conn->escape_string(att.filename) : att.filename) + "', '" +
+           (conn ? conn->escape_string(filename) : filename) + "', '" +
            (conn ? conn->escape_string(att.filepath) : att.filepath) + "', " +
            std::to_string(att.file_size) + ", '" +
-           (conn ? conn->escape_string(att.mime_type) : att.mime_type) + "', " +
+           (conn ? conn->escape_string(mime_type) : mime_type) + "', " +
            std::to_string(att.upload_time) + ")";
 }
 

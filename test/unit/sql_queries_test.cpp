@@ -466,6 +466,87 @@ void test_dedup_clamps_consistently() {
     check("dedup_matches_insert", insert_sql.find("'" + expect998 + "'") != std::string::npos);
 }
 
+// ---- 附件 mime_type/filename 超长兜底（2026-10-29 入站附件 1406 丢信事故）----
+
+void test_clip_mime_type_helper() {
+    auto& clip = mail_system::db::sql::clip_mime_type_for_db;
+
+    // 简单类型原样通过
+    check("mime_passthrough", clip("application/pdf") == "application/pdf");
+    check("mime_empty", clip("").empty());
+
+    // 真实事故形态：Content-Type 头带 RFC 2047 编码文件名参数，整串远超 100 字符，
+    // 只留 type/subtype
+    std::string real_world = "application/pdf; name=\"=?utf-8?b?";
+    real_world += std::string(120, 'q');
+    real_world += "?=\"";
+    check("mime_strips_params", clip(real_world) == "application/pdf",
+          "参数段不入库，type/subtype 完整保留");
+
+    // ';' 前带空白：去尾随空白
+    check("mime_trim_before_semi", clip("application/pdf ; name=\"x.pdf\"") == "application/pdf");
+    check("mime_trailing_space_only", clip("text/plain  ") == "text/plain");
+
+    // 畸形值（无 ';' 的超长 token）退化为列宽兜底截断
+    std::string giant(500, 'x');
+    check("mime_budget_clamp", clip(giant).size() == mail_system::db::sql::kMaxMimeChars,
+          "无 ';' 的畸形头也必须截到列宽内");
+}
+
+void test_clip_filename_helper() {
+    auto& clip = mail_system::db::sql::clip_filename_for_db;
+
+    check("fname_passthrough", clip("新课件_大学物理.pdf") == "新课件_大学物理.pdf");
+
+    // ASCII 超长：截到恰好列宽
+    std::string long_ascii(400, 'a');
+    check("fname_ascii_len", clip(long_ascii).size() == mail_system::db::sql::kMaxFilenameChars);
+
+    // UTF-8 多字节：不切断字符边界
+    std::string cjk300;
+    for (int i = 0; i < 300; ++i) cjk300 += "名";
+    std::string cjk_expect;
+    for (size_t i = 0; i < mail_system::db::sql::kMaxFilenameChars; ++i) cjk_expect += "名";
+    check("fname_cjk_boundary", clip(cjk300) == cjk_expect);
+
+    // 引号按转义后 2 字符计预算：255/2 → 恰好 127 个
+    std::string quotes300(300, '"');
+    check("fname_quote_budget", clip(quotes300).size() == 127,
+          "预算须按 escape_string 后的字符数计");
+}
+
+void test_build_insert_attachments_clamps() {
+    attachment att;
+    att.id = 1;
+    att.mail_id = 7;
+    att.filename = std::string(400, 'a');
+    att.filepath = "/tmp/x";
+    att.mime_type = "application/pdf; name=\"=?utf-8?b?" + std::string(120, 'q') + "?=\"";
+    att.file_size = 322765;
+    att.upload_time = 1793345600;
+
+    std::string sql = mail_system::db::sql::build_insert_attachments(att.mail_id, {att}, nullptr);
+    check_contains("insert_att_mime_clipped", sql, "'application/pdf'");
+    check("insert_att_no_params", sql.find("name=") == std::string::npos,
+          "参数段不得入库（1406 根因）");
+    std::string expect255(mail_system::db::sql::kMaxFilenameChars, 'a');
+    std::string expect256(mail_system::db::sql::kMaxFilenameChars + 1, 'a');
+    check_contains("insert_att_filename_clamped", sql, "'" + expect255 + "'");
+    check("insert_att_filename_no_overrun", sql.find("'" + expect256) == std::string::npos,
+          "filename 超过列宽，未截断");
+
+    // 单条插入路径同样兜底
+    std::string single = mail_system::db::sql::build_insert_attachment_single(att.mail_id, att, nullptr);
+    check_contains("insert_att_single_mime_clipped", single, "'application/pdf'");
+    check("insert_att_single_no_params", single.find("name=") == std::string::npos);
+
+    // 正常短值不受影响
+    att.filename = "report.pdf";
+    att.mime_type = "application/pdf";
+    std::string plain = mail_system::db::sql::build_insert_attachments(att.mail_id, {att}, nullptr);
+    check_contains("insert_att_short_untouched", plain, "'report.pdf', '/tmp/x', 322765, 'application/pdf'");
+}
+
 // ---- webmail（只读列表/分页） ----
 
 void test_build_webmail_queries() {
@@ -563,6 +644,10 @@ int main() {
     test_build_insert_mail_clamp_accounts_for_escaping();
     test_build_insert_mail_with_status_clamps();
     test_dedup_clamps_consistently();
+
+    test_clip_mime_type_helper();
+    test_clip_filename_helper();
+    test_build_insert_attachments_clamps();
 
     test_build_auth_user_query();
     test_build_update_last_login();
