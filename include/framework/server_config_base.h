@@ -91,6 +91,16 @@ struct ServerConfig {
     int intrusion_persist_dirty_threshold = 256;
     int intrusion_max_records = 10000;
     int intrusion_ban_threshold = 0;
+    // 失败计数窗口（秒）：>0 时窗口过期 failed_count 清零；0=不重置（旧行为）
+    int intrusion_fail_window_sec = 0;
+    // 封禁时长（秒）：>0 时达标进入时间盒封禁到期自动解封；0=永久（旧行为）
+    int intrusion_ban_duration_sec = 0;
+    // 手工黑名单文件（每行 IP 或 IPv4 CIDR，'#' 注释）；多进程可共享同一文件
+    std::string ip_blacklist_file;
+    // detector 状态文件（自动封禁记录跨重启）；默认相对 WorkingDirectory
+    std::string intrusion_data_file = "logs/intrusion_data.json";
+    // 白名单：不记账、永不封禁
+    std::vector<std::string> ip_whitelist;
 
     ServerConfig()
         : address("0.0.0.0")
@@ -174,6 +184,12 @@ struct ServerConfig {
         intrusion_persist_dirty_threshold = j.value("intrusion_persist_dirty_threshold", 256);
         intrusion_max_records = j.value("intrusion_max_records", 10000);
         intrusion_ban_threshold = j.value("intrusion_ban_threshold", 0);
+        intrusion_fail_window_sec = j.value("intrusion_fail_window_sec", 0);
+        intrusion_ban_duration_sec = j.value("intrusion_ban_duration_sec", 0);
+        ip_blacklist_file = j.value("ip_blacklist_file", std::string());
+        intrusion_data_file = j.value("intrusion_data_file", intrusion_data_file);
+        if (j.contains("ip_whitelist") && j["ip_whitelist"].is_array())
+            ip_whitelist = j["ip_whitelist"].get<std::vector<std::string>>();
         return true;
     }
 

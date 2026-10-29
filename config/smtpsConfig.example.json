@@ -63,6 +63,10 @@
   "dnsbl_enabled": false,
   "intrusion_detection_enabled": true,
   "intrusion_ban_threshold": 5,
+  "intrusion_fail_window_sec": 600,
+  "intrusion_ban_duration_sec": 3600,
+  "ip_blacklist_file": "",
+  "ip_whitelist": [],
   "trusted_relay_networks": [
     "127.0.0.1",
     "::1"

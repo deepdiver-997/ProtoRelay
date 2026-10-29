@@ -88,7 +88,7 @@ public:
     // ── 入侵检测 ──────────────────────────────────────────────
     IntrusionDetector m_intrusionDetector;
     void record_session_end(const std::string& ip, bool authenticated) {
-        m_intrusionDetector.record_session(ip, authenticated);
+        bool just_banned = m_intrusionDetector.record_session(ip, authenticated);
         // 2026-08-27: 未认证会话的 suspicious 计数。push 推迟到 ServerBase 这层
         // 而非 IntrusionDetector 内部，避免动 is_banned 的 const 正确性。
         if (!authenticated) {
@@ -96,10 +96,12 @@ public:
                 m->inc_counter("protorelay_intrusion_suspicious_total", {}, 1);
             }
         }
+        if (just_banned) log_ip_auto_banned(ip);
     }
     bool is_ip_banned(const std::string& ip) const {
         auto cfg = config_snapshot();
-        if (!cfg->intrusion_detection_enabled || cfg->intrusion_ban_threshold <= 0) return false;
+        // 阈值判定在 detector 内部（黑名单不依赖阈值）；这里只看总开关。
+        if (!cfg->intrusion_detection_enabled) return false;
         bool banned = m_intrusionDetector.is_banned(ip);
         // 2026-08-27: ban 命中计数（被拒连接时上层 reject 路径会查 is_ip_banned）。
         if (banned) {
@@ -109,6 +111,10 @@ public:
         }
         return banned;
     }
+    // 把当前配置应用到 detector（构造与 reload_config 后各调一次），首次顺带 restore。
+    void apply_intrusion_config();
+    void log_ip_auto_banned(const std::string& ip);
+    bool m_intrusion_restored = false;
 
     // ── Metrics ───────────────────────────────────────────────
     std::weak_ptr<MetricsServer> get_metrics() const { return m_metricsServer; }

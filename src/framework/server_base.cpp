@@ -25,6 +25,7 @@ ServerBase::ServerBase(const Config& config,
         throw std::invalid_argument("ServerBase: IO and worker runtimes are required");
     if (!m_ioThreadPool->is_running() || !m_workerThreadPool->is_running())
         throw std::invalid_argument("ServerBase: thread pools must be started before construction");
+    apply_intrusion_config();
     LOG_SERVER_INFO("Server initialized with {} listener(s)", config.listeners.size());
     m_state = ServerState::Paused;
 }
@@ -141,8 +142,40 @@ bool ServerBase::reload_config(const std::string& json_file) {
     if (!replacement.loadFromFile(json_file) || !validate_reload_structure(replacement)) return false;
     std::atomic_store(&framework_config_, std::make_shared<Config>(std::move(replacement)));
     Logger::get_instance().set_level(Logger::string_to_level(config_snapshot()->log_level));
+    apply_intrusion_config();
     LOG_SERVER_INFO("Config reloaded: log_level={}", config_snapshot()->log_level);
     return true;
+}
+
+void ServerBase::apply_intrusion_config() {
+    auto cfg = config_snapshot();
+    auto& d = m_intrusionDetector;
+    d.set_enabled(cfg->intrusion_detection_enabled);
+    d.set_ban_threshold(cfg->intrusion_ban_threshold);
+    d.set_fail_window_sec(cfg->intrusion_fail_window_sec);
+    d.set_ban_duration_sec(cfg->intrusion_ban_duration_sec);
+    d.set_persist_interval(cfg->intrusion_persist_interval_sec);
+    d.set_persist_dirty_threshold(cfg->intrusion_persist_dirty_threshold);
+    d.set_max_records(static_cast<size_t>(cfg->intrusion_max_records));
+    d.set_whitelist(cfg->ip_whitelist);
+    if (!cfg->ip_blacklist_file.empty()) d.set_blacklist_file(cfg->ip_blacklist_file);
+    d.set_data_file(cfg->intrusion_data_file);
+    // 封禁记录跨重启：仅首次应用时从 data_file 恢复，热重载不覆盖内存态
+    if (!m_intrusion_restored) {
+        d.restore();
+        m_intrusion_restored = true;
+        if (d.is_enabled())
+            LOG_SERVER_WARN("IntrusionDetector enabled: threshold={} fail_window={}s "
+                            "ban_duration={}s blacklist_entries={}",
+                            cfg->intrusion_ban_threshold, cfg->intrusion_fail_window_sec,
+                            cfg->intrusion_ban_duration_sec, d.blacklist_size());
+    }
+}
+
+void ServerBase::log_ip_auto_banned(const std::string& ip) {
+    auto rec = m_intrusionDetector.query(ip);
+    LOG_SERVER_WARN("IntrusionDetector: IP {} auto-banned after {} failed sessions",
+                    ip, rec.failed_count);
 }
 
 // deprecated stubs
