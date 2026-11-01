@@ -83,10 +83,15 @@ struct TlsFixture {
         X509_set_version(cert, 2); ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
         X509_gmtime_adj(X509_getm_notBefore(cert), -60); X509_gmtime_adj(X509_getm_notAfter(cert), 3600);
         assert(X509_set_pubkey(cert, key) == 1);
-        auto* name = X509_get_subject_name(cert);
+        // 不用 X509_get_subject_name 取 name：OpenSSL 3.5 起该 getter 返回 const
+        // 指针（macOS Homebrew 新头文件），喂给 add_entry_by_txt 丢 const 编译不过。
+        // X509_NAME_new + set_subject_name/set_issuer_name（内部拷贝）跨版本等价。
+        X509_NAME* name = X509_NAME_new(); assert(name);
         X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                                    reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
+        assert(X509_set_subject_name(cert, name) == 1);
         X509_set_issuer_name(cert, name);
+        X509_NAME_free(name);
         auto* san = X509V3_EXT_conf_nid(nullptr, nullptr, NID_subject_alt_name, const_cast<char*>("DNS:localhost"));
         assert(san && X509_add_ext(cert, san, -1) == 1); X509_EXTENSION_free(san);
         assert(X509_sign(cert, key, EVP_sha256()) > 0);
