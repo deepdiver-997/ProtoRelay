@@ -20,6 +20,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         smtps_fsm_concurrency_test
         imaps_fsm_test
         pop3_fsm_test
+        watchdog_timeout_test
+        watchdog_cross_thread_test
         test_inbound_verifier
         outbound_smoke
         sql_queries_test
@@ -66,6 +68,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             smtp_client_contract_test storage_boundary_test
             logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
+            watchdog_timeout_test watchdog_cross_thread_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
             async_storage_provider_test
