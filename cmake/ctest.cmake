@@ -23,6 +23,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         watchdog_timeout_test
         watchdog_cross_thread_test
         h2_multistream_test
+        quic_node_contract_test
         test_inbound_verifier
         outbound_smoke
         sql_queries_test
@@ -70,6 +71,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
             watchdog_timeout_test watchdog_cross_thread_test h2_multistream_test
+            quic_node_contract_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
             async_storage_provider_test

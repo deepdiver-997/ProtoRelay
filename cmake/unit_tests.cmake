@@ -239,6 +239,21 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
         target_link_libraries(quic_loopback_test PRIVATE protorelay_quic protorelay_native_net quic_lsquic)
     endif()
+    # QUIC↔NodeLink 适配层真传输回环（vendored lsquic 可用时才编译；ctest catch-all 注册）
+    if(TARGET protorelay_quic)
+        add_executable(quic_node_loopback_test test/unit/quic_node_loopback_test.cpp)
+        target_include_directories(quic_node_loopback_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(quic_node_loopback_test SYSTEM PRIVATE
+            ${CMAKE_SOURCE_DIR}/third_party/quic/boringssl/include
+            ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
+        target_link_libraries(quic_node_loopback_test PRIVATE protorelay_quic protorelay_node_link
+            protorelay_native_net quic_lsquic)
+        if(TARGET protorelay_node_auth)
+            target_link_libraries(quic_node_loopback_test PRIVATE protorelay_node_auth
+                OpenSSL::SSL OpenSSL::Crypto)
+            target_compile_definitions(quic_node_loopback_test PRIVATE QNL_HAVE_NODE_AUTH=1)
+        endif()
+    endif()
     add_executable(node_link_test test/unit/node_link_test.cpp)
     target_link_libraries(node_link_test PRIVATE protorelay_node_link)
     # Node link v1 auth test: same OpenSSL-bearing-module condition as above.
@@ -259,6 +274,11 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     if(TARGET OpenSSL::Crypto)
         target_compile_definitions(node_proto_test PRIVATE PR_NODE_PROTO_TEST_AEAD=1)
     endif()
+
+    # QUIC↔NodeLink 适配层确定性单测（Fake mux/stream + ManualExecutor，无模块依赖）
+    pr_add_unit_test(quic_node_contract_test
+        SRCS test/unit/quic_node_contract_test.cpp
+        LIBS protorelay_node_link)
 
     add_executable(asio_executor_test test/unit/asio_executor_test.cpp)
     target_include_directories(asio_executor_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
