@@ -351,6 +351,27 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/pop3/pop3_server.cpp
              test/unit/pop3_timer_boundary_test.cpp)
 
+    # Watchdog 恶意超时/闲置回收专项（docs/local/TODO.md）：确定性单测 +
+    # 真实线程跨线程续跑压力（后者 ENABLE_TSAN 插桩）。
+    pr_add_unit_test(watchdog_timeout_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/pop3/pop3_server.cpp
+             test/unit/watchdog_timeout_test.cpp)
+
+    pr_add_unit_test(watchdog_cross_thread_test
+        SRCS ${COMMON_SRCS} src/mail_system/back/mailServer/pop3/pop3_server.cpp
+             test/unit/watchdog_cross_thread_test.cpp)
+    # TSan 插桩必须在目标定义之后（CMake 自上而下执行）；跨线程续跑压力是
+    # 本项目继 smtps_fsm_concurrency_test 后第二个 TSan 常备目标。
+    if(ENABLE_TSAN)
+        target_compile_options(watchdog_cross_thread_test PRIVATE -fsanitize=thread -g -O1)
+        target_link_options(watchdog_cross_thread_test PRIVATE -fsanitize=thread)
+    endif()
+
+    # H2 整机多流 e2e：进程内起真实 H2Server，curl --http2-prior-knowledge
+    # 驱动单流/8MiB/单连接 6 流并发 + 404。环境无 HTTP2 curl 时 skip(77)。
+    # H2 会话/服务器在独立模块 protorelay_h2（COMMON_SRCS 不含），显式链接。
+    pr_add_unit_test(h2_multistream_test LIBS protorelay_h2)
+
     add_executable(smtp_client test/bench/smtp/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
     add_executable(imap_client test/bench/imap/imap_client.cpp)

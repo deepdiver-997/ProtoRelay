@@ -231,5 +231,5 @@ set(PROTORELAY_MAIL_TARGETS
     mariadb_async_test session_base_test
     server_base_test outbound_utils_test starttls_handoff_test pipeline_deferred_test
     fsm_bench smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test pop3_fsm_test
-    pop3_timer_boundary_test outbound_smoke)
+    pop3_timer_boundary_test watchdog_timeout_test watchdog_cross_thread_test h2_multistream_test outbound_smoke)
 set(COMMON_SRCS "")
