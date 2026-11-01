@@ -22,6 +22,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         pop3_fsm_test
         watchdog_timeout_test
         watchdog_cross_thread_test
+        h2_multistream_test
         test_inbound_verifier
         outbound_smoke
         sql_queries_test
@@ -68,7 +69,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             smtp_client_contract_test storage_boundary_test
             logger_test std_thread_pool_test connection_interface_test server_transport_test asio_executor_test asio_error_test asio_server_transport_test pop3_timer_boundary_test
             pop3_fsm_test
-            watchdog_timeout_test watchdog_cross_thread_test
+            watchdog_timeout_test watchdog_cross_thread_test h2_multistream_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
             async_storage_provider_test
@@ -124,6 +125,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     set_tests_properties(logger_test std_thread_pool_test connection_interface_test asio_executor_test PROPERTIES TIMEOUT 20)
     set_tests_properties(asio_server_transport_test PROPERTIES TIMEOUT 20)
     set_tests_properties(pop3_timer_boundary_test asio_error_test PROPERTIES TIMEOUT 20)
+    # H2 整机多流 e2e：环境 curl 无 HTTP2 时以 77 退出（环境型 skip，不算失败）
+    if(TARGET h2_multistream_test)
+        set_tests_properties(h2_multistream_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
