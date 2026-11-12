@@ -875,6 +875,7 @@ int main() {
         starttls_roundtrip(backend, hint, tmp);
         ssl_listener_roundtrip(backend, hint, tmp);
         verification_failures(backend, hint, tmp);
+        close_notify_vs_truncation(backend, hint, tmp);
         cancel_and_backpressure(backend, hint, tmp);
     }
     return 0;

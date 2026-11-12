@@ -9,6 +9,7 @@
 #include <cassert>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -51,6 +52,22 @@ int open_connected_socket(uint16_t port) {
     address.sin_port = htons(port);
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     assert(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    return fd;
+}
+
+// Non-asserting connect used by the stop/accept race: after stop() the
+// listener is gone, so refusal is the expected outcome.
+int try_connect(uint16_t port) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        ::close(fd);
+        return -1;
+    }
     return fd;
 }
 
@@ -194,7 +211,11 @@ void echo_roundtrip(PollerBackend backend, uint16_t hint) {
         connected.set_value(error);
     });
     assert(ready_within(connected_outcome, std::chrono::seconds(5)));
-    assert(!connected_outcome.get());
+    const std::error_code connect_outcome = connected_outcome.get();
+    if (connect_outcome)
+        std::fprintf(stderr, "echo_roundtrip connect to 127.0.0.1:%u failed: %s (value=%d)\n",
+                     bound, connect_outcome.message().c_str(), connect_outcome.value());
+    assert(!connect_outcome);
     assert(client->is_open());
     assert(client->get_remote_ip() == "127.0.0.1");
     assert(client->get_local_port() != 0);
@@ -581,6 +602,91 @@ void executor_affinity(PollerBackend backend, uint16_t hint) {
     runtime.stop(true);
 }
 
+// A host name resolving to several addresses must try them all. "localhost"
+// usually yields ::1 before 127.0.0.1; the listener below is IPv4-only, so a
+// first-endpoint-only implementation fails exactly here (Asio tries the whole
+// resolver result).
+void hostname_falls_back_to_next_address(PollerBackend backend, uint16_t hint) {
+    NativeRuntime runtime(1, backend);
+    runtime.start();
+    uint16_t bound = 0;
+    auto transport = make_listener(runtime, hint, bound);
+
+    AcceptSlot slot;
+    transport->start([&slot](std::unique_ptr<IConnection> connection, const ListenerConfig&) {
+        slot.promise.set_value(std::move(connection));
+    });
+
+    auto client = runtime.make_client_transport();
+    std::promise<std::error_code> connected;
+    auto connected_outcome = connected.get_future();
+    client->async_connect("localhost", bound,
+                          [&](const std::error_code& error) { connected.set_value(error); });
+    assert(ready_within(connected_outcome, std::chrono::seconds(5)));
+    assert(!connected_outcome.get());
+    assert(client->get_remote_ip() == "127.0.0.1");
+
+    auto server_side = slot.future.get();
+    assert(server_side);
+    client->close();
+    server_side->close();
+    transport->stop();
+    runtime.stop(true);
+}
+
+// stop() must silence the accept callback before it returns, even when
+// connections keep arriving while the close job is queued behind a drain that
+// is already running on the loop thread. The connectors use a SMALL bounded
+// number of attempts: a tight hammer loop would exhaust the machine's
+// ephemeral port space (30s TIME_WAIT each) and poison every other loopback
+// test on the host.
+void stop_during_accept(PollerBackend backend, uint16_t hint) {
+    for (int round = 0; round < 4; ++round) {
+        NativeRuntime runtime(2, backend);
+        runtime.start();
+        uint16_t bound = 0;
+        auto transport = make_listener(runtime, static_cast<uint16_t>(hint + 6 + round), bound);
+
+        std::atomic<bool> stopped{false};
+        std::atomic<bool> connecting{true};
+        std::atomic<int> accepted{0};
+        std::atomic<int> delivered_after_stop{0};
+        transport->start([&](std::unique_ptr<IConnection> connection, const ListenerConfig&) {
+            if (stopped.load(std::memory_order_acquire))
+                delivered_after_stop.fetch_add(1, std::memory_order_relaxed);
+            accepted.fetch_add(1, std::memory_order_relaxed);
+            connection->close();
+        });
+
+        std::vector<std::thread> connectors;
+        for (int i = 0; i < 2; ++i) {
+            connectors.emplace_back([&] {
+                while (connecting.load(std::memory_order_acquire)) {
+                    for (int burst = 0; burst < 8; ++burst) {
+                        if (!connecting.load(std::memory_order_acquire)) return;
+                        const int fd = try_connect(bound);
+                        if (fd >= 0) ::close(fd);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                }
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        transport->stop();
+        stopped.store(true, std::memory_order_release);
+        // Give any accept callback that was queued behind the close job time
+        // to run; with the fix it is dropped at delivery.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        connecting.store(false, std::memory_order_release);
+        for (auto& connector : connectors) connector.join();
+
+        assert(delivered_after_stop.load() == 0);
+        transport->stop(); // idempotent
+        runtime.stop(true);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -596,6 +702,8 @@ int main() {
         listener_contract(backend, hint);
         shutdown_lifecycle(backend, hint);
         executor_affinity(backend, hint);
+        hostname_falls_back_to_next_address(backend, hint);
+        stop_during_accept(backend, hint);
     }
     return 0;
 }
