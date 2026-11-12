@@ -78,6 +78,12 @@ public:
     // （与 SmtpsServer::m_persistentQueue 注入同模式）。
     void set_metrics(std::weak_ptr<pr::MetricsServer> m) { m_metrics = m; }
 
+    // 直投模式（无 outbox 持久化，SmtpsServer 的 use_database=false 中继分支）：
+    // submit() 照常工作；但 outbox 拉取（try_pull/claim）与投递结果 DB 记账全部
+    // 跳过——没有记录可拉，也不得触碰 shard router 的 DB 池（单槽 mock/受限
+    // 连接会被 claim 占死，见 smtps_fsm_concurrency_test 2026-11-13 挂死实录）。
+    void set_direct_mode(bool on) { direct_mode_ = on; }
+
 private:
     // 端口解析：static_routes[domain] > ports[0] > 25
     int resolve_port(const std::string& domain) const;
@@ -140,6 +146,10 @@ private:
 
     // 2026-08-27: weak_ptr 持 metrics，outbound_server 析构后自动失效。
     std::weak_ptr<pr::MetricsServer> m_metrics;
+
+    // 直投模式（set_direct_mode）：无 outbox 持久化。非 atomic——只在 start()
+    // 前的装配窗口写（SmtpsServer 构造线程），运行期只读。
+    bool direct_mode_ = false;
 };
 
 } // namespace outbound

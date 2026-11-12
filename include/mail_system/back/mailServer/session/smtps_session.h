@@ -28,6 +28,8 @@
 
 namespace mail_system {
 
+namespace outbound { class OutboundServer; }
+
 template <typename ConnectionType>
 class SmtpsSession : public pr::SessionBase<ConnectionType> {
     friend class TraditionalSmtpsFsm<ConnectionType>;
@@ -69,6 +71,10 @@ public:
 
     void create_mail_on_data_command();
     persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
+    // 无 DB 中继直投：把当前 mail 的外部收件人直交出站引擎（绕过 outbox 持久化）。
+    // 仅当 SmtpsServer 装配了直投引擎（non-perf + external_delivery_enabled + 无 PQ）
+    // 且存在外部收件人时生效；否则不动 mail 所有权。
+    void transfer_mail_ownership_to_outbound();
     bool check_mail_persist_status();
     void async_wait_pending_mail(std::chrono::milliseconds timeout, persist_storage::PersistCompletion::Complete callback);
 
@@ -125,6 +131,7 @@ private:
     algorithm::LineFolder body_line_folder_;
 
     std::shared_ptr<persist_storage::PersistentQueue> persistent_queue_;
+    std::shared_ptr<outbound::OutboundServer> outbound_server_;
     persist_storage::PersistSubmissionTicket pending_submission_;
 
     std::unique_ptr<mail> mail_;

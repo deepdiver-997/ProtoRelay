@@ -57,11 +57,15 @@ void OutboundServer::start() {
             self->on_delivery_complete(record_id, std::move(result));
     };
 
-    // 初始拉取：post 到 worker 池，不占常驻线程
-    worker_pool_->post([weak]() { if (auto self = weak.lock()) self->try_pull(); });
+    // 初始拉取：post 到 worker 池，不占常驻线程（直投模式下 try_pull 空转，
+    // 不再 post）
+    if (!direct_mode_)
+        worker_pool_->post([weak]() { if (auto self = weak.lock()) self->try_pull(); });
 
-    // 空闲回收定时器
-    schedule_evict();
+    // 空闲回收定时器。直投模式不装：周期定时器是 io_context 上的未完成工作，
+    // 会把 IOThreadPool::stop(true) 的自然排空挂到下一个 tick（mock 池 fixture
+    // 的退出挂死实录）；直投会话随 stop() 统一关闭，无需 30s 回收。
+    if (!direct_mode_) schedule_evict();
 
     LOG_SMTP_INFO("OutboundServer started: worker={}", worker_id_);
 }
@@ -70,16 +74,19 @@ void OutboundServer::on_delivery_complete(uint64_t record_id, smtp::Result resul
     const bool success = result.outcome == smtp::Outcome::Accepted;
     const bool permanent = result.outcome == smtp::Outcome::Rejected || result.outcome == smtp::Outcome::AuthFailed;
     const std::string response = std::to_string(result.code) + " " + result.stage + " " + result.error;
-    // DB 写入 post 到 worker 池，不阻塞 IO 线程
-    auto db = shard_router_->get_db_pool(0);
-    if (db) {
-        worker_pool_->post([db, record_id, success, permanent, response]() {
-            OutboxRepository repo;
-            const bool saved = success ? repo.mark_sent(*db, record_id, response) :
-                permanent ? repo.mark_dead(*db, record_id, response) : repo.mark_retry(*db, record_id, response, 30);
-            if (!saved) LOG_SMTP_ERROR("Outbound: result persistence failed record_id={} response={}", record_id, response);
-        });
-    } else LOG_SMTP_ERROR("Outbound: no database for completion record_id={}", record_id);
+    // DB 写入 post 到 worker 池，不阻塞 IO 线程。直投模式无 outbox 记录可记账，
+    // 也不得触碰 DB 池（见 set_direct_mode 注释）。
+    if (!direct_mode_) {
+        auto db = shard_router_->get_db_pool(0);
+        if (db) {
+            worker_pool_->post([db, record_id, success, permanent, response]() {
+                OutboxRepository repo;
+                const bool saved = success ? repo.mark_sent(*db, record_id, response) :
+                    permanent ? repo.mark_dead(*db, record_id, response) : repo.mark_retry(*db, record_id, response, 30);
+                if (!saved) LOG_SMTP_ERROR("Outbound: result persistence failed record_id={} response={}", record_id, response);
+            });
+        } else LOG_SMTP_ERROR("Outbound: no database for completion record_id={}", record_id);
+    } // direct_mode_: 无 outbox 记录，跳过记账
 
     // 2026-08-27: 投递结果 metrics。domain label 在此 lambda 拿不到（task
     // 已 reset），仅用 {} 标签。counts 数本身比按域分桶价值高（聚合告警阈值）。
@@ -90,7 +97,8 @@ void OutboundServer::on_delivery_complete(uint64_t record_id, smtp::Result resul
                        {}, 1);
     }
 
-    // 计数递减和 try_pull 立即可执行（不依赖 DB 写入结果）
+    // 计数递减和 try_pull 立即可执行（不依赖 DB 写入结果）；直投模式下
+    // try_pull 是空操作。
     int64_t prev = pending_count_.fetch_sub(1) - 1;
     if (prev < LOW_WATERMARK) try_pull();
 }
@@ -146,6 +154,8 @@ void OutboundServer::submit(std::unique_ptr<MailDeliveryTask> task, int port) {
 // ── 拉取入口（水位检查 + CAS 抢占） ─────────────────────────
 void OutboundServer::try_pull() {
     if (!running_.load()) return;
+    // 直投模式没有 outbox：不拉取、不触碰 DB 池
+    if (direct_mode_) return;
     // 快速路径：水位够高直接返回，无 CAS 开销
     if (pending_count_.load(std::memory_order_relaxed) >= LOW_WATERMARK)
         return;
