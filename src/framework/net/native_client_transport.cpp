@@ -22,40 +22,48 @@
 
 namespace pr::net::native {
 namespace {
-bool parse_numeric(const std::string& host, uint16_t port, sockaddr_storage& storage,
-                   socklen_t& length) {
-    std::memset(&storage, 0, sizeof(storage));
+bool parse_numeric(const std::string& host, uint16_t port, std::vector<ConnectEndpoint>& out) {
+    sockaddr_storage storage{};
+    socklen_t length = 0;
     sockaddr_in* address4 = reinterpret_cast<sockaddr_in*>(&storage);
     if (::inet_pton(AF_INET, host.c_str(), &address4->sin_addr) == 1) {
         address4->sin_family = AF_INET;
         address4->sin_port = htons(port);
         length = sizeof(sockaddr_in);
-        return true;
-    }
-    sockaddr_in6* address6 = reinterpret_cast<sockaddr_in6*>(&storage);
-    if (::inet_pton(AF_INET6, host.c_str(), &address6->sin6_addr) == 1) {
+    } else {
+        sockaddr_in6* address6 = reinterpret_cast<sockaddr_in6*>(&storage);
+        if (::inet_pton(AF_INET6, host.c_str(), &address6->sin6_addr) != 1) return false;
         address6->sin6_family = AF_INET6;
         address6->sin6_port = htons(port);
         length = sizeof(sockaddr_in6);
-        return true;
     }
-    return false;
+    out.push_back(ConnectEndpoint{storage, length});
+    return true;
 }
 
 // Blocking resolution runs on a detached thread so the event loop never
 // blocks; numeric literals (the common local/test case) skip the thread.
-bool resolve_blocking(const std::string& host, uint16_t port, sockaddr_storage& storage,
-                      socklen_t& length) {
+// The ENTIRE getaddrinfo result is kept: a name with both AAAA and A records
+// must still connect when the first family is unreachable (Asio parity).
+bool resolve_blocking(const std::string& host, uint16_t port,
+                      std::vector<ConnectEndpoint>& out) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* results = nullptr;
     const int rc = ::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &results);
     if (rc != 0 || !results) return false;
-    std::memcpy(&storage, results->ai_addr, std::min<size_t>(results->ai_addrlen, sizeof(storage)));
-    length = results->ai_addrlen;
+    for (const addrinfo* entry = results; entry != nullptr; entry = entry->ai_next) {
+        if (entry->ai_addr == nullptr || entry->ai_addrlen == 0 ||
+            entry->ai_addrlen > sizeof(sockaddr_storage))
+            continue;
+        ConnectEndpoint endpoint;
+        std::memcpy(&endpoint.address, entry->ai_addr, entry->ai_addrlen);
+        endpoint.length = entry->ai_addrlen;
+        out.push_back(endpoint);
+    }
     ::freeaddrinfo(results);
-    return true;
+    return !out.empty();
 }
 
 class NativeClientTransport final : public net::IClientTransport {
@@ -112,21 +120,19 @@ public:
             if (auto stale = slot->clear()) slot->active.store(false, std::memory_order_release);
             state->connecting = true;
             state->connect_handler = std::move(handler);
-            sockaddr_storage storage{};
-            socklen_t length = 0;
-            if (parse_numeric(host, port, storage, length)) {
-                state->begin_socket_connect(storage, length);
+            std::vector<ConnectEndpoint> endpoints;
+            if (parse_numeric(host, port, endpoints)) {
+                state->begin_socket_connect(std::move(endpoints));
                 return;
             }
             const std::weak_ptr<StreamState> weak = state;
             std::thread([weak, host, port] {
-                sockaddr_storage storage{};
-                socklen_t length = 0;
-                const bool resolved = resolve_blocking(host, port, storage, length);
+                std::vector<ConnectEndpoint> endpoints;
+                const bool resolved = resolve_blocking(host, port, endpoints);
                 // Re-enter the loop with the outcome; a canceled connect
                 // (connecting flag cleared) is dropped there.
                 if (const auto state = weak.lock()) {
-                    state->loop->post([state, resolved, storage, length] {
+                    state->loop->post([state, resolved, endpoints = std::move(endpoints)] {
                         if (!state->connecting) return; // canceled while resolving
                         if (!resolved) {
                             state->connecting = false;
@@ -134,7 +140,7 @@ public:
                                 std::make_error_code(std::errc::host_unreachable));
                             return;
                         }
-                        state->begin_socket_connect(storage, length);
+                        state->begin_socket_connect(endpoints);
                     });
                 }
             }).detach();

@@ -44,6 +44,11 @@ struct ListenerState {
     std::shared_ptr<LoopEntry> entry;
     bool registered = false;
     net::IServerTransport::AcceptHandler handler; // loop-thread only
+    // Set by stop() on the caller's thread before the close job is queued: a
+    // drain loop already running on the listener thread stops pulling new
+    // connections immediately instead of after the queue reaches the close.
+    std::atomic<bool> stop_requested{false};
+    bool accepting = false;                       // loop-thread only
     tls_hook::Hooks* hooks = nullptr;             // null without the TLS module
     std::shared_ptr<TlsContextHolder> tls;
 };
@@ -132,6 +137,11 @@ std::unique_ptr<IConnection> wrap_ssl_listener_connection(
 void accept_ready(const std::shared_ptr<ListenerState>& state) {
     if (state->fd < 0) return;
     for (;;) {
+        // stop() may be called while this drain loop is running on the loop
+        // thread (its close job is queued behind us). Stop accepting as soon
+        // as the request is visible; callbacks already enqueued are dropped
+        // at delivery time below.
+        if (state->stop_requested.load(std::memory_order_acquire) || !state->accepting) return;
         const int client = ::accept(state->fd, nullptr, nullptr);
         if (client >= 0) {
             std::unique_ptr<IConnection> connection;
@@ -154,13 +164,17 @@ void accept_ready(const std::shared_ptr<ListenerState>& state) {
                 }
             }
             // Deliver through the loop queue like every other callback. The
-            // holder is copyable for std::function; exclusive ownership moves
-            // back into the unique_ptr right before the handler runs.
+            // handler is looked up at RUN time, not captured: stop()'s close
+            // job can be queued between this accept and this post, and a
+            // captured copy would then invoke the application after stop()
+            // returned. Looking it up here makes close_listener() the single
+            // switch that silences both queued and future deliveries; the
+            // holder destructor closes the connection we did accept.
             auto holder = std::make_shared<std::unique_ptr<IConnection>>(std::move(connection));
-            state->loop->post([state, handler = state->handler, holder] {
-                if (!handler) return;
+            state->loop->post([state, holder] {
+                if (!state->accepting || !state->handler) return;
                 std::unique_ptr<IConnection> owned = std::move(*holder);
-                handler(std::move(owned), state->config);
+                state->handler(std::move(owned), state->config);
             });
             continue;
         }
@@ -177,6 +191,7 @@ void accept_ready(const std::shared_ptr<ListenerState>& state) {
 
 void register_listener(const std::shared_ptr<ListenerState>& state) {
     if (state->registered || state->fd < 0) return;
+    state->accepting = true;
     state->entry = std::make_shared<LoopEntry>();
     const std::weak_ptr<ListenerState> weak = state;
     state->entry->on_event = [weak](unsigned) {
@@ -186,6 +201,7 @@ void register_listener(const std::shared_ptr<ListenerState>& state) {
 }
 
 void close_listener(const std::shared_ptr<ListenerState>& state) {
+    state->accepting = false;
     if (state->fd >= 0) {
         if (state->registered) {
             state->loop->remove_fd(state->fd);
@@ -257,6 +273,11 @@ public:
         if (stopped_) return;
         stopped_ = true;
         for (auto& state : listeners_) {
+            // The atomic stops an accept drain already running on the loop:
+            // the close job below is queued behind it and would otherwise let
+            // it keep pulling connections (and enqueue deliverable callbacks)
+            // after stop() was requested.
+            state->stop_requested.store(true, std::memory_order_release);
             // Close and clear the handler on the loop thread. invoke_when_live
             // blocks until that task ran: accept callbacks queued before it
             // have been delivered (FIFO queue) and none can be queued after —

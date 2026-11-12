@@ -90,39 +90,73 @@ void StreamState::initiate_write(const void* data, std::size_t size, IConnection
     update_interest();
 }
 
-void StreamState::begin_socket_connect(const sockaddr_storage& address, socklen_t length) {
+void StreamState::begin_socket_connect(std::vector<ConnectEndpoint> endpoints) {
     loop->assert_loop_thread("connect");
     // `connecting` was claimed by the client transport before resolution;
     // a cancel() that raced ahead would have closed the pending handler.
     if (!connecting) return;
-    fd = ::socket(address.ss_family, SOCK_STREAM, 0);
-    if (fd < 0) {
-        connecting = false;
-        complete_connect(last_error());
-        return;
-    }
-    set_nonblocking(fd);
-    set_close_on_exec(fd);
-    suppress_sigpipe(fd);
+    connect_endpoints = std::move(endpoints);
+    connect_index = 0;
+    connect_error.clear();
+    advance_connect();
+}
+
+// Tries the next resolved endpoint. A nonblocking connect that fails
+// immediately (unreachable family, refused, bad address) must not fail the
+// whole operation while another address remains: "localhost" commonly
+// resolves to ::1 first even when only 127.0.0.1 is listening, and the Asio
+// backend walks the entire resolver result the same way.
+void StreamState::advance_connect() {
+    if (!connecting) return;
+    while (connect_index < connect_endpoints.size()) {
+        const ConnectEndpoint endpoint = connect_endpoints[connect_index++];
+        fd = ::socket(endpoint.address.ss_family, SOCK_STREAM, 0);
+        if (fd < 0) {
+            connect_error = last_error();
+            continue;
+        }
+        set_nonblocking(fd);
+        set_close_on_exec(fd);
+        suppress_sigpipe(fd);
 #ifdef TCP_NODELAY
-    const int one = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        const int one = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 #endif
-    const int started = ::connect(fd, reinterpret_cast<const sockaddr*>(&address), length);
-    if (started == 0) {
-        connecting = false;
-        open.store(true, std::memory_order_release);
-        cache_endpoints();
-        complete_connect(std::error_code{});
-        return;
+        const int started = ::connect(
+            fd, reinterpret_cast<const sockaddr*>(&endpoint.address), endpoint.length);
+        if (started == 0) {
+            connecting = false;
+            open.store(true, std::memory_order_release);
+            cache_endpoints();
+            complete_connect(std::error_code{});
+            return;
+        }
+        // EINTR on a nonblocking connect does not mean failure: the connect
+        // continues asynchronously, exactly like EINPROGRESS, and the socket
+        // becomes writable when the outcome is known.
+        if (errno == EINPROGRESS || errno == EINTR) {
+            update_interest(); // readable|writable until the outcome arrives
+            return;
+        }
+        connect_error = last_error();
+        close_connect_socket();
     }
-    if (errno == EINPROGRESS) {
-        update_interest(); // readable|writable until the outcome arrives
-        return;
-    }
-    const std::error_code failure = last_error();
     connecting = false;
-    complete_connect(failure);
+    complete_connect(connect_error ? connect_error
+                                   : std::make_error_code(std::errc::host_unreachable));
+}
+
+void StreamState::close_connect_socket() {
+    if (fd >= 0) {
+        if (registered) {
+            loop->remove_fd(fd);
+            registered = false;
+        }
+        interest = 0;
+        ::close(fd);
+        fd = -1;
+    }
+    open.store(false, std::memory_order_release);
 }
 
 void StreamState::initiate_cancel() {
@@ -134,15 +168,8 @@ void StreamState::initiate_close() {
     loop->assert_loop_thread("close");
     open.store(false, std::memory_order_release);
     cancel_pending(std::make_error_code(std::errc::operation_canceled));
-    if (fd >= 0) {
-        if (registered) {
-            loop->remove_fd(fd);
-            registered = false;
-        }
-        interest = 0;
-        ::close(fd);
-        fd = -1;
-    }
+    connect_endpoints.clear();
+    close_connect_socket();
 }
 
 void StreamState::handle_event(unsigned ready) {
@@ -166,15 +193,8 @@ void StreamState::handle_loop_stopping() {
 void StreamState::dispose() {
     loop->assert_loop_thread("dispose");
     cancel_pending(std::make_error_code(std::errc::operation_canceled));
-    if (fd >= 0) {
-        if (registered) {
-            loop->remove_fd(fd);
-            registered = false;
-        }
-        interest = 0;
-        ::close(fd);
-        fd = -1;
-    }
+    connect_endpoints.clear();
+    close_connect_socket();
 }
 
 void StreamState::do_read() {
@@ -232,16 +252,17 @@ void StreamState::do_flush() {
 }
 
 void StreamState::finish_connect() {
-    connecting = false;
     const std::error_code outcome = socket_option_error(fd, SO_ERROR);
-    update_interest(); // drop the connect interest
     if (outcome) {
-        ::close(fd);
-        fd = -1;
-        open.store(false, std::memory_order_release);
-        complete_connect(outcome);
+        // This endpoint failed. Keep the pending connect alive and try the
+        // next resolved address; only the final failure reaches the handler.
+        connect_error = outcome;
+        close_connect_socket();
+        advance_connect();
         return;
     }
+    connecting = false;
+    update_interest(); // drop the connect interest
     open.store(true, std::memory_order_release);
     cache_endpoints();
     complete_connect(std::error_code{});
@@ -281,6 +302,8 @@ void StreamState::cancel_pending(const std::error_code& error) {
     }
     if (connecting) {
         connecting = false;
+        connect_endpoints.clear();
+        connect_index = 0;
         complete_connect(error);
     }
 }

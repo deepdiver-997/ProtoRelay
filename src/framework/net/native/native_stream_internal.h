@@ -5,10 +5,20 @@
 #include "framework/net/native_runtime.h"
 
 #include <atomic>
+#include <cstddef>
 #include <string>
 #include <sys/socket.h>
+#include <vector>
 
 namespace pr::net::native {
+
+// One resolved address a client connect may try. getaddrinfo can return both
+// an IPv6 and an IPv4 result for the same name; Asio's async_connect walks the
+// whole list, so the native transport stores it and advances on failure.
+struct ConnectEndpoint {
+    sockaddr_storage address{};
+    socklen_t length = 0;
+};
 
 // One TCP stream's operation state. Everything except `open` is confined to
 // the owning loop thread (initiations from foreign threads are routed through
@@ -22,9 +32,10 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
     void initiate_read(net::MutableBuffer buffer, IConnection::ReadHandler handler);
     void initiate_write(const void* data, std::size_t size, IConnection::WriteHandler handler);
     // Client connect, second half: the caller (client transport) has claimed
-    // `connecting` and resolved `address`; this creates the socket and starts
-    // the nonblocking connect.
-    void begin_socket_connect(const sockaddr_storage& address, socklen_t length);
+    // `connecting` and resolved the address list; this creates the socket and
+    // starts the nonblocking connect. Every endpoint is tried in order until
+    // one connects (the Asio async_connect contract).
+    void begin_socket_connect(std::vector<ConnectEndpoint> endpoints);
     void initiate_cancel();
     void initiate_close();
     // Resolution-failure path for the detached resolver thread.
@@ -55,6 +66,12 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
 
     bool connecting = false;
     IConnection::HandshakeHandler connect_handler;
+    // Connect fallback state (loop thread only): the resolved address list and
+    // the index of the attempt in flight. The last failure is reported only
+    // after every endpoint was tried.
+    std::vector<ConnectEndpoint> connect_endpoints;
+    std::size_t connect_index = 0;
+    std::error_code connect_error;
 
     // endpoint cache, filled at construction/establishment, then immutable
     uint16_t local_port = 0;
@@ -70,6 +87,8 @@ private:
     void do_read();
     void do_flush();
     void finish_connect();
+    void advance_connect(); // next resolved endpoint, or final failure
+    void close_connect_socket();
     void cache_endpoints();
     void complete_read(const std::error_code& error, std::size_t bytes);
     void complete_write(const std::error_code& error, std::size_t bytes);
