@@ -34,6 +34,16 @@
                 protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
             add_test(NAME native_tls_test COMMAND native_tls_test)
             set_tests_properties(native_tls_test PROPERTIES TIMEOUT 120)
+
+            # Framework composition on the native backend (TcpServerBase,
+            # SessionBase, MetricsServer) — no Asio required.
+            add_executable(native_framework_test test/unit/native_framework_test.cpp)
+            target_include_directories(native_framework_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_link_libraries(native_framework_test PRIVATE protorelay_framework
+                protorelay_runtime protorelay_native_net protorelay_native_tls
+                OpenSSL::SSL OpenSSL::Crypto)
+            add_test(NAME native_framework_test COMMAND native_framework_test)
+            set_tests_properties(native_framework_test PROPERTIES TIMEOUT 120)
         endif()
         # QUIC transport backend: only when the vendored third party was built.
         if(TARGET protorelay_quic)
@@ -90,7 +100,7 @@
         add_custom_target(unit_tests DEPENDS ${PROTORELAY_FRAMEWORK_UNIT_TESTS}
             ${PROTORELAY_NATIVE_UNIT_TESTS} ${NODE_UNIT_TESTS})
         if(TARGET protorelay_native_tls)
-            add_dependencies(unit_tests native_tls_test)
+            add_dependencies(unit_tests native_tls_test native_framework_test)
         endif()
     endif()
     add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)

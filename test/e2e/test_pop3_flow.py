@@ -33,12 +33,16 @@ def make_temp_config(base_cfg, proj_root, overrides):
     cfg['perf_mode'] = False
     cfg['use_database'] = False
     cfg['metrics_enabled'] = True
-    cfg['metrics_port'] = 19090
     cfg['metrics_bind_address'] = '127.0.0.1'
     cfg['log_to_console'] = False
     for k in ('certFile', 'keyFile', 'dhFile'):
         if cfg.get(k) and not os.path.isabs(cfg[k]):
-            cfg[k] = os.path.join(proj_root, cfg[k])
+            # The repository keeps certificates next to the config directory;
+            # both "<root>/<value>" (smtpsConfig) and "<root>/config/<value>"
+            # (imapsConfig/pop3Config) styles must resolve.
+            candidates = [os.path.join(proj_root, cfg[k]),
+                          os.path.join(proj_root, 'config', cfg[k])]
+            cfg[k] = next((p for p in candidates if os.path.exists(p)), candidates[0])
     if cfg.get('db_config_file') and not os.path.isabs(cfg['db_config_file']):
         cfg['db_config_file'] = os.path.join(proj_root, cfg['db_config_file'])
     return cfg
@@ -140,6 +144,8 @@ def main():
     parser.add_argument('--server', default='./build/pop3Server')
     parser.add_argument('--config', default='config/pop3Config.json')
     parser.add_argument('--listener-port', type=int, default=10110)
+    parser.add_argument('--metrics-port', type=int, default=19090)
+    parser.add_argument('--backend', choices=('asio', 'native'), default='asio')
     parser.add_argument('--keep-temp', action='store_true')
     args = parser.parse_args()
 
@@ -154,12 +160,15 @@ def main():
     cfg = make_temp_config(base_cfg, proj_root, {
         'listeners': [{'type': 'tcp', 'port': args.listener_port, 'auth_policy': 'off'}],
         'system_domain': 'test.local',
+        'address': '127.0.0.1',
+        'io_backend': args.backend,
+        'metrics_port': args.metrics_port,
     })
 
     proc = None
     passed, failed, skipped = [], [], []
     try:
-        print(f"Starting pop3Server on :{args.listener_port} (metrics :19090, no DB)...")
+        print(f"Starting pop3Server on :{args.listener_port} (metrics :{args.metrics_port}, backend={args.backend}, no DB)...")
         proc, tmp = start_server(server_bin, cfg, mail_dir, proj_root)
 
         # ============ 1. 协议流程 ============
@@ -210,7 +219,7 @@ def main():
         time.sleep(0.5)   # 等服务器检测 EOF 并关闭会话
 
         # ============ 2. Metrics 端点 ============
-        resp = http_get('127.0.0.1', 19090, '/metrics')
+        resp = http_get('127.0.0.1', args.metrics_port, '/metrics')
         body = resp.split('\r\n\r\n', 1)[1] if '\r\n\r\n' in resp else resp
 
         ok = find_metric_value(body, 'protorelay_pop3_sessions_total{result="ok"}')
@@ -236,7 +245,7 @@ def main():
             skipped.append(f"{name} (needs DB, covered by pop3_fsm_test)")
 
         # /status 端点基本可用
-        resp = http_get('127.0.0.1', 19090, '/status')
+        resp = http_get('127.0.0.1', args.metrics_port, '/status')
         if '200 OK' in resp and 'application/json' in resp:
             passed.append("GET /status returned JSON")
         else:

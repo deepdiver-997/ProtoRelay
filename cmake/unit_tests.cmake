@@ -229,6 +229,16 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         target_include_directories(native_tls_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
         target_link_libraries(native_tls_test PRIVATE protorelay_native_tls
             protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
+
+        # The framework composition on top of the native backend: a real
+        # TcpServerBase + SessionBase server (TCP, SSL, STARTTLS) and
+        # MetricsServer running on NativeRuntime. This is the io_backend=native
+        # path; native_transport_test deliberately bypasses the framework.
+        add_executable(native_framework_test test/unit/native_framework_test.cpp)
+        target_include_directories(native_framework_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_link_libraries(native_framework_test PRIVATE protorelay_framework
+            protorelay_runtime protorelay_native_net protorelay_native_tls
+            OpenSSL::SSL OpenSSL::Crypto)
     endif()
     # QUIC transport backend: only when the vendored third party was built.
     if(TARGET protorelay_quic)

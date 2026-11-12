@@ -90,7 +90,12 @@ def main():
     cfg['address'] = '127.0.0.1'
     for k in ('certFile', 'keyFile'):
         if cfg.get(k) and not os.path.isabs(cfg[k]):
-            cfg[k] = os.path.join(proj_root, cfg[k])
+            # Config values may be relative to the project root
+            # (config/smtpsConfig.json) or to the config directory itself
+            # (imapsConfig.json's "crt/server.crt").
+            candidates = [os.path.join(proj_root, cfg[k]),
+                          os.path.join(os.path.dirname(config_path), cfg[k])]
+            cfg[k] = next((p for p in candidates if os.path.exists(p)), candidates[0])
 
     # 使用非标准端口避免冲突
     cfg['listeners'] = [
