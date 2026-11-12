@@ -1,6 +1,19 @@
 # 日志、Worker 与网络后端解耦（2026-10-20）
 
 > 本页保留 2026-10-20 阶段记录。2026-10-22 的框架/邮件分层、客户端、数据库与构建模块状态见 [依赖边界与后续重构](dependency-boundaries.md)。
+>
+> **2026-11-13 更新**：下文"完整邮件服务目前仍需要 Asio，SQLite 驱动尚未实现"
+> 与"仓库尚未提供可部署的原生 socket runtime"已过时。现状：
+> - 原生（非 Asio）后端已可部署：配置 `io_backend: "native"` 在装配根选择
+>   `NativeRuntime`（kqueue/epoll/poll 三后端，TLS 走可选的
+>   `protorelay_native_tls`，缺失时全部 TLS 入口 fail-closed）。
+> - 数据库约束：native 后端仅支持 SQLite 或 `use_database=false`
+>   （MySQL/MariaDB 的 Asio 异步等待路径未迁移），bootstrap 会显式拒绝。
+> - 验收：native 传输/运行时/TLS/框架组合单测 + POP3/IMAP/dual-server
+>   e2e（`--backend native`）全绿；无 DB 中继走直投（见 SmtpsSession
+>   的 transfer_mail_ownership_to_outbound），不入 outbox。
+> - 默认仍是 `io_backend: "asio"`；Windows 支持整体暂缓（POSIX 头文件
+>   未隔离是有意为之）。
 
 本次重构把服务端协议所需的调度、连接、监听和 TLS 操作收敛为框架接口，并保留 Asio 实现。现有邮件服务继续使用 Asio 后端，不需要等待原生传输实现才能运行。日志和业务 Worker 已可独立选择后端；**完整邮件服务目前仍需要 Asio，SQLite 驱动尚未实现**。
 

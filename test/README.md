@@ -185,6 +185,19 @@ python3 test/e2e/test_tcp_sticky.py  # TCP 粘包截断测试
 python3 test/e2e/test_pop3_flow.py   # POP3 流程 + metrics
 ```
 
+### 网络后端变体（asio / native）
+双后端都可部署，e2e 用 `--backend` 切换（默认 asio）：
+
+```bash
+python3 test/e2e/test_dual_server.py --backend native --port 22100   # SMTP 中继投递（含 --protocol-only --auth-sqlite 变体）
+python3 test/e2e/test_imap_flow.py  --backend native --sqlite --port 22143
+python3 test/e2e/test_pop3_flow.py  --backend native --listener-port 22110 --metrics-port 29190
+```
+
+native 后端受数据库约束（SQLite 或无 DB），由 bootstrap 在装配时校验；
+两个后端共用同一套框架契约（IConnection/IServerTransport），单测覆盖见
+`native_*_test`（含框架组合的 `native_framework_test`）。
+
 ### 仅运行单元测试
 ```bash
 ./build.sh Release

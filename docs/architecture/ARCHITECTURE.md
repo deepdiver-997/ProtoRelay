@@ -89,7 +89,13 @@ mail protocol handlers; generic configuration/runtime live in the framework, whi
 `IConnection`, `IExecutor`/`ITimer` and `IServerTransport` define the backend boundary.
 The Asio adapter owns native sockets, acceptors, listener context/thread and TLS contexts.
 `TcpConnection`/`SslConnection` are ownership facades used by existing session factories.
-IOThreadPool remains the current production Asio runtime; a deployable native backend is not yet supplied.
+IOThreadPool (Asio) remains the default runtime; a native non-Asio runtime is selectable
+at the composition root via `io_backend: "native"` in the server config — same
+`IConnection`/`IServerTransport` contracts, kqueue/epoll/poll pollers, POSIX only,
+TLS through the optional `protorelay_native_tls` module (fail-closed without it).
+Database support under the native backend is limited to SQLite or `use_database=false`
+(MySQL/MariaDB async paths still require the Asio runtime); deployment targets are
+Linux/macOS — Windows porting is deferred project-wide.
 
 Business code in `include/mail_system/back/` inherits from these:
 - `SmtpsSession` / `ImapsSession` : public `SessionBase`
