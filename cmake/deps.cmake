@@ -2,6 +2,17 @@
 # 依赖查找 / 链接库列表 / COMMON_SRCS（原样拆出；变量靠 include 同作用域语义跨文件共享）
 # ================================================================
 # ===== 依赖查找 =====
+# Boost 查找的兼容矩阵：
+#   CMake ≥3.30（CMP0167 存在）：FindBoost 模块已被 CMake 4.x 移除——设 NEW
+#   显式走 Boost 自带的 BoostConfig.cmake（4.x 上 unset 也会静默回退到它，
+#   只会每次报警告）。
+#   CMake 3.x：无此 policy，保持 FindBoost 模块路径不变（cross sysroot 构建
+#   主机可能仍是旧 CMake / 旧 Boost，无 BoostConfig.cmake）。
+# Boost_NO_BOOST_CMAKE 只被 FindBoost 模块读取：3.x 路径下强制模块模式
+# （历史行为），CMP0167 NEW 的 config 路径下被忽略。
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 NEW)
+endif()
 set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "" FORCE)
 find_package(Boost REQUIRED)
 set(SYSROOT_INCLUDE "${SYSROOT_INCLUDE}" CACHE PATH "Sysroot include path for cross-compilation")

@@ -157,7 +157,15 @@ endif()
 if(HAVE_SQLITE3)
     protorelay_module(protorelay_db_sqlite
         src/mail_system/back/db/sqlite_service.cpp src/mail_system/back/db/sqlite_pool.cpp)
-    target_link_libraries(protorelay_db_sqlite PRIVATE protorelay_db_mysql SQLite::SQLite3)
+    # FindSQLite3 的导入目标改名：CMake 4.3 起规范名是 SQLite3::SQLite3，
+    # 旧名 SQLite::SQLite3 被标记 deprecated（<4.3 只有旧名，无 alias）。
+    # 两者是同一目标，按 CMake 版本择一。
+    if(TARGET SQLite3::SQLite3)
+        set(PR_SQLITE_TARGET SQLite3::SQLite3)
+    else()
+        set(PR_SQLITE_TARGET SQLite::SQLite3)
+    endif()
+    target_link_libraries(protorelay_db_sqlite PRIVATE protorelay_db_mysql ${PR_SQLITE_TARGET})
 endif()
 
 protorelay_module(protorelay_smtp_client src/mail_system/back/smtp_client/client_session.cpp)
