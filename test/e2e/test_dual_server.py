@@ -124,6 +124,9 @@ def main():
             {'type': 'tcp', 'port': port_b, 'auth_policy': 'off'},
         ],
         'system_domain': 'b.local',
+        # B 是中继/MX 节点：信任来自 A（回环）的投递，跳过本地用户校验——
+        # 无 DB 节点本就没有用户体系可查（trusted relay 设计语义）。
+        'trusted_relay_networks': ['127.0.0.1'],
         'use_database': False,
         'io_backend': args.backend,
         'address': '127.0.0.1',
