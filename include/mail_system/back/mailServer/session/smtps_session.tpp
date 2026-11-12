@@ -3,6 +3,8 @@
 #include <exception>
 #include "mail_system/back/storage/mail_object_key_layout.h"
 #include "mail_system/back/mailServer/smtps_server.h"
+#include "mail_system/back/mailServer/outbound/outbound_types.hpp"
+#include "mail_system/back/mailServer/outbound/mx_routing_utils.h"
 
 namespace mail_system {
 
@@ -24,7 +26,8 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     //   2) pr::ServerBase 加虚访问器 get_persistent_queue()，SmtpsServer 覆写返回 m_persistentQueue
     //      （会向传输无关基类引入 SMTP 专属语义，抽象污染）
     //   3) 构造函数显式接收 shared_ptr<PersistentQueue> 参数（最纯，但需改 make_tcp_session 调用点）
-    , persistent_queue_(static_cast<SmtpsServer*>(server)->m_persistentQueue) {}
+    , persistent_queue_(static_cast<SmtpsServer*>(server)->m_persistentQueue)
+    , outbound_server_(static_cast<SmtpsServer*>(server)->m_outboundServer) {}
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
@@ -351,9 +354,48 @@ persist_storage::SubmitOwnedMailResult SmtpsSession<ConnectionType>::submit_mail
         result.ticket.complete(persist_storage::PersistStatus::SUCCESS);
         pending_submission_ = result.ticket;
         LOG_SESSION_INFO("Mail {} accepted without persistence (null queue)", this->get_mail()->id);
+        // 无 DB 中继直投（引擎存在 + 有外部收件人才生效）。放在最后：可能
+        // 转移 mail_ 所有权，上面的日志/票据读取须先完成。
+        transfer_mail_ownership_to_outbound();
     }
 
     return result;
+}
+
+template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
+    // 无 DB 中继直投：SmtpsServer 在 non-perf + external_delivery_enabled 且
+    // 无持久化队列时装配直投引擎。出站引擎 submit() 自包含（静态路由命中时
+    // 跳过 DNS），outbox 拉取与结果记账在空池上是空操作。逐收件人建任务、
+    // 各持一份 mail 拷贝（与 PersistentQueue 的 outbox 记录任务同构）；
+    // 正文文件在 commit_body 已落盘，null-queue 模式下无人回收（与既有
+    // 压测行为一致）。本域收件人无用户体系可投，跳过——与 250 接受前的
+    // null-queue 语义相同。
+    auto outbound = outbound_server_;
+    if (!outbound || !this->get_mail()) return;
+    const std::string local_domain = get_server()->m_domain;
+
+    const auto owned = this->get_mail_ptr(); // 转移所有权；域外任务持有拷贝
+    if (!owned) return;
+    const std::uint64_t mail_id = owned->id;
+    size_t handed = 0;
+    for (const auto& recipient : owned->to) {
+        const auto at = recipient.rfind('@');
+        if (at == std::string::npos || at + 1 >= recipient.size()) continue;
+        const std::string domain = recipient.substr(at + 1);
+        if (domain.empty() || domain == local_domain) continue;
+        auto task = std::make_unique<outbound::MailDeliveryTask>();
+        task->mail_id = mail_id;
+        task->record_id = 0; // 无 outbox 行：结果记账走空池
+        task->sender = owned->from;
+        task->recipient = recipient;
+        task->mail_ptr = std::make_shared<mail>(*owned);
+        outbound->submit(std::move(task));
+        ++handed;
+    }
+    if (handed > 0)
+        LOG_SESSION_INFO("Mail {} handed to direct outbound relay: {} external recipient(s)",
+                         mail_id, handed);
 }
 
 template <typename ConnectionType>

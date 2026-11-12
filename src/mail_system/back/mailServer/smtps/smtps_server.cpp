@@ -59,6 +59,19 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         }
         m_persistentQueue->set_outbound_server(m_outboundServer);
         LOG_SERVER_INFO("OutboundServer (new engine) wired into PersistentQueue");
+    } else if (!cfg->perf_mode && m_shardRouter && cfg->external_delivery_enabled) {
+        // 无 DB 中继直投：不创建持久化队列（无 DB 不落 mails/outbox），但出站
+        // 引擎的 submit() 自包含——静态路由命中时跳过 DNS，outbox 拉取与结果
+        // 记账在空池上是空操作。trusted relay / dual-server e2e / 边缘中继
+        // （本地无用户体系）依赖这条路径；perf_mode 保持旧的纯接收语义。
+        if (!m_outboundServer) {
+            m_outboundServer = std::make_shared<outbound::OutboundServer>(this);
+            m_outboundServer->set_metrics(get_metrics());
+            m_outboundServer->set_config(submission::outbound_config(*cfg));
+            // 无 outbox 可拉/可记账；绝不触碰 DB 池（见 set_direct_mode 注释）
+            m_outboundServer->set_direct_mode(true);
+        }
+        LOG_SERVER_INFO("OutboundServer (direct relay, no persistence) enabled");
     } else {
         LOG_SERVER_WARN("No database pool — SMTP outbound delivery disabled");
     }
