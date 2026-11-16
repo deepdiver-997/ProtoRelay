@@ -14,7 +14,9 @@ void HttpFsm<ConnectionType>::init_engine() {
     // WAIT_BODY/RESPOND 两个 fallback handler 的合并语义）。回复文本不由引擎
     // 写（desc 的 reply 留空，写空串是无操作），observer 独占拒绝路径。
     engine_.set_violation_observer(
-        [](const Engine::SessionPtr& session) {
+        // Engine 是依赖类型别名（http_fsm.h 的 using Engine = fsm::Engine<...>），
+        // 其成员类型必须以 typename 引导——GCC 按标准拒绝（clang 恰好放行）。
+        [](const typename Engine::SessionPtr& session) {
             auto* s = static_cast<HttpSession<ConnectionType>*>(session.get());
             s->send_error_and_close(400);
         });
