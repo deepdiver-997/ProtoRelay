@@ -19,7 +19,7 @@
 #include "mail_system/back/db/sqlite_service.h"
 #include "mail_system/back/db/sqlite_pool.h"
 #include "mail_system/back/db/db_pool.h"
-#include "framework/thread_pool/std_thread_pool.h"
+#include "framework/thread_pool/worker_thread_pool.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include <atomic>
 #include <chrono>
@@ -147,7 +147,7 @@ void test_single_transaction_per_connection(const fs::path& db_path) {
 
 // ---------- 3. Worker / 完成 executor 装饰（ba0d413 模式） ----------
 void test_worker_completion_decorator(const fs::path& db_path) {
-    auto workers = std::make_shared<pr::StdThreadPool>(2);
+    auto workers = std::make_shared<pr::WorkerThreadPool>(2); // 别名层：BOOST/STD 矩阵都成立
     workers->start();
     auto io = std::make_shared<pr::IOThreadPool>(1);
     io->start();

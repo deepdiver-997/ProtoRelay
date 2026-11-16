@@ -391,6 +391,10 @@ void test_edge_stats_count_and_overlay() {
     Engine plain(std::move(plain_desc));
     expect_true(plain.edge_count_snapshot().empty(),
                 "edge stats disabled without the env");
+
+    // 本用例不走 Fixture（无析构收尾），手动落会话收尾契约——否则 session +
+    // MockConnection 活到 main 结束，LeakSanitizer 记 8KB indirect leak。
+    mail_system::finish_session(session);
 }
 
 // ---- engine: the two sanctioned write points ----

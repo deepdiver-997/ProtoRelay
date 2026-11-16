@@ -461,6 +461,15 @@ static void test_node_link_over_quic() {
     for (auto& l : server_links) l->stop();
     ex->drain();
     assert(server->stopped_);
+
+    // 泄漏卫生（LeakSanitizer）：stop 的收尾任务可能再 post 后续任务（比如
+    // 链路 fin 后的 mux 状态回调），一次 drain 不保证队列真空。反复排到队空；
+    // 然后按依赖逆序释放句柄，让闭包捕获的 executor/timer/mux 全部就地析构，
+    // 而不是活在 main 退出后才销毁的队列残任务里。
+    while (!ex->tasks.empty()) ex->drain();
+    server_links.clear();
+    streams.clear();
+    client_mux_raws.clear();
 }
 
 int main() {

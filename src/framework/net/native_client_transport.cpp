@@ -224,10 +224,14 @@ public:
         auto tls = tls_->clear();
         auto state = std::move(state_);
         state->open.store(false, std::memory_order_release);
-        // Graves FIFO: the TLS teardown (SSL_free + stream dispose) runs
-        // before the plain dispose, which stays for the non-TLS case and is
-        // idempotent when TLS already closed everything.
-        loop_->defer_destroy([tls = std::move(tls)] { });
+        // Graves FIFO: the TLS connection's DESTRUCTOR does the teardown
+        // (~TlsConnection → TlsSession::dispose: SSL_free + BIO pair free +
+        // stream dispose) and must run on the loop like every other teardown.
+        // A captured-but-never-invoked lambda would only defer the shared_ptr
+        // drop into grave destruction with caller-order-dependent semantics —
+        // under LeakSanitizer that leaked the whole SSL/BIO pair. Reset here,
+        // inside the loop-thread grave, so the destructor runs right here.
+        loop_->defer_destroy([tls = std::move(tls)]() mutable { tls.reset(); });
         loop_->defer_destroy([state] { state->dispose(); });
     }
 
