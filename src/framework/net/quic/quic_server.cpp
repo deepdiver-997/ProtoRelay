@@ -80,6 +80,13 @@ public:
     void stop() override {
         if (stopped_) return;
         stopped_ = true;
+        // Drop the accept callback: it typically captures the listener
+        // (shared_from_this) that owns this transport, so keeping it alive
+        // after stop() forms a listener → transport → handler → listener
+        // reference cycle and leaks both forever (LeakSanitizer found it
+        // through every quic_node_contract_test run). Matches the Asio server
+        // transport's close(), which also clears its handler.
+        handler_ = {};
         // Listener only: no more datagrams are read, so no new handshakes can
         // complete. Delivered connections stay in the engine (which lives
         // until this transport is destroyed).

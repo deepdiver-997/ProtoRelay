@@ -309,6 +309,10 @@ public:
         executor_->post([self] {
             self->muxes_.clear();   // mux dtor cancels pending accepts
             self->transport_->stop();
+            // The listener is held by the accept callbacks it installed
+            // (transport handler + on_stream): clearing both here is what lets
+            // the listener, its transport and their executor die after stop().
+            self->on_stream_ = {};
         });
     }
 

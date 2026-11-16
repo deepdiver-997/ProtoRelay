@@ -191,7 +191,11 @@ public:
             network_bio_ = nullptr;
             throw std::runtime_error("native TLS: BIO_new_bio_pair failed: " + drain_error_stack());
         }
-        BIO_up_ref(internal_bio); // SSL_set_bio consumes one ref per slot
+        // Canonical pairing per BIO_new_bio_pair(3): SSL_set_bio takes
+        // ownership of the internal end (SSL_free frees it implicitly), the
+        // session owns the network end. No extra BIO_up_ref here — an extra
+        // ref survives SSL_free and leaks one BIO + its 17 KB buffer per
+        // session (LeakSanitizer: 136 B × every TlsSession created).
         SSL_set_bio(ssl_, internal_bio, internal_bio);
         if (role_ == net::HandshakeRole::server) {
             SSL_set_accept_state(ssl_);

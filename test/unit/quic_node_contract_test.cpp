@@ -224,7 +224,9 @@ public:
         started_ = true;
         accept_handler_ = std::move(handler);
     }
-    void stop() override { stopped_ = true; }
+    // Mirror the real transport: a stopped transport drops its accept callback
+    // (otherwise the listener → transport → handler → listener cycle leaks).
+    void stop() override { stopped_ = true; accept_handler_ = {}; }
     void deliver_mux(std::unique_ptr<IMuxConnection> mux) {
         assert(started_ && !stopped_ && accept_handler_);
         auto box = std::make_shared<std::unique_ptr<IMuxConnection>>(std::move(mux));
