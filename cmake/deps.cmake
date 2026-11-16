@@ -13,8 +13,13 @@
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
 endif()
-set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "" FORCE)
-find_package(Boost REQUIRED)
+# Boost 只服务 Asio 侧（protorelay_asio / IO 线程池 / 可选 BOOST worker）。
+# PROTORELAY_BUILD_ASIO_RUNTIME=OFF 的 native+STD 消费者完全不需要它——
+# 跳过查找，使嵌入态零 Boost 配置可以工作。
+if(PROTORELAY_BUILD_ASIO_RUNTIME)
+    set(Boost_NO_BOOST_CMAKE ON CACHE BOOL "" FORCE)
+    find_package(Boost REQUIRED)
+endif()
 set(SYSROOT_INCLUDE "${SYSROOT_INCLUDE}" CACHE PATH "Sysroot include path for cross-compilation")
 
 if(USE_SSL)
@@ -38,6 +43,18 @@ else()
     message(STATUS "SSL/TLS support DISABLED")
 endif()
 
+# 嵌入第三方项目时缺包的兜底：系统没装且 PROTORELAY_ALLOW_FETCH_DEPS=ON 时
+# 用 FetchContent 拉（钉 tag + GIT_SHALLOW，消费一次网络，之后进缓存/源码树）。
+# FetchContent_MakeAvailable 要 CMake ≥3.14；旧 CMake（cross sysroot 主机）
+# 直接报错并给出明确出路，而不是在 configure 深处炸。
+set(PROTORELAY_CAN_FETCH_DEPS OFF)
+if(PROTORELAY_ALLOW_FETCH_DEPS AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.14)
+    include(FetchContent)
+    set(PROTORELAY_CAN_FETCH_DEPS ON)
+elseif(PROTORELAY_ALLOW_FETCH_DEPS)
+    message(STATUS "PROTORELAY_ALLOW_FETCH_DEPS=ON but CMake <3.14 — FetchContent fallback disabled")
+endif()
+
 # spdlog is private to its adapter. STANDARD/NONE never look up spdlog or fmt.
 if(PROTORELAY_LOG_BACKEND STREQUAL "SPDLOG")
     if(SYSROOT_INCLUDE)
@@ -49,12 +66,38 @@ if(PROTORELAY_LOG_BACKEND STREQUAL "SPDLOG")
         endif()
         add_compile_definitions(SPDLOG_FMT_EXTERNAL=OFF)
     else()
-        find_package(spdlog REQUIRED)
+        find_package(spdlog QUIET)
+        if(NOT TARGET spdlog::spdlog)
+            if(PROTORELAY_CAN_FETCH_DEPS)
+                message(STATUS "spdlog not found — fetching via FetchContent")
+                FetchContent_Declare(spdlog
+                    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+                    GIT_TAG v1.14.1
+                    GIT_SHALLOW TRUE)
+                FetchContent_MakeAvailable(spdlog)
+            else()
+                message(FATAL_ERROR "spdlog not found; install it (or set PROTORELAY_ALLOW_FETCH_DEPS=ON with CMake >=3.14)")
+            endif()
+        endif()
     endif()
 endif()
 
-# nlohmann_json
-find_package(nlohmann_json REQUIRED)
+# nlohmann_json：框架头文件（server_config_base / server_transport 等）的硬依赖，
+# 所有 protorelay_* 模块 PUBLIC 链接。系统有就用系统的；没有就 FetchContent 兜底。
+find_package(nlohmann_json QUIET)
+if(NOT TARGET nlohmann_json::nlohmann_json)
+    if(PROTORELAY_CAN_FETCH_DEPS)
+        message(STATUS "nlohmann_json not found — fetching via FetchContent")
+        set(JSON_BuildTests OFF CACHE INTERNAL "")
+        FetchContent_Declare(nlohmann_json
+            GIT_REPOSITORY https://github.com/nlohmann/json.git
+            GIT_TAG v3.12.0
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(nlohmann_json)
+    else()
+        message(FATAL_ERROR "nlohmann_json not found; install it (or set PROTORELAY_ALLOW_FETCH_DEPS=ON with CMake >=3.14)")
+    endif()
+endif()
 
 # curl
 if(PROTORELAY_BUILD_MAIL AND (ENABLE_HDFS_WEB_STORAGE OR ENABLE_S3_STORAGE))
@@ -75,7 +118,9 @@ elseif(PROTORELAY_LOG_BACKEND STREQUAL "NONE")
     set(PROTORELAY_LOG_NONE 1)
 endif()
 add_library(protorelay_logging STATIC ${LOGGING_SRCS})
-target_include_directories(protorelay_logging PUBLIC "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(protorelay_logging PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
 target_link_libraries(protorelay_logging PUBLIC Threads::Threads)
 target_compile_definitions(protorelay_logging PUBLIC PROTORELAY_HAS_SPDLOG=${PROTORELAY_HAS_SPDLOG})
 target_compile_definitions(protorelay_logging PRIVATE PROTORELAY_LOG_NONE=${PROTORELAY_LOG_NONE})
@@ -200,9 +245,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
 endif()
 
 # ===== 公共源文件 =====
+# Asio 网络后端：仅 PROTORELAY_BUILD_ASIO_RUNTIME=ON 时存在（Boost 强依赖点）。
 set(ASIO_NETWORK_SRCS src/framework/net/asio_connection.cpp src/framework/net/asio_server_transport.cpp src/framework/net/asio_client_transport.cpp src/framework/net/asio_readiness_waiter.cpp)
+if(PROTORELAY_BUILD_ASIO_RUNTIME)
 add_library(protorelay_asio STATIC ${ASIO_NETWORK_SRCS})
-target_include_directories(protorelay_asio PUBLIC "${CMAKE_SOURCE_DIR}/include")
+target_include_directories(protorelay_asio PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
 target_include_directories(protorelay_asio SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
 target_link_libraries(protorelay_asio PRIVATE protorelay_logging Threads::Threads)
 if(TARGET OpenSSL::SSL)
@@ -212,8 +261,13 @@ elseif(OPENSSL_LIBRARIES)
     target_link_libraries(protorelay_asio PUBLIC ${OPENSSL_LIBRARIES})
 endif()
 list(APPEND LINK_LIBRARIES protorelay_asio)
+endif()
 if(ENABLE_TSAN)
-    foreach(_adapter protorelay_logging protorelay_asio)
+    set(_tsan_adapters protorelay_logging)
+    if(TARGET protorelay_asio)
+        list(APPEND _tsan_adapters protorelay_asio)
+    endif()
+    foreach(_adapter ${_tsan_adapters})
         target_compile_options(${_adapter} PRIVATE -fsanitize=thread -g -O1)
         target_link_options(${_adapter} PUBLIC -fsanitize=thread)
     endforeach()

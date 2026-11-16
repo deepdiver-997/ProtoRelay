@@ -11,7 +11,7 @@
 # renamed declarations the libraries were built against. The BoringSSL
 # include directory precedes system paths on purpose — nothing else in this
 # build may resolve <openssl/ssl.h> to the system OpenSSL.
-set(PROTORELAY_QUIC_THIRD_PARTY_DIR "${CMAKE_SOURCE_DIR}/third_party/quic")
+set(PROTORELAY_QUIC_THIRD_PARTY_DIR "${PROJECT_SOURCE_DIR}/third_party/quic")
 set(PROTORELAY_QUIC_BORINGSSL_PREFIX "pr_bssl_")
 
 set(_quic_lsquic_lib "${PROTORELAY_QUIC_THIRD_PARTY_DIR}/lsquic/build/src/liblsquic/liblsquic.a")

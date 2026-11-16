@@ -92,6 +92,86 @@ CMakeLists.txt 现已支持自动查找依赖库，无需硬编码路径：
 - 通过 CMake 的 `find_package` 自动查找
 - macOS 回退路径：`/opt/homebrew/opt/openssl`, `/usr/local/opt/openssl`
 
+## 作为框架嵌入第三方项目（add_subdirectory / FetchContent）
+
+本仓库支持被第三方项目源码引入：`include/framework` + `src/framework` 是框架层
+（网络后端 / FSM / HTTP / 日志 / 线程池），`mail_system` 是应用层。嵌入态由
+`CMAKE_SOURCE_DIR != CMAKE_CURRENT_SOURCE_DIR` 自动检测，**默认值整体切换为
+framework-only**，顶层构建行为不变。
+
+### 用法一：固定路径 add_subdirectory
+
+```cmake
+# 第三方项目 CMakeLists.txt
+cmake_minimum_required(VERSION 3.16)
+project(myapp CXX)
+add_subdirectory(third_party/protorelay)          # git clone / subtree 均可
+
+target_link_libraries(myapp PRIVATE protorelay_framework protorelay_native_net)
+```
+
+### 用法二：FetchContent（版本钉死，推荐）
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(protorelay
+    GIT_REPOSITORY ssh://git@<host>/mail-system.git
+    GIT_TAG <commit-or-tag>
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(protorelay)
+```
+
+### 嵌入态默认值（均可用 -D 覆盖）
+
+| 缓存变量 | 嵌入默认 | 顶层默认 | 说明 |
+|---|---|---|---|
+| `PROTORELAY_BUILD_MAIL` | OFF | ON | mail 应用层需要 MySQL/c-ares |
+| `BUILD_TESTS` | OFF | ON | 测试树不随框架分发 |
+| `USE_SSL` | OFF | ON | ON 时 OpenSSL REQUIRED，`protorelay_native_tls` 随之可用 |
+| `PROTORELAY_LOG_BACKEND` | STANDARD | SPDLOG | SPDLOG 缺失时可用 FetchContent 兜底后改回 |
+| `PROTORELAY_BUILD_ASIO_RUNTIME` | ON | ON | **OFF → 零 Boost 构建**（见下） |
+| `PROTORELAY_ALLOW_FETCH_DEPS` | ON | ON | nlohmann_json/spdlog 缺包 FetchContent 兜底（CMake ≥3.14） |
+
+### 零 Boost 的 native + FSM 组合（推荐起点）
+
+```bash
+cmake -S . -B build -DPROTORELAY_BUILD_ASIO_RUNTIME=OFF
+```
+
+```cmake
+target_link_libraries(myapp PRIVATE
+    protorelay_framework      # ServerBase / SessionBase / pr::fsm::Engine 收口
+    protorelay_runtime        # STD worker 池（BoostThreadPool 需要 Boost，勿关 runtime 时选它）
+    protorelay_native_net)    # poller(kqueue/epoll/poll) + TCP 传输 + NativeRuntime
+```
+
+FSM 用法：`pr::fsm::Desc<State, Event>` + `pr::fsm::Engine` 全部在头文件
+（`include/framework/fsm/`），会话子类继承 `SessionBase<ConnectionType>` 走
+`session_base.tpp` 编译。最小完整示例见本仓库 `test/unit/native_framework_test.cpp`
+与 `test/unit/fsm_engine_test.cpp`。
+
+### 安装态（find_package，可选）
+
+消毒构建（无 sanitizer/coverage/object-only）会额外注册框架层导出集：
+
+```bash
+cmake --install build --prefix /opt/protorelay
+# 消费者：
+find_package(ProtoRelay 0.1 REQUIRED CONFIG)
+target_link_libraries(myapp PRIVATE protorelay::protorelay_framework protorelay::protorelay_native_net)
+```
+
+导出集覆盖框架层模块（logging/framework/runtime/asio/native_net/native_tls/
+node_link/node_auth/node_proto/readiness/http/h2）；mail 应用层模块与
+`protorelay_quic`（依赖 vendored lsquic 产物）不导出，后者请用 add_subdirectory。
+
+### 语义注意
+
+- `USE_SSL` 是跨头文件的结构体布局宏：`protorelay_module` 把它 PUBLIC 传播，
+  消费者链接即自动对齐；自己另写模块时也请显式加同款宏。
+- 嵌入态构建类型不改消费者的全局缓存；框架目标跟随消费者的 `CMAKE_BUILD_TYPE`。
+- 本机/顶层照旧：`./build.sh Release` 一切行为不变。
+
 ## 日志配置
 
 ### Debug 日志（独立开关）

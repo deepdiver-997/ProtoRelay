@@ -10,13 +10,33 @@ if(POLICY CMP0167)
 endif()
 
 # ===== 构建选项 =====
+# 嵌入态默认值（嵌入检测在根 CMakeLists，先于本文件执行）：
+#   - 默认只编框架层（mail 应用层需要 MySQL/c-ares，第三方消费者通常没有）
+#   - 默认不编测试（测试树是本仓库的开发资产，不随框架分发）
+#   - 日志默认 STANDARD 后端（spdlog 是本机/顶层装的；嵌入消费者可用
+#     PROTORELAY_ALLOW_FETCH_DEPS 兜底后再切回 SPDLOG）
+# set(...CACHE) 不带 FORCE：不覆盖消费者显式 -D 传入的值。
+if(NOT PROTORELAY_IS_TOP_LEVEL)
+    set(PROTORELAY_BUILD_MAIL OFF CACHE BOOL "Build the mail application layer")
+    set(BUILD_TESTS OFF CACHE BOOL "Build test and benchmark targets")
+    set(USE_SSL OFF CACHE BOOL "Enable SSL/TLS support")
+    set(PROTORELAY_LOG_BACKEND STANDARD CACHE STRING "Default log backend: SPDLOG, STANDARD, NONE")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type: Debug/Release" FORCE)
+    if(PROTORELAY_IS_TOP_LEVEL)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type: Debug/Release" FORCE)
+    else()
+        # 嵌入态：只设目录级变量，不写全局缓存——构建类型归消费者管。
+        set(CMAKE_BUILD_TYPE Release)
+    endif()
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 option(PROTORELAY_BUILD_MAIL "Build the mail application, database drivers and mail protocol servers" ON)
 option(USE_SSL "Enable SSL/TLS support" ON)
+# 嵌入第三方项目时缺包的兜底开关：允许用 FetchContent 拉 nlohmann_json/spdlog。
+option(PROTORELAY_ALLOW_FETCH_DEPS "Fetch missing nlohmann_json/spdlog via FetchContent" ON)
 option(ENABLE_DEBUG_LOGS "Enable debug logs for all modules" OFF)
 option(BUILD_OBJECT_ONLY "Compile object files only" OFF)
 option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check" ON)
@@ -39,6 +59,16 @@ if(PROTORELAY_WORKER_BACKEND STREQUAL "BOOST")
 else()
     add_compile_definitions(PROTORELAY_WORKER_BOOST=0)
     set(WORKER_SRCS src/framework/thread_pool/std_thread_pool.cpp)
+endif()
+# Asio 后端运行时（protorelay_asio + IO 线程池）：Boost 的唯一强依赖点。只要
+# native + STD worker 的消费者把它关掉即可得到零 Boost 的框架构建；mail 模式
+# 必须开（IOThreadPool/DB 异步续延走 Asio io_context）。
+option(PROTORELAY_BUILD_ASIO_RUNTIME "Build the Asio-backed IO runtime (protorelay_asio + io_thread_pool). OFF = Boost-free native/STD framework build" ON)
+if(PROTORELAY_BUILD_MAIL AND NOT PROTORELAY_BUILD_ASIO_RUNTIME)
+    message(FATAL_ERROR "PROTORELAY_BUILD_MAIL=ON requires PROTORELAY_BUILD_ASIO_RUNTIME=ON (mail runtime is Asio-backed)")
+endif()
+if(PROTORELAY_WORKER_BACKEND STREQUAL "BOOST" AND NOT PROTORELAY_BUILD_ASIO_RUNTIME)
+    message(FATAL_ERROR "PROTORELAY_WORKER_BACKEND=BOOST requires PROTORELAY_BUILD_ASIO_RUNTIME=ON (BoostThreadPool is Boost-based)")
 endif()
 option(ENABLE_FUZZING "Build libFuzzer harnesses, e.g. mime_fuzz (clang only)" OFF)
 option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
@@ -74,13 +104,13 @@ endif()
 string(TIMESTAMP PROTORELAY_BUILD_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
 set(PROTORELAY_BUILD_TARGET "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 set(PROTORELAY_COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-execute_process(COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short=12 HEAD
+execute_process(COMMAND git -C "${PROJECT_SOURCE_DIR}" rev-parse --short=12 HEAD
     OUTPUT_VARIABLE PROTORELAY_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 if(NOT PROTORELAY_GIT_COMMIT)
     set(PROTORELAY_GIT_COMMIT "unknown")
 endif()
-configure_file("${CMAKE_SOURCE_DIR}/include/mail_system/back/version/build_info.h.in"
-               "${CMAKE_BINARY_DIR}/generated/build_info.h" @ONLY)
+configure_file("${PROJECT_SOURCE_DIR}/include/mail_system/back/version/build_info.h.in"
+               "${PROJECT_BINARY_DIR}/generated/build_info.h" @ONLY)
 
 if(BUILD_OBJECT_ONLY)
     add_compile_definitions(FMT_HEADER_ONLY=1)

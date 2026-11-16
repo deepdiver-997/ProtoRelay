@@ -16,7 +16,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             set(ARG_SRCS ${COMMON_SRCS} test/unit/${NAME}.cpp)
         endif()
         add_executable(${NAME} ${ARG_SRCS})
-        target_include_directories(${NAME} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(${NAME} PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         setup_mail_target(${NAME})
         if(ARG_LIBS)
             target_link_libraries(${NAME} PRIVATE ${ARG_LIBS})
@@ -29,7 +29,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         src/mail_system/back/algorithm/smtp_utils.cpp   # AccountPolicy 边界判定用的 to_lower/trim
     )
     setup_mail_target(test_inbound_verifier)
-    target_include_directories(test_inbound_verifier PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(test_inbound_verifier PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
 
     add_executable(sql_queries_test
         test/unit/sql_queries_test.cpp
@@ -85,7 +85,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     pr_add_unit_test(mapped_file_test SRCS test/unit/mapped_file_test.cpp)
 
     add_executable(bcrypt_test test/unit/bcrypt_test.cpp src/mail_system/back/common/bcrypt.cpp)
-    target_include_directories(bcrypt_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(bcrypt_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
     setup_mail_target(bcrypt_test)
 
     add_executable(password_rehash_test
@@ -93,7 +93,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         src/mail_system/back/common/bcrypt.cpp
         src/mail_system/back/db/sql_queries.cpp
     )
-    target_include_directories(password_rehash_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(password_rehash_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
     setup_mail_target(password_rehash_test)
 
     add_executable(safe_parse_test test/unit/safe_parse_test.cpp)
@@ -105,7 +105,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         test/unit/account_policy_boundary_test.cpp
         src/mail_system/back/algorithm/smtp_utils.cpp
     )
-    target_include_directories(account_policy_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(account_policy_boundary_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
     setup_mail_target(account_policy_boundary_test)
 
     pr_add_unit_test(webmail_test
@@ -153,7 +153,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     pr_add_unit_test(readiness_waiter_test SRCS test/unit/readiness_waiter_test.cpp
         LIBS protorelay_readiness protorelay_asio)
     add_executable(async_db_adapter_test test/unit/async_db_adapter_test.cpp)
-    target_include_directories(async_db_adapter_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(async_db_adapter_test PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/test/unit")
     target_link_libraries(async_db_adapter_test PRIVATE Threads::Threads)
 
     pr_add_unit_test(account_authentication_test SRCS test/unit/account_authentication_test.cpp
@@ -161,7 +161,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(mailbox_repository_test
         src/mail_system/back/repository/mailbox_repository.cpp
         src/mail_system/back/db/sql_queries.cpp test/unit/mailbox_repository_test.cpp)
-    target_include_directories(mailbox_repository_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(mailbox_repository_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
     setup_mail_target(mailbox_repository_test)
 
     foreach(_repository imap_mutation_repository webmail_read_repository)
@@ -169,13 +169,13 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             src/mail_system/back/repository/${_repository}.cpp
             src/mail_system/back/db/sql_queries.cpp
             test/unit/${_repository}_test.cpp)
-        target_include_directories(${_repository}_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(${_repository}_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         setup_mail_target(${_repository}_test)
     endforeach()
 
     foreach(_completion imap_completion_repository webmail_persistence_repository pop3_repository account_repository persistence_repository persistent_queue_contract)
         add_executable(${_completion}_test test/unit/${_completion}_test.cpp)
-        target_include_directories(${_completion}_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(${_completion}_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         setup_mail_target(${_completion}_test)
         target_link_libraries(${_completion}_test PRIVATE protorelay_mail_core)
     endforeach()
@@ -185,10 +185,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(smtp_client_contract_test
         src/mail_system/back/smtp_client/client_session.cpp test/unit/smtp_client_contract_test.cpp)
-    target_include_directories(smtp_client_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(smtp_client_contract_test PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/test/unit")
     target_link_libraries(smtp_client_contract_test PRIVATE protorelay_logging OpenSSL::Crypto nlohmann_json::nlohmann_json)
     add_executable(storage_boundary_test test/unit/storage_boundary_test.cpp)
-    target_include_directories(storage_boundary_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(storage_boundary_test PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/test/unit")
     target_link_libraries(storage_boundary_test PRIVATE Threads::Threads)
 
     add_executable(logger_test test/unit/logger_test.cpp)
@@ -200,19 +200,19 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_link_libraries(std_thread_pool_test PRIVATE protorelay_logging)
 
     add_executable(connection_interface_test test/unit/connection_interface_test.cpp)
-    target_include_directories(connection_interface_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(connection_interface_test PRIVATE "${PROJECT_SOURCE_DIR}/include")
 
     # QUIC 多路复用契约：header-only，不链任何后端与第三方 QUIC/TLS 库；
     # nlohmann 仅为在测试里构造完整 TlsConfig（server_transport.h）而链，
     # 契约头本身只依赖标准库。ctest 注册与 unit_tests 聚合由下方
     # catch-all 扫描完成。
     add_executable(quic_contract_test test/unit/quic_contract_test.cpp)
-    target_include_directories(quic_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(quic_contract_test PRIVATE "${PROJECT_SOURCE_DIR}/include")
     target_link_libraries(quic_contract_test PRIVATE nlohmann_json::nlohmann_json)
 
     # Full server/metrics interface exercised without linking any Asio backend.
     add_executable(server_transport_test src/framework/server_base.cpp test/unit/server_transport_test.cpp)
-    target_include_directories(server_transport_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(server_transport_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
     target_link_libraries(server_transport_test PRIVATE protorelay_logging nlohmann_json::nlohmann_json)
 
     # Native (non-Asio) network backend tests: parallel optional module, the
@@ -220,13 +220,13 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # test via the catch-all ctest scan below.
     foreach(_test native_poller_test native_runtime_test native_transport_test)
         add_executable(${_test} test/unit/${_test}.cpp)
-        target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(${_test} PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         target_link_libraries(${_test} PRIVATE protorelay_native_net)
     endforeach()
     # TLS extension: only when the OpenSSL-bearing module exists.
     if(TARGET protorelay_native_tls)
         add_executable(native_tls_test test/unit/native_tls_test.cpp)
-        target_include_directories(native_tls_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(native_tls_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         target_link_libraries(native_tls_test PRIVATE protorelay_native_tls
             protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
 
@@ -235,7 +235,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         # MetricsServer running on NativeRuntime. This is the io_backend=native
         # path; native_transport_test deliberately bypasses the framework.
         add_executable(native_framework_test test/unit/native_framework_test.cpp)
-        target_include_directories(native_framework_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(native_framework_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         target_link_libraries(native_framework_test PRIVATE protorelay_framework
             protorelay_runtime protorelay_native_net protorelay_native_tls
             OpenSSL::SSL OpenSSL::Crypto)
@@ -243,19 +243,19 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # QUIC transport backend: only when the vendored third party was built.
     if(TARGET protorelay_quic)
         add_executable(quic_loopback_test test/unit/quic_loopback_test.cpp)
-        target_include_directories(quic_loopback_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(quic_loopback_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         target_include_directories(quic_loopback_test SYSTEM PRIVATE
-            ${CMAKE_SOURCE_DIR}/third_party/quic/boringssl/include
-            ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
+            ${PROJECT_SOURCE_DIR}/third_party/quic/boringssl/include
+            ${PROJECT_SOURCE_DIR}/third_party/quic/lsquic/include)
         target_link_libraries(quic_loopback_test PRIVATE protorelay_quic protorelay_native_net quic_lsquic)
     endif()
     # QUIC↔NodeLink 适配层真传输回环（vendored lsquic 可用时才编译；ctest catch-all 注册）
     if(TARGET protorelay_quic)
         add_executable(quic_node_loopback_test test/unit/quic_node_loopback_test.cpp)
-        target_include_directories(quic_node_loopback_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(quic_node_loopback_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         target_include_directories(quic_node_loopback_test SYSTEM PRIVATE
-            ${CMAKE_SOURCE_DIR}/third_party/quic/boringssl/include
-            ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
+            ${PROJECT_SOURCE_DIR}/third_party/quic/boringssl/include
+            ${PROJECT_SOURCE_DIR}/third_party/quic/lsquic/include)
         target_link_libraries(quic_node_loopback_test PRIVATE protorelay_quic protorelay_node_link
             protorelay_native_net quic_lsquic)
         if(TARGET protorelay_node_auth)
@@ -269,7 +269,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # Node link v1 auth test: same OpenSSL-bearing-module condition as above.
     if(TARGET protorelay_node_auth)
         add_executable(node_auth_test test/unit/node_auth_test.cpp)
-        target_include_directories(node_auth_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(node_auth_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         target_link_libraries(node_auth_test PRIVATE protorelay_node_auth
             protorelay_node_link protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
         if(TARGET protorelay_native_tls)
@@ -291,10 +291,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         LIBS protorelay_node_link)
 
     add_executable(asio_executor_test test/unit/asio_executor_test.cpp)
-    target_include_directories(asio_executor_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
+    target_include_directories(asio_executor_test PRIVATE "${PROJECT_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(asio_executor_test PRIVATE Threads::Threads protorelay_asio)
     add_executable(asio_error_test test/unit/asio_error_test.cpp)
-    target_include_directories(asio_error_test PRIVATE "${CMAKE_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
+    target_include_directories(asio_error_test PRIVATE "${PROJECT_SOURCE_DIR}/include" SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(asio_error_test PRIVATE Threads::Threads)
     if(TARGET OpenSSL::Crypto)
         target_link_libraries(asio_error_test PRIVATE OpenSSL::Crypto)
@@ -307,7 +307,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # MariaDB 非阻塞 async 回归（阶段 2）：连接池 available 在批量 async 查询后回基线
     if(HAVE_MARIADB)
         add_executable(mariadb_async_test ${COMMON_SRCS} test/unit/mariadb_async_test.cpp)
-        target_include_directories(mariadb_async_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(mariadb_async_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
         setup_mail_target(mariadb_async_test)
         target_include_directories(mariadb_async_test SYSTEM PRIVATE ${MARIADB_INCLUDE_DIR})
         target_compile_definitions(mariadb_async_test PRIVATE HAVE_MARIADB=1)
@@ -319,7 +319,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # 库文件由测试自行创建，无外部服务依赖——77 仅在临时目录不可用时出现。
     if(HAVE_SQLITE3)
         add_executable(sqlite_driver_test test/unit/sqlite_driver_test.cpp)
-        target_include_directories(sqlite_driver_test PRIVATE "${CMAKE_SOURCE_DIR}/include" "${CMAKE_SOURCE_DIR}/test/unit")
+        target_include_directories(sqlite_driver_test PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/test/unit")
         target_link_libraries(sqlite_driver_test PRIVATE protorelay_db_sqlite protorelay_runtime)
         add_test(NAME sqlite_driver_test COMMAND sqlite_driver_test)
         set_tests_properties(sqlite_driver_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
@@ -350,7 +350,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
         test/bench/fsm/fsm_bench.cpp
     )
-    target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    target_include_directories(fsm_bench PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
     setup_mail_target(fsm_bench)
 
     pr_add_unit_test(smtps_fsm_test
