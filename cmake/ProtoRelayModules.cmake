@@ -6,10 +6,19 @@ endif()
 
 function(protorelay_module target)
     add_library(${target} STATIC ${ARGN})
-    target_include_directories(${target} PUBLIC "${CMAKE_SOURCE_DIR}/include")
-    target_include_directories(${target} PRIVATE "${CMAKE_BINARY_DIR}/generated")
+    # BUILD_INTERFACE：构建树内从本仓库 include/ 解析（PROJECT_* 使 add_subdirectory
+    # 嵌入也指向本仓库而非消费者根）；INSTALL_INTERFACE：安装包相对 include/。
+    target_include_directories(${target} PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_include_directories(${target} PRIVATE "${PROJECT_BINARY_DIR}/generated")
     target_compile_features(${target} PUBLIC cxx_std_17)
     target_compile_definitions(${target} PRIVATE ENABLE_INBOUND_DEDUP_CHECK=$<BOOL:${ENABLE_INBOUND_DEDUP_CHECK}>)
+    # USE_SSL 语义上横跨框架头文件（server_config_base 等），必须 PUBLIC 传播：
+    # 消费者链接这些模块时自动拿到同款宏，保证结构体布局一致（ODS/ABI）。
+    if(USE_SSL)
+        target_compile_definitions(${target} PUBLIC USE_SSL)
+    endif()
     target_link_libraries(${target} PUBLIC protorelay_logging nlohmann_json::nlohmann_json Threads::Threads)
     if(ENABLE_TSAN)
         target_compile_options(${target} PRIVATE -fsanitize=thread -g -O1)
@@ -26,11 +35,18 @@ protorelay_module(protorelay_framework
     src/framework/session_base_inst.cpp
     src/framework/fsm/fsm_completion.cpp)
 protorelay_module(protorelay_readiness src/framework/net/poll_readiness_waiter.cpp)
-protorelay_module(protorelay_runtime
-    ${WORKER_SRCS}
-    src/framework/thread_pool/io_thread_pool.cpp
-    src/framework/thread_pool/io_context_registry.cpp)
-target_link_libraries(protorelay_runtime PUBLIC protorelay_asio)
+# 运行时模块：worker pool（STD/BOOST 二选一）永远在；Asio 的 IO 线程池部分
+# 只在 PROTORELAY_BUILD_ASIO_RUNTIME=ON（即 protorelay_asio 存在）时编入。
+set(PROTORELAY_RUNTIME_SRCS ${WORKER_SRCS})
+if(TARGET protorelay_asio)
+    list(APPEND PROTORELAY_RUNTIME_SRCS
+        src/framework/thread_pool/io_thread_pool.cpp
+        src/framework/thread_pool/io_context_registry.cpp)
+endif()
+protorelay_module(protorelay_runtime ${PROTORELAY_RUNTIME_SRCS})
+if(TARGET protorelay_asio)
+    target_link_libraries(protorelay_runtime PUBLIC protorelay_asio)
+endif()
 
 # Native (non-Asio) network backend: poller abstraction (kqueue on Apple/BSD,
 # epoll on Linux, POSIX poll fallback), IO runtime and plain-TCP transports.
@@ -86,7 +102,7 @@ endif()
 # QUIC transport backend (see include/framework/net/quic_transport.h and
 # third_party/quic/MANIFEST.md). Optional: compiled only when the vendored
 # lsquic + symbol-prefixed BoringSSL artifacts were built in this checkout.
-include(${CMAKE_SOURCE_DIR}/cmake/ProtoRelayQuicThirdParty.cmake)
+include(${PROJECT_SOURCE_DIR}/cmake/ProtoRelayQuicThirdParty.cmake)
 if(PROTORELAY_HAVE_QUIC_THIRD_PARTY)
     protorelay_module(protorelay_quic
         src/framework/net/quic/quic_internal.cpp

@@ -1,0 +1,20 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+if(NOT TARGET nlohmann_json::nlohmann_json)
+    find_dependency(nlohmann_json CONFIG)
+endif()
+if(@PROTORELAY_INSTALL_NEED_BOOST@)
+    find_dependency(Boost)
+endif()
+if(@PROTORELAY_INSTALL_NEED_OPENSSL@)
+    find_dependency(OpenSSL)
+endif()
+if(@PROTORELAY_INSTALL_NEED_SPDLOG@)
+    find_dependency(spdlog)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/ProtoRelayTargets.cmake")
+
+check_required_components(ProtoRelay)

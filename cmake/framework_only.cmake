@@ -4,15 +4,19 @@
     if(BUILD_OBJECT_ONLY)
         message(FATAL_ERROR "PROTORELAY_BUILD_MAIL=OFF requires a host library/executable build")
     endif()
-    add_executable(webServer test/server/web_server_main.cpp)
-    target_link_libraries(webServer PRIVATE protorelay_http protorelay_runtime)
-    add_executable(h2web test/server/h2web_main.cpp)
-    target_link_libraries(h2web PRIVATE protorelay_h2 protorelay_runtime)
+    # webServer/h2web 是 Asio 路径的冒烟 main（test/server/），只在 Asio 运行时
+    # 存在时编——PROTORELAY_BUILD_ASIO_RUNTIME=OFF 的嵌入构建跳过。
+    if(TARGET protorelay_asio)
+        add_executable(webServer test/server/web_server_main.cpp)
+        target_link_libraries(webServer PRIVATE protorelay_http protorelay_runtime)
+        add_executable(h2web test/server/h2web_main.cpp)
+        target_link_libraries(h2web PRIVATE protorelay_h2 protorelay_runtime)
+    endif()
     if(BUILD_TESTS)
         enable_testing()
         foreach(_test ${PROTORELAY_FRAMEWORK_UNIT_TESTS})
             add_executable(${_test} test/unit/${_test}.cpp)
-            target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_include_directories(${_test} PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
             target_link_libraries(${_test} PRIVATE protorelay_framework protorelay_runtime)
             add_test(NAME ${_test} COMMAND ${_test})
             set_tests_properties(${_test} PROPERTIES TIMEOUT 20)
@@ -21,7 +25,7 @@
         # configuration too — it must not depend on Boost/OpenSSL/spdlog.
         foreach(_test ${PROTORELAY_NATIVE_UNIT_TESTS})
             add_executable(${_test} test/unit/${_test}.cpp)
-            target_include_directories(${_test} PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_include_directories(${_test} PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
             target_link_libraries(${_test} PRIVATE protorelay_native_net)
             add_test(NAME ${_test} COMMAND ${_test})
             set_tests_properties(${_test} PROPERTIES TIMEOUT 120)
@@ -29,7 +33,7 @@
         # TLS extension test: only when the OpenSSL-bearing module exists.
         if(TARGET protorelay_native_tls)
             add_executable(native_tls_test test/unit/native_tls_test.cpp)
-            target_include_directories(native_tls_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_include_directories(native_tls_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
             target_link_libraries(native_tls_test PRIVATE protorelay_native_tls
                 protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
             add_test(NAME native_tls_test COMMAND native_tls_test)
@@ -38,7 +42,7 @@
             # Framework composition on the native backend (TcpServerBase,
             # SessionBase, MetricsServer) — no Asio required.
             add_executable(native_framework_test test/unit/native_framework_test.cpp)
-            target_include_directories(native_framework_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_include_directories(native_framework_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
             target_link_libraries(native_framework_test PRIVATE protorelay_framework
                 protorelay_runtime protorelay_native_net protorelay_native_tls
                 OpenSSL::SSL OpenSSL::Crypto)
@@ -48,12 +52,12 @@
         # QUIC transport backend: only when the vendored third party was built.
         if(TARGET protorelay_quic)
             add_executable(quic_loopback_test test/unit/quic_loopback_test.cpp)
-            target_include_directories(quic_loopback_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_include_directories(quic_loopback_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
             # The prefixed BoringSSL headers must precede any system OpenSSL
             # include path (e.g. Homebrew via nlohmann's interface).
             target_include_directories(quic_loopback_test SYSTEM PRIVATE
-                ${CMAKE_SOURCE_DIR}/third_party/quic/boringssl/include
-                ${CMAKE_SOURCE_DIR}/third_party/quic/lsquic/include)
+                ${PROJECT_SOURCE_DIR}/third_party/quic/boringssl/include
+                ${PROJECT_SOURCE_DIR}/third_party/quic/lsquic/include)
             target_link_libraries(quic_loopback_test PRIVATE protorelay_quic protorelay_native_net quic_lsquic)
             add_test(NAME quic_loopback_test COMMAND quic_loopback_test)
             set_tests_properties(quic_loopback_test PROPERTIES TIMEOUT 120)
@@ -67,7 +71,7 @@
         set(NODE_UNIT_TESTS node_link_test)
         if(TARGET protorelay_node_auth)
             add_executable(node_auth_test test/unit/node_auth_test.cpp)
-            target_include_directories(node_auth_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+            target_include_directories(node_auth_test PRIVATE "${PROJECT_SOURCE_DIR}/test/unit")
             target_link_libraries(node_auth_test PRIVATE protorelay_node_auth
                 protorelay_node_link protorelay_native_net OpenSSL::SSL OpenSSL::Crypto)
             if(TARGET protorelay_native_tls)
@@ -92,7 +96,7 @@
         # TlsConfig (server_transport.h); the contract header itself is
         # std-only.
         add_executable(quic_contract_test test/unit/quic_contract_test.cpp)
-        target_include_directories(quic_contract_test PRIVATE "${CMAKE_SOURCE_DIR}/include")
+        target_include_directories(quic_contract_test PRIVATE "${PROJECT_SOURCE_DIR}/include")
         target_link_libraries(quic_contract_test PRIVATE nlohmann_json::nlohmann_json)
         add_test(NAME quic_contract_test COMMAND quic_contract_test)
         set_tests_properties(quic_contract_test PROPERTIES TIMEOUT 20)
@@ -102,7 +106,9 @@
         if(TARGET protorelay_native_tls)
             add_dependencies(unit_tests native_tls_test native_framework_test)
         endif()
+        # 纯 CMake 脚本契约检查：不编译任何东西，跟进测试门（嵌入态 BUILD_TESTS=OFF
+        # 时连脚本路径都不引用——消费者的 test/ 与本仓库无关）。
+        add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
+        add_test(NAME object_tree_hygiene COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/test/backend_contract/check_object_tree_hygiene.cmake)
     endif()
-    add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
-    add_test(NAME object_tree_hygiene COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_object_tree_hygiene.cmake)
     return()

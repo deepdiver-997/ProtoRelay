@@ -97,8 +97,8 @@ endif()
 # Register every unit-test executable, including those historically omitted from CTest.
 # Discovery and build aggregation share the actual CMake target inventory.
 if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
-    add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
-    add_test(NAME object_tree_hygiene COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/test/backend_contract/check_object_tree_hygiene.cmake)
+    add_test(NAME dependency_boundaries COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/test/backend_contract/check_dependency_boundaries.cmake)
+    add_test(NAME object_tree_hygiene COMMAND ${CMAKE_COMMAND} -DPR_SOURCE_ROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/test/backend_contract/check_object_tree_hygiene.cmake)
     get_property(_unit_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
     foreach(_target IN LISTS _unit_targets)
         if(_target MATCHES "(_test$|^test_inbound_verifier$|^outbound_smoke$)" AND NOT _target STREQUAL "unit_tests")
@@ -150,7 +150,7 @@ if(ENABLE_FUZZING)
     set(FUZZ_NOSAN vptr)
 
     add_executable(mime_fuzz test/fuzz/mime_fuzz.cpp)
-    target_include_directories(mime_fuzz PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_include_directories(mime_fuzz PRIVATE "${PROJECT_SOURCE_DIR}/include")
     target_compile_options(mime_fuzz PRIVATE -fsanitize=${FUZZ_SANITIZERS} -fno-sanitize=${FUZZ_NOSAN} -g -O1)
     target_link_options(mime_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 
@@ -161,7 +161,7 @@ if(ENABLE_FUZZING)
         test/fuzz/smtp_data_fuzz.cpp
         src/mail_system/back/algorithm/smtp_utils.cpp)
     target_include_directories(smtp_fuzz PRIVATE
-        "${CMAKE_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/include"
         SYSTEM ${nlohmann_json_INCLUDE_DIRS}
         SYSTEM ${Boost_INCLUDE_DIRS})
     target_link_libraries(smtp_fuzz PRIVATE protorelay_logging)

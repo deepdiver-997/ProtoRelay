@@ -2,7 +2,9 @@
 # 输出目录 / setup_mail_target / 模块表（原样拆出）
 # ================================================================
 # ===== 输出目录 =====
-set(TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
+# PROJECT_BINARY_DIR：顶层 = CMAKE_BINARY_DIR（行为不变）；嵌入态 = 消费者构建树里
+# 本仓库的子目录，二进制不会泼进消费者的构建根。
+set(TEST_OUTPUT_DIR "${PROJECT_BINARY_DIR}")
 file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
 
@@ -10,10 +12,14 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}")
 # setup_mail_target — 为 target 注入公共 include/lib
 # ================================================================
 function(setup_mail_target NAME)
-    target_include_directories(${NAME} PRIVATE "${CMAKE_SOURCE_DIR}/include")
-    target_include_directories(${NAME} PRIVATE "${CMAKE_BINARY_DIR}/generated")
-    target_include_directories(${NAME} PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
-    target_include_directories(${NAME} PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    target_include_directories(${NAME} PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    target_include_directories(${NAME} PRIVATE "${PROJECT_BINARY_DIR}/generated")
+    if(nlohmann_json_INCLUDE_DIRS)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${nlohmann_json_INCLUDE_DIRS})
+    endif()
+    if(Boost_INCLUDE_DIRS)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${Boost_INCLUDE_DIRS})
+    endif()
     target_compile_features(${NAME} PRIVATE cxx_std_17)
     target_compile_definitions(${NAME} PRIVATE
         PROTORELAY_HAS_SPDLOG=${PROTORELAY_HAS_SPDLOG}
