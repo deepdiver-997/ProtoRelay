@@ -13,6 +13,8 @@
 
 namespace pr::net::native {
 namespace {
+thread_local size_t native_loop_depth = 0;
+
 std::error_code last_error() { return std::error_code(errno, std::generic_category()); }
 
 void set_nonblocking(int fd) {
@@ -117,6 +119,8 @@ bool NativeLoop::is_loop_thread() const {
            thread_id_.load(std::memory_order_acquire) == std::this_thread::get_id();
 }
 
+bool NativeLoop::is_any_loop_thread() { return native_loop_depth != 0; }
+
 void NativeLoop::assert_loop_thread(const char* what) const {
     // Enforcement is about concurrency: a live loop thread must be the only
     // mutator. When no thread is running (stopped loop, test-driven
@@ -140,17 +144,17 @@ bool NativeLoop::invoke_when_live(std::function<void()> task) {
     {
         std::lock_guard<std::mutex> lock(graves_mutex_);
         if (!thread_active_.load(std::memory_order_acquire)) return false;
-        {
-            std::lock_guard<std::mutex> task_lock(tasks_mutex_);
-            tasks_.push_back([task = std::move(task), done] {
-                try {
-                    task();
-                } catch (...) {
-                    // Teardown jobs must not strand the waiting thread.
-                }
-                done->set_value();
-            });
-        }
+        // Synchronous teardown must share the final exit/liveness gate with
+        // deferred destruction, not the ordinary queue that stop(false) may
+        // discard or shutdown_drain may already have finished sweeping.
+        graves_.push_back([task = std::move(task), done] {
+            try {
+                task();
+            } catch (...) {
+                // Teardown jobs must not strand the waiting thread.
+            }
+            done->set_value();
+        });
         const char token = 'w';
         ssize_t ignored = ::write(wake_fds_[1], &token, 1);
         (void)ignored;
@@ -288,20 +292,24 @@ void NativeLoop::drain_tasks(bool everything) {
 }
 
 void NativeLoop::drain_graves() {
-    std::lock_guard<std::mutex> lock(graves_mutex_);
-    drain_graves_locked();
-}
-
-void NativeLoop::drain_graves_locked() {
-    while (!graves_.empty()) {
-        auto dispose = std::move(graves_.front());
-        graves_.pop_front();
-        try {
-            dispose();
-        } catch (const std::exception& error) {
-            LOG_NETWORK_ERROR("Native loop deferred destruction threw: {}", error.what());
-        } catch (...) {
-            LOG_NETWORK_ERROR("Native loop deferred destruction threw a non-standard exception");
+    for (;;) {
+        std::deque<std::function<void()>> pending;
+        {
+            std::lock_guard<std::mutex> lock(graves_mutex_);
+            if (graves_.empty()) return;
+            pending.swap(graves_);
+        }
+        // Disposers can destroy user captures that stop transports or enqueue
+        // more disposers, including on another loop. Never hold the queue lock
+        // across these calls: even two nonblocking teardowns could deadlock.
+        for (auto& dispose : pending) {
+            try {
+                dispose();
+            } catch (const std::exception& error) {
+                LOG_NETWORK_ERROR("Native loop deferred destruction threw: {}", error.what());
+            } catch (...) {
+                LOG_NETWORK_ERROR("Native loop deferred destruction threw a non-standard exception");
+            }
         }
     }
 }
@@ -367,14 +375,21 @@ void NativeLoop::enter_thread() {
     std::lock_guard<std::mutex> lock(graves_mutex_);
     thread_id_.store(std::this_thread::get_id(), std::memory_order_release);
     thread_active_.store(true, std::memory_order_release);
+    ++native_loop_depth;
 }
 
 void NativeLoop::exit_thread() {
-    std::lock_guard<std::mutex> lock(graves_mutex_);
-    // Deactivation happens only after the final grave sweep: a foreign
-    // destructor that observed thread_active_ gets its corpse collected here.
-    drain_graves_locked();
-    thread_active_.store(false, std::memory_order_release);
+    for (;;) {
+        drain_graves();
+        std::lock_guard<std::mutex> lock(graves_mutex_);
+        // Close the liveness gate atomically with the final empty check. A
+        // foreign destructor either joins our next sweep or disposes inline
+        // after deactivation; no queued teardown is stranded during exit.
+        if (!graves_.empty()) continue;
+        thread_active_.store(false, std::memory_order_release);
+        --native_loop_depth;
+        return;
+    }
 }
 
 // ---------------------------------------------------------------- NativeTimer
@@ -493,7 +508,7 @@ bool NativeRuntime::is_running() const { return running_.load(std::memory_order_
 std::shared_ptr<IExecutor> NativeRuntime::next_executor() {
     std::lock_guard<std::mutex> lock(lifecycle_);
     ensure_loops();
-    const size_t index = next_loop_.fetch_add(1, std::memory_order_relaxed) % loops_.size();
+    const size_t index = next_loop_->fetch_add(1, std::memory_order_relaxed) % loops_.size();
     return loops_[index];
 }
 
@@ -515,7 +530,7 @@ std::unique_ptr<IServerTransport> NativeRuntime::make_server_transport(const Ser
     ensure_loops();
     // The transport only needs the loops (shared_ptr); it stays usable even if
     // the runtime object itself is released first.
-    return make_native_server_transport(config, loops_);
+    return make_native_server_transport(config, loops_, next_loop_);
 }
 
 std::shared_ptr<IClientTransport> NativeRuntime::make_client_transport() {

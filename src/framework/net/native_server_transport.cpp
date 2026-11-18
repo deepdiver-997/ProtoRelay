@@ -11,12 +11,15 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <condition_variable>
 #include <fcntl.h>
 #include <cstring>
 #include <netinet/in.h>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <unordered_set>
+#include <utility>
 
 namespace pr::net::native {
 namespace {
@@ -37,13 +40,130 @@ struct TlsContextHolder {
     }
 };
 
+// An accepted fd is not registered with a poller until its owner creates the
+// stream. stop() can therefore cancel queued handoffs without waiting for a
+// busy target loop, and without closing an fd already claimed by that loop.
+struct PendingSocket {
+    explicit PendingSocket(int value) : fd(value) {}
+    ~PendingSocket() { close(); }
+    void close() noexcept {
+        const int value = fd.exchange(-1, std::memory_order_acq_rel);
+        if (value >= 0) ::close(value);
+    }
+    int take() noexcept { return fd.exchange(-1, std::memory_order_acq_rel); }
+    std::atomic<int> fd;
+};
+
+struct DeliveryState;
+struct DeliveryLease {
+    DeliveryLease() = default;
+    DeliveryLease(DeliveryLease&& other) noexcept
+        : state(std::move(other.state)), handler(std::move(other.handler)),
+          fd(std::exchange(other.fd, -1)) {}
+    DeliveryLease(const DeliveryLease&) = delete;
+    DeliveryLease& operator=(const DeliveryLease&) = delete;
+    ~DeliveryLease();
+    std::shared_ptr<DeliveryState> state;
+    net::IServerTransport::AcceptHandler handler;
+    int fd = -1;
+};
+
+struct DeliveryState : std::enable_shared_from_this<DeliveryState> {
+    void start(net::IServerTransport::AcceptHandler callback) {
+        std::lock_guard<std::mutex> lock(mutex);
+        handler = std::move(callback);
+    }
+    bool enqueue(const std::shared_ptr<PendingSocket>& socket) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (stopped || !handler) return false;
+        pending.insert(socket);
+        return true;
+    }
+    void cancel(const std::shared_ptr<PendingSocket>& socket) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            pending.erase(socket);
+        }
+        socket->close();
+    }
+    DeliveryLease claim(const std::shared_ptr<PendingSocket>& socket) {
+        DeliveryLease lease;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopped || pending.find(socket) == pending.end()) return lease;
+            // Copy before taking fd ownership: a throwing function copy leaves
+            // the queued socket available to cancellation.
+            lease.handler = handler;
+            lease.fd = socket->take();
+            pending.erase(socket);
+            lease.state = shared_from_this();
+            ++active;
+        }
+        return lease;
+    }
+    void close() {
+        std::unordered_set<std::shared_ptr<PendingSocket>> canceled;
+        net::IServerTransport::AcceptHandler released;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopped = true;
+            canceled.swap(pending);
+            released = std::move(handler);
+        }
+        for (auto& socket : canceled) socket->close();
+        // Destroy user captures outside the gate, including captures that stop
+        // or release the application listener itself.
+    }
+    void wait_idle() {
+        std::unique_lock<std::mutex> lock(mutex);
+        idle.wait(lock, [this] { return active == 0; });
+    }
+    void finish() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            --active;
+        }
+        idle.notify_all();
+    }
+    std::mutex mutex;
+    std::condition_variable idle;
+    std::unordered_set<std::shared_ptr<PendingSocket>> pending;
+    net::IServerTransport::AcceptHandler handler;
+    std::size_t active = 0;
+    bool stopped = false;
+};
+
+DeliveryLease::~DeliveryLease() {
+    if (fd >= 0) ::close(fd);
+    if (state) state->finish();
+}
+
+struct ConnectionAssignment {
+    ConnectionAssignment(const std::vector<NativeLoopPtr>& owners,
+                         std::shared_ptr<std::atomic<size_t>> shared_cursor)
+        : cursor(shared_cursor ? std::move(shared_cursor) : std::make_shared<std::atomic<size_t>>(0)) {
+        for (const auto& loop : owners) loops.push_back(loop);
+    }
+    NativeLoopPtr next() const {
+        const auto index = cursor->fetch_add(1, std::memory_order_relaxed) % loops.size();
+        auto loop = loops[index].lock();
+        if (!loop) throw std::system_error(std::make_error_code(std::errc::operation_canceled));
+        return loop;
+    }
+    std::vector<std::weak_ptr<NativeLoop>> loops;
+    std::shared_ptr<std::atomic<size_t>> cursor;
+};
+
 struct ListenerState {
     ListenerConfig config;
     int fd = -1;
     NativeLoopPtr loop;
     std::shared_ptr<LoopEntry> entry;
     bool registered = false;
-    net::IServerTransport::AcceptHandler handler; // loop-thread only
+    // Multiple external stop callers may close inline after the loop exits.
+    std::mutex close_mutex;
+    std::shared_ptr<DeliveryState> delivery;
+    std::shared_ptr<ConnectionAssignment> assignment;
     // Set by stop() on the caller's thread before the close job is queued: a
     // drain loop already running on the listener thread stops pulling new
     // connections immediately instead of after the queue reaches the close.
@@ -51,6 +171,7 @@ struct ListenerState {
     bool accepting = false;                       // loop-thread only
     tls_hook::Hooks* hooks = nullptr;             // null without the TLS module
     std::shared_ptr<TlsContextHolder> tls;
+    ~ListenerState() { if (fd >= 0) ::close(fd); }
 };
 
 // Returns the sockaddr length, or 0 when the address is not a numeric IPv4/
@@ -117,14 +238,14 @@ void open_listen_socket(ListenerState& state, const sockaddr_storage& address,
 // Handshake initiation stays with the session (async_handshake on the
 // returned connection), matching the STARTTLS upgrade shape.
 std::unique_ptr<IConnection> wrap_ssl_listener_connection(
-    const std::shared_ptr<ListenerState>& state, std::unique_ptr<IConnection> connection) {
+    tls_hook::Hooks* hooks, const std::shared_ptr<TlsContextHolder>& tls,
+    std::unique_ptr<IConnection> connection) {
     auto* base = dynamic_cast<NativeStreamBase*>(connection.get());
     if (!base) throw std::runtime_error("native TLS listener requires a native stream");
     auto stream = base->release_state();
     connection.reset(); // the wrapper now owns nothing
     try {
-        return state->hooks->wrap(state->loop, stream, state->tls->snapshot(),
-                                  net::HandshakeRole::server);
+        return hooks->wrap(stream->loop, stream, tls->snapshot(), net::HandshakeRole::server);
     } catch (...) {
         stream->dispose(); // loop thread: close the socket we just consumed
         throw;
@@ -144,38 +265,46 @@ void accept_ready(const std::shared_ptr<ListenerState>& state) {
         if (state->stop_requested.load(std::memory_order_acquire) || !state->accepting) return;
         const int client = ::accept(state->fd, nullptr, nullptr);
         if (client >= 0) {
-            std::unique_ptr<IConnection> connection;
+            std::shared_ptr<PendingSocket> pending;
             try {
-                connection = make_native_tcp_connection(client, state->loop);
+                pending = std::make_shared<PendingSocket>(client);
+            } catch (...) {
+                ::close(client);
+                throw;
+            }
+            auto delivery = state->delivery;
+            try {
+                auto target = state->assignment->next();
+                if (!delivery->enqueue(pending)) continue;
+                // Do not capture ListenerState or a strong target-loop pointer:
+                // an unpumped task queue must not own the loop that contains it.
+                target->post([delivery, pending, owner = std::weak_ptr<NativeLoop>(target),
+                              config = state->config, hooks = state->hooks, tls = state->tls] {
+                    try {
+                        auto lease = delivery->claim(pending);
+                        if (!lease.state) return;
+                        auto loop = owner.lock();
+                        if (!loop) return;
+                        auto connection = make_native_tcp_connection(lease.fd, loop);
+                        lease.fd = -1; // successful construction consumed the fd
+                        if (config.type == ListenerType::SSL)
+                            connection = wrap_ssl_listener_connection(hooks, tls, std::move(connection));
+                        lease.handler(std::move(connection), config);
+                    } catch (const std::exception& error) {
+                        delivery->cancel(pending);
+                        LOG_NETWORK_ERROR("Accepted connection delivery failed: {}", error.what());
+                    } catch (...) {
+                        delivery->cancel(pending);
+                        LOG_NETWORK_ERROR("Accepted connection delivery threw a non-standard exception");
+                    }
+                });
             } catch (const std::exception& error) {
-                ::close(client); // nothing owns the fd yet
-                LOG_NETWORK_ERROR("Accepted connection setup failed: {}", error.what());
-                continue;
+                delivery->cancel(pending);
+                LOG_NETWORK_ERROR("Accepted connection handoff failed: {}", error.what());
+            } catch (...) {
+                delivery->cancel(pending);
+                throw;
             }
-            if (state->config.type == ListenerType::SSL) {
-                try {
-                    connection = wrap_ssl_listener_connection(state, std::move(connection));
-                } catch (const std::exception& error) {
-                    // The wrapper (or its stream) still owns the fd; its
-                    // destructor schedules the teardown.
-                    connection.reset();
-                    LOG_NETWORK_ERROR("TLS connection setup failed: {}", error.what());
-                    continue;
-                }
-            }
-            // Deliver through the loop queue like every other callback. The
-            // handler is looked up at RUN time, not captured: stop()'s close
-            // job can be queued between this accept and this post, and a
-            // captured copy would then invoke the application after stop()
-            // returned. Looking it up here makes close_listener() the single
-            // switch that silences both queued and future deliveries; the
-            // holder destructor closes the connection we did accept.
-            auto holder = std::make_shared<std::unique_ptr<IConnection>>(std::move(connection));
-            state->loop->post([state, holder] {
-                if (!state->accepting || !state->handler) return;
-                std::unique_ptr<IConnection> owned = std::move(*holder);
-                state->handler(std::move(owned), state->config);
-            });
             continue;
         }
         if (errno == EINTR) continue;
@@ -190,7 +319,7 @@ void accept_ready(const std::shared_ptr<ListenerState>& state) {
 }
 
 void register_listener(const std::shared_ptr<ListenerState>& state) {
-    if (state->registered || state->fd < 0) return;
+    if (state->stop_requested.load(std::memory_order_acquire) || state->registered || state->fd < 0) return;
     state->accepting = true;
     state->entry = std::make_shared<LoopEntry>();
     const std::weak_ptr<ListenerState> weak = state;
@@ -201,6 +330,7 @@ void register_listener(const std::shared_ptr<ListenerState>& state) {
 }
 
 void close_listener(const std::shared_ptr<ListenerState>& state) {
+    std::lock_guard<std::mutex> lock(state->close_mutex);
     state->accepting = false;
     if (state->fd >= 0) {
         if (state->registered) {
@@ -210,14 +340,16 @@ void close_listener(const std::shared_ptr<ListenerState>& state) {
         ::close(state->fd);
         state->fd = -1;
     }
-    state->handler = {};
 }
 
 class NativeServerTransport final : public net::IServerTransport {
 public:
     NativeServerTransport(const net::ServerTransportConfig& config,
-                          const std::vector<NativeLoopPtr>& loops)
-        : tls_(std::make_shared<TlsContextHolder>()) {
+                          const std::vector<NativeLoopPtr>& loops,
+                          std::shared_ptr<std::atomic<size_t>> cursor)
+        : connection_loops_(loops),
+          assignment_(std::make_shared<ConnectionAssignment>(loops, std::move(cursor))),
+          delivery_(std::make_shared<DeliveryState>()), tls_(std::make_shared<TlsContextHolder>()) {
         if (loops.empty())
             throw std::invalid_argument("native server transport requires a runtime loop");
         sockaddr_storage address{};
@@ -242,6 +374,8 @@ public:
             auto state = std::make_shared<ListenerState>();
             state->config = listener;
             state->loop = loops[listener_slot_++ % loops.size()];
+            state->assignment = assignment_;
+            state->delivery = delivery_;
             state->hooks = hooks_;
             state->tls = tls_;
             open_listen_socket(*state, address, address_length);
@@ -258,34 +392,40 @@ public:
         std::lock_guard<std::mutex> lock(lifecycle_);
         if (stopped_) throw std::logic_error("listener has already stopped");
         if (started_) return;
+        delivery_->start(std::move(handler));
         started_ = true;
         for (auto& state : listeners_) {
             const auto captured = state;
-            // Handler and interest registration both run on the loop thread,
-            // so a ready accept can never observe a missing handler.
-            captured->loop->post([captured, handler] { captured->handler = handler; });
             captured->loop->post([captured] { register_listener(captured); });
         }
     }
 
     void stop() override {
-        std::lock_guard<std::mutex> lock(lifecycle_);
-        if (stopped_) return;
-        stopped_ = true;
-        for (auto& state : listeners_) {
-            // The atomic stops an accept drain already running on the loop:
-            // the close job below is queued behind it and would otherwise let
-            // it keep pulling connections (and enqueue deliverable callbacks)
-            // after stop() was requested.
+        {
+            std::lock_guard<std::mutex> lock(lifecycle_);
+            if (shutdown_complete_) return;
+            stopped_ = true;
+        }
+        for (const auto& state : listeners_)
             state->stop_requested.store(true, std::memory_order_release);
-            // Close and clear the handler on the loop thread. invoke_when_live
-            // blocks until that task ran: accept callbacks queued before it
-            // have been delivered (FIFO queue) and none can be queued after —
-            // exactly the IServerTransport::stop contract.
+        delivery_->close(); // cancel queued raw fds before waiting on any loop
+
+        const bool from_loop = NativeLoop::is_any_loop_thread();
+        for (const auto& state : listeners_) {
             const auto captured = state;
             const auto close_job = [captured] { close_listener(captured); };
-            if (!captured->loop->invoke_when_live(close_job)) close_job();
+            if (from_loop) {
+                // A callback may stop/release its transport. Never wait across
+                // loops here: another loop can be in the same callback/stop path.
+                captured->loop->defer_destroy(close_job);
+            } else if (!captured->loop->invoke_when_live(close_job)) {
+                close_job();
+            }
         }
+        if (from_loop) return; // the external stop contract is a blocking barrier
+        delivery_->wait_idle();
+        std::lock_guard<std::mutex> lock(lifecycle_);
+        shutdown_complete_ = true;
     }
 
     void configure_tls(const net::TlsConfig& config) override {
@@ -313,11 +453,15 @@ public:
         }
         auto stream = base->release_state();
         plain.reset(); // the TLS connection owns the stream now
-        return hooks_->wrap(stream->loop, std::move(stream), context, net::HandshakeRole::server);
+        const auto loop = stream->loop;
+        return hooks_->wrap(loop, std::move(stream), context, net::HandshakeRole::server);
     }
 
 private:
     size_t listener_slot_ = 0;
+    std::vector<NativeLoopPtr> connection_loops_;
+    std::shared_ptr<ConnectionAssignment> assignment_;
+    std::shared_ptr<DeliveryState> delivery_;
     std::vector<std::shared_ptr<ListenerState>> listeners_;
     std::vector<ListenerConfig> bound_listeners_;
     tls_hook::Hooks* hooks_ = nullptr;
@@ -325,12 +469,14 @@ private:
     std::mutex lifecycle_;
     bool started_ = false;
     bool stopped_ = false;
+    bool shutdown_complete_ = false;
 };
 } // namespace
 
 std::unique_ptr<net::IServerTransport> make_native_server_transport(
-    const net::ServerTransportConfig& config, const std::vector<NativeLoopPtr>& loops) {
-    return std::make_unique<NativeServerTransport>(config, loops);
+    const net::ServerTransportConfig& config, const std::vector<NativeLoopPtr>& loops,
+    std::shared_ptr<std::atomic<size_t>> connection_cursor) {
+    return std::make_unique<NativeServerTransport>(config, loops, std::move(connection_cursor));
 }
 
 } // namespace pr::net::native

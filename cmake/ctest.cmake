@@ -74,11 +74,18 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             quic_node_contract_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
+            local_storage_runtime_test local_file_write_runtime_test local_storage_bootstrap_test
+            smtp_local_commit_test
             async_storage_provider_test
             intrusion_detector_test server_config_test mapped_file_test
             thread_pool_test session_base_test server_base_test
             outbound_utils_test metrics_core_test bcrypt_test
             webmail_test smtp_submitter_test smtp_client_test smtp_persist_ack_test persist_submission_test http_session_read_test)
+        foreach(_native_test native_runtime_test native_transport_test native_tls_test native_framework_test)
+            if(TARGET ${_native_test})
+                list(APPEND _asan_tests ${_native_test})
+            endif()
+        endforeach()
         foreach(_t IN LISTS _asan_tests)
             # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
