@@ -7,6 +7,10 @@
 #include "framework/net/server_transport.h"
 #include <csignal>
 #include <stdexcept>
+#include <algorithm>
+#include <future>
+#include <mutex>
+#include <vector>
 
 namespace pr {
 // Protocol-facing server: owns admission policy and session factories. A runtime
@@ -34,6 +38,10 @@ public:
     }
     ~TcpServerBase() override { stop(); }
     void start() override;
+    // Composition-root barrier, never call on a connection executor. Stops accept
+    // callbacks, then closes every tracked inbound session on its own executor.
+    // Does not stop application queues or any shared IO/worker/storage runtime.
+    void quiesce_sessions();
     virtual void handoff_starttls(std::unique_ptr<IConnection> connection, std::string trace = {});
     void load_certificates(const std::string& certificate, const std::string& key,
                            const std::string& dh = "", bool tls1_3 = true) {
@@ -50,6 +58,29 @@ protected:
 private:
     void accepted(std::unique_ptr<IConnection> connection, const ListenerConfig& listener);
     std::unique_ptr<net::IServerTransport> transport_;
+    struct TrackedSession {
+        std::weak_ptr<void> lifetime;
+        std::shared_ptr<net::IExecutor> executor;
+        std::function<void()> close;
+    };
+    template <typename Session>
+    bool track_session(const std::shared_ptr<Session>& session) {
+        auto executor = session->get_connection().executor();
+        std::weak_ptr<Session> weak = session;
+        auto close = [weak] { if (auto live = weak.lock()) live->close(); };
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        if (sessions_quiesced_) {
+            executor->post(std::move(close));
+            return false;
+        }
+        sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(),
+            [](const auto& entry) { return entry.lifetime.expired(); }), sessions_.end());
+        sessions_.push_back({session, std::move(executor), std::move(close)});
+        return true;
+    }
+    std::mutex sessions_mutex_;
+    std::vector<TrackedSession> sessions_;
+    bool sessions_quiesced_ = false;
 };
 
 template <typename TcpSession, typename SslSession, typename Base>
@@ -67,6 +98,31 @@ void TcpServerBase<TcpSession, SslSession, Base>::start() {
         stop();
         throw;
     }
+}
+
+template <typename TcpSession, typename SslSession, typename Base>
+void TcpServerBase<TcpSession, SslSession, Base>::quiesce_sessions() {
+    this->request_stop();
+    if (transport_) transport_->stop();
+    std::vector<TrackedSession> sessions;
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        sessions_quiesced_ = true;
+        sessions.swap(sessions_);
+    }
+    if (!sessions.empty() && !this->m_ioThreadPool->is_running())
+        throw std::logic_error("session shutdown requires a running IO runtime");
+    std::vector<std::future<void>> closed;
+    for (auto& session : sessions) {
+        if (session.lifetime.expired()) continue;
+        auto done = std::make_shared<std::promise<void>>();
+        closed.push_back(done->get_future());
+        session.executor->post([close = std::move(session.close), done] {
+            try { close(); done->set_value(); }
+            catch (...) { done->set_exception(std::current_exception()); }
+        });
+    }
+    for (auto& done : closed) done.get();
 }
 
 template <typename TcpSession, typename SslSession, typename Base>
@@ -92,14 +148,14 @@ void TcpServerBase<TcpSession, SslSession, Base>::accepted(
     this->increment_connections_total();
     if (listener.type == ListenerType::SSL) {
         auto session = make_ssl_session(std::make_unique<SslConnection>(std::move(connection)), listener);
-        if (session) {
+        if (session && track_session(session)) {
             this->increment_connection_count();
             session->set_tracks_connection_count(true);
             SslSession::start(session);
         }
     } else {
         auto session = make_tcp_session(std::make_unique<TcpConnection>(std::move(connection)), listener);
-        if (session) {
+        if (session && track_session(session)) {
             this->increment_connection_count();
             session->set_tracks_connection_count(true);
             TcpSession::start(session);
@@ -111,6 +167,8 @@ template <typename TcpSession, typename SslSession, typename Base>
 void TcpServerBase<TcpSession, SslSession, Base>::handoff_starttls(
     std::unique_ptr<IConnection> connection, std::string trace) {
     if (!connection) return;
+    const auto state = this->get_state();
+    if (state == ServerState::Pausing || state == ServerState::Stopped) { connection->close(); return; }
     if (!transport_) throw std::logic_error("server has no network transport");
     ListenerConfig listener;
     if (auto found = m_listener_configs.find(connection->get_local_port()); found != m_listener_configs.end())
@@ -119,7 +177,7 @@ void TcpServerBase<TcpSession, SslSession, Base>::handoff_starttls(
     auto tls = transport_->upgrade_tls(take_connection_transport(std::move(connection)));
     if (!tls) throw std::runtime_error("network backend returned an empty TLS connection");
     auto session = make_ssl_session(std::make_unique<SslConnection>(std::move(tls)), listener);
-    if (session) {
+    if (session && track_session(session)) {
         this->increment_connection_count();
         session->set_tracks_connection_count(true);
         if (!trace.empty()) session->set_trace_buffer(std::move(trace));

@@ -105,6 +105,8 @@ template<class Connection> struct Session {
     std::unique_ptr<Connection> connection;
     bool started = false, upgraded = false, tracks = false;
     std::string trace;
+    Connection& get_connection() { return *connection; }
+    void close() { if (connection) connection->close(); }
     void set_tracks_connection_count(bool value) { tracks = value; }
     void set_trace_buffer(std::string value) { trace = std::move(value); }
     static void start(std::shared_ptr<Session> self) { self->started = true; }

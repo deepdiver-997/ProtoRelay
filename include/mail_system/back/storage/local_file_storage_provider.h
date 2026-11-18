@@ -10,8 +10,11 @@ namespace mail_system::storage {
 // Application layout policy layered over generic object IO.
 class LocalFileStorageProvider : public pr::storage::LocalFileStorageProvider, public IMailObjectKeyLayout {
 public:
-    LocalFileStorageProvider(std::string mail_root, std::string attachment_root)
-        : pr::storage::LocalFileStorageProvider({normalize_mail_storage_root(mail_root), normalize_mail_storage_root(attachment_root)}),
+    LocalFileStorageProvider(std::string mail_root, std::string attachment_root,
+                             std::shared_ptr<pr::LocalStorageRuntime> runtime = {})
+        : pr::storage::LocalFileStorageProvider(
+              {normalize_mail_storage_root(mail_root), normalize_mail_storage_root(attachment_root)},
+              std::move(runtime)),
           layout_(MailObjectKeyLayout::Kind::local, std::move(mail_root), std::move(attachment_root)) {}
     std::string build_mail_body_key(std::uint64_t id) override {
         return layout_.build_mail_body_key(id);

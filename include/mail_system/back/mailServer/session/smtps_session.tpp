@@ -187,22 +187,49 @@ void SmtpsSession<ConnectionType>::commit_body_async(
         return;
     }
 
-    // shared_from_this 捕获：真异步（provider 线程触发回调）时 FSM handler
-    // 早已返回，session 必须靠回调链上的 shared_ptr 保活。
-    body_writer_->commit_async(
-        [self = this->shared_from_this(), cb = std::move(cb)]
+    // Pin this writer as well as the session: reset may replace body_writer_ while
+    // a commit is queued. Completion and MIME continuation belong to the socket.
+    auto writer = body_writer_;
+    const auto mail_id = this->get_mail()->id;
+    auto executor = this->get_connection().executor();
+    auto dispatch_failed = std::make_shared<std::atomic<bool>>(false);
+    writer->commit_async(
+        [self = this->shared_from_this(), writer, mail_id, dispatch_failed, cb = std::move(cb)]
         (bool ok, const storage::IoError& error) mutable {
+            // A failed executor cannot safely run protocol cleanup on the storage
+            // thread. Leave the paused connection to its watchdog/root quiescence;
+            // never continue to a success ACK or touch owner-thread mail state.
+            if (dispatch_failed->load()) {
+                LOG_SESSION_ERROR("Commit completion dispatch failed for mail {}", mail_id);
+                return;
+            }
             auto* s = static_cast<SmtpsSession<ConnectionType>*>(self.get());
+            if (s->is_closed() || s->body_writer_ != writer ||
+                !s->get_mail() || s->get_mail()->id != mail_id) return;
             if (!ok) {
                 LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {} (retryable={})",
-                                  s->get_mail() ? s->get_mail()->id : 0,
-                                  error.message, error.retryable());
+                                  mail_id, error.message, error.retryable());
                 s->handle_write_failure();
             } else {
-                LOG_SESSION_INFO("Committed mail body, {} bytes",
-                                 s->body_writer_->bytes_total());
+                LOG_SESSION_INFO("Committed mail body, {} bytes", writer->bytes_total());
             }
             if (cb) cb(ok, error);
+        },
+        [executor = std::move(executor), self = this->shared_from_this(), writer,
+         mail_id, dispatch_failed](std::function<void()> completion) {
+            try {
+                executor->post([self, writer, mail_id, completion = std::move(completion)]() mutable {
+                    auto* s = static_cast<SmtpsSession<ConnectionType>*>(self.get());
+                    // Cancel before publication: afterwards both the stream and
+                    // writer would be committed and could retain an orphan body.
+                    if (s->is_closed() || s->body_writer_ != writer ||
+                        !s->get_mail() || s->get_mail()->id != mail_id) writer->abort();
+                    completion();
+                });
+            } catch (...) {
+                dispatch_failed->store(true);
+                throw;
+            }
         });
 }
 
@@ -307,7 +334,7 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
         handle_write_failure();
         return;
     }
-    body_writer_ = std::make_unique<storage::MailBodyWriter>(std::move(stream));
+    body_writer_ = std::make_shared<storage::MailBodyWriter>(std::move(stream));
 
     LOG_SESSION_INFO("Created mail {} on DATA command, from: {}, recipients: {}",
         this->get_mail()->id, this->get_mail()->from, this->get_mail()->to.size());
@@ -518,7 +545,9 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::reset_mail_state() {
     this->mail_ = nullptr;
-    // 未 commit 就销毁 → MailBodyWriter 析构自动 abort，半成品文件不会留在盘上
+    // In-flight completion pins the old writer; request abort explicitly rather
+    // than relying on destruction when the session drops its own reference.
+    if (body_writer_) body_writer_->abort();
     body_writer_.reset();
     body_line_folder_.reset();
     clear_pending_mail_submission();

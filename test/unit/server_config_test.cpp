@@ -192,6 +192,65 @@ int main() {
         std::filesystem::remove_all(dir);
     }
 
+    // 9. storage.local runtime defaults and strict startup-only JSON fields.
+    {
+        using mail_system::storage::StorageConfig;
+        const auto defaults = StorageConfig::from_json(nlohmann::json::object());
+        const auto& runtime = defaults.local.runtime_config;
+        expect_true(runtime.commit_mode == pr::LocalCommitMode::Offload,
+                    "local commits default to offload");
+        expect_true(runtime.commit_threads == 2 && runtime.max_pending_commits == 64 &&
+                    runtime.max_pending_commit_bytes == 64ull * 1024 * 1024,
+                    "bounded local runtime defaults");
+        const auto parsed = StorageConfig::from_json({{"local", {
+            {"mail_path", "mail"}, {"attachment_path", "attachments"},
+            {"commit_mode", "inline"}, {"commit_threads", 3},
+            {"max_pending_commits", 7}, {"max_pending_commit_bytes", 4096}}}}, "/base");
+        expect_true(parsed.local.mail_path == "/base/mail" &&
+                    parsed.local.attachment_path == "/base/attachments",
+                    "local paths still resolve with runtime fields");
+        expect_true(parsed.local.runtime_config.commit_mode == pr::LocalCommitMode::Inline &&
+                    parsed.local.runtime_config.commit_threads == 3 &&
+                    parsed.local.runtime_config.max_pending_commits == 7 &&
+                    parsed.local.runtime_config.max_pending_commit_bytes == 4096,
+                    "explicit local runtime settings parsed");
+        const auto offload = StorageConfig::from_json({{"local", {{"commit_mode", "offload"}}}});
+        expect_true(offload.local.runtime_config == runtime, "explicit offload equals defaults");
+
+        auto rejected = [&](const char* field, const nlohmann::json& value) {
+            try {
+                (void)StorageConfig::from_json({{"local", {{field, value}}}});
+                return false;
+            } catch (const std::exception&) { return true; }
+        };
+        for (const auto& value : {nlohmann::json("bogus"), nlohmann::json(""),
+                                  nlohmann::json("OFFLOAD"), nlohmann::json(0),
+                                  nlohmann::json(false), nlohmann::json(nullptr)})
+            expect_true(rejected("commit_mode", value), "invalid local commit mode rejected");
+        for (const char* field : {"commit_threads", "max_pending_commits", "max_pending_commit_bytes"}) {
+            for (const auto& value : {nlohmann::json(0), nlohmann::json(-1),
+                                      nlohmann::json(1.5), nlohmann::json(true),
+                                      nlohmann::json("2"), nlohmann::json(nullptr),
+                                      nlohmann::json::parse("18446744073709551616")})
+                expect_true(rejected(field, value), "invalid/overflowing local runtime limit rejected");
+            // Inline remains bounded configuration, not an excuse to accept zeros.
+            bool inline_zero_rejected = false;
+            try {
+                (void)StorageConfig::from_json({{"local", {{"commit_mode", "inline"}, {field, 0}}}});
+            } catch (const std::exception&) { inline_zero_rejected = true; }
+            expect_true(inline_zero_rejected, "inline rejects zero local runtime limits too");
+        }
+
+        auto path = test_support::temp_root() / "local-runtime-config.json";
+        { std::ofstream output(path); output << nlohmann::json{{"storage", {{"local", {
+            {"commit_mode", "inline"}, {"commit_threads", 3},
+            {"max_pending_commits", 7}, {"max_pending_commit_bytes", 4096}}}}}}; }
+        mail_system::ServerConfig config;
+        expect_true(config.loadFromFile(path.string()) &&
+                    config.storage.local.runtime_config == parsed.local.runtime_config,
+                    "server file loader preserves local runtime configuration");
+    }
+
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

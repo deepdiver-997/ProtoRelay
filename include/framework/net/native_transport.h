@@ -1,9 +1,8 @@
 #ifndef PR_FRAMEWORK_NET_NATIVE_TRANSPORT_H
 #define PR_FRAMEWORK_NET_NATIVE_TRANSPORT_H
-// Native (non-Asio) TCP transport factories. Parallel optional module: nothing
-// in the production services is wired to these; they satisfy the same
-// IConnection/IExecutor/ITimer/IServerTransport/IClientTransport contracts as
-// the Asio adapters.
+// Native (non-Asio) TCP transport factories. Optional backend satisfying the
+// same IConnection/IExecutor/ITimer/IServerTransport/IClientTransport contracts
+// as the default Asio adapters.
 //
 // Scope: plain TCP listeners/connections on POSIX/kqueue platforms, plus TLS
 // when the optional protorelay_native_tls module installed its hooks (see
@@ -18,12 +17,13 @@ namespace pr::net::native {
 
 class NativeRuntime;
 
-// Binds (and, on start, accepts) the configured plain-TCP listeners round-robin
-// on the given loops (as provided by a NativeRuntime). Port 0 is replaced by
-// the actually bound port. The transport keeps the loops alive; the runtime
-// object itself may be released independently.
+// Listener ownership and accepted-connection ownership are independent. New
+// connections round-robin across loops, using the optional runtime cursor.
+// Port 0 is replaced by the actual bound port. The transport keeps loops alive
+// without retaining the runtime; delayed deliveries do not own their target loop.
 std::unique_ptr<net::IServerTransport> make_native_server_transport(
-    const net::ServerTransportConfig& config, const std::vector<NativeLoopPtr>& loops);
+    const net::ServerTransportConfig& config, const std::vector<NativeLoopPtr>& loops,
+    std::shared_ptr<std::atomic<size_t>> connection_cursor = {});
 
 // Minimal client connection factory (plain TCP, numeric or resolved hosts).
 std::shared_ptr<net::IClientTransport> make_native_client_transport(

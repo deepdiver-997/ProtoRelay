@@ -83,10 +83,9 @@ public:
     bool commit_body();
 
     // 异步形状的 commit_body：回调携带 (是否落盘成功, 错误信息)。
-    // 本地后端内联执行（与同步版行为一致）；远程后端真异步时回调来自
-    // provider 线程 —— 调用方必须已 set_paused(true) 取得 session 独占
-    // （SPF/DNS 回调同一约定），在回调里恢复流水线。
-    // session 通过 shared_ptr 捕获自持，回调期间对象存活。
+    // 本地 runtime 可卸载 fsync；完成回连接 executor 更新 writer/session，
+    // 保持后续 MIME/协议续作不占 commit worker。回调同时保活本次 writer，
+    // 关闭或 reset 后的旧提交不得作用于新邮件。
     void commit_body_async(std::function<void(bool ok, const storage::IoError& error)> cb);
 
     void reset_mail_state();
@@ -124,7 +123,7 @@ private:
 
     // 正文写入器。DATA 命令时创建，reset_mail_state() 时销毁；
     // 未 commit 就销毁会自动 abort 并删掉半成品文件。
-    std::unique_ptr<storage::MailBodyWriter> body_writer_;
+    std::shared_ptr<storage::MailBodyWriter> body_writer_;
 
     // 正文落盘前的超长行折叠器（跨 TCP 块携带半行，DATA 结束时 flush）。
     // reset_mail_state() 时一并 reset，与 body_writer_ 生命周期对齐。

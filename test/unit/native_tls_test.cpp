@@ -1,6 +1,7 @@
 // Native TLS adapter contract tests (enable_native_tls installed): client and
-// server handshakes (STARTTLS upgrade and SSL listeners), mandatory
-// verification failures (untrusted chain, hostname mismatch, no trust source),
+// server handshakes (STARTTLS upgrade and SSL listeners), multi-worker
+// connection/executor affinity, mandatory verification failures (untrusted
+// chain, hostname mismatch, no trust source),
 // post-handshake contract (partial reads, write backpressure, cancel exactly
 // once), clean close (close_notify -> EOF) versus truncation (no close_notify
 // -> stream_truncated). Every scenario runs on every compiled poller backend.
@@ -23,6 +24,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -533,6 +535,233 @@ void ssl_listener_roundtrip(PollerBackend backend, uint16_t hint, const TmpDir& 
     runtime.stop(true);
 }
 
+// ---- scenario: one listener distributes complete TLS connections to workers ----
+
+void assert_on_owner(IConnection& connection, const NativeLoopPtr& owner) {
+    assert(owner);
+    assert(connection.executor().get() == owner.get());
+    assert(owner->is_loop_thread());
+}
+
+// A one-byte exchange cannot be split into successful partial reads. All IO is
+// initiated on its executor; only the test thread waits for the completions.
+void worker_echo(IConnection& server, const NativeLoopPtr& owner,
+                 IClientTransport& client, const NativeLoopPtr& client_owner) {
+    const std::string payload = "X";
+    std::vector<char> server_inbox(1);
+    std::vector<char> client_inbox(1);
+    std::promise<void> server_read;
+    std::promise<void> server_write;
+    std::promise<void> client_read;
+    std::promise<void> client_write;
+    auto server_read_outcome = server_read.get_future();
+    auto server_write_outcome = server_write.get_future();
+    auto client_read_outcome = client_read.get_future();
+    auto client_write_outcome = client_write.get_future();
+
+    owner->post([&] {
+        assert_on_owner(server, owner);
+        server.async_read(buffer(server_inbox), [&](const std::error_code& error, std::size_t bytes) {
+            assert_on_owner(server, owner);
+            assert(!error);
+            assert(bytes == payload.size());
+            assert(server_inbox.front() == payload.front());
+            server.async_write(buffer(payload), [&](const std::error_code& error, std::size_t bytes) {
+                assert_on_owner(server, owner);
+                assert(!error);
+                assert(bytes == payload.size());
+                server_write.set_value();
+            });
+            server_read.set_value();
+        });
+    });
+    client_owner->post([&] {
+        assert_on_owner(client, client_owner);
+        client.async_read(buffer(client_inbox), [&](const std::error_code& error, std::size_t bytes) {
+            assert_on_owner(client, client_owner);
+            assert(!error);
+            assert(bytes == payload.size());
+            assert(client_inbox.front() == payload.front());
+            client_read.set_value();
+        });
+        client.async_write(buffer(payload), [&](const std::error_code& error, std::size_t bytes) {
+            assert_on_owner(client, client_owner);
+            assert(!error);
+            assert(bytes == payload.size());
+            client_write.set_value();
+        });
+    });
+
+    assert(ready_within(server_read_outcome, std::chrono::seconds(5)));
+    server_read_outcome.get();
+    assert(ready_within(server_write_outcome, std::chrono::seconds(5)));
+    server_write_outcome.get();
+    assert(ready_within(client_read_outcome, std::chrono::seconds(5)));
+    client_read_outcome.get();
+    assert(ready_within(client_write_outcome, std::chrono::seconds(5)));
+    client_write_outcome.get();
+}
+
+void multi_worker_tls_roundtrip(PollerBackend backend, uint16_t hint, const TmpDir& tmp,
+                                ListenerType type) {
+    constexpr std::size_t worker_count = 3;
+    constexpr std::size_t connection_count = 2 * worker_count;
+    NativeRuntime runtime(worker_count, backend);
+    // Client allocation must not consume the server runtime's shared RR cursor.
+    NativeRuntime client_runtime(1, backend);
+    runtime.start();
+    client_runtime.start();
+    std::vector<NativeLoopPtr> workers;
+    for (std::size_t index = 0; index < worker_count; ++index) {
+        workers.push_back(runtime.loop_for(index));
+        assert(workers.back());
+    }
+    const auto client_owner = client_runtime.loop_for(0);
+    assert(client_owner);
+
+    const TlsConfig tls{tmp.file("server.pem"), tmp.file("server.key"), "", true};
+    uint16_t bound = 0;
+    auto transport = make_listener(runtime, type, hint, bound, &tls);
+    assert(transport->listeners().size() == 1);
+    assert(transport->listeners().front().type == type);
+
+    using AcceptPromise = std::promise<std::unique_ptr<IConnection>>;
+    std::mutex accept_mutex;
+    std::shared_ptr<AcceptPromise> pending_accept;
+    transport->start([&](std::unique_ptr<IConnection> connection, const ListenerConfig& listener) {
+        assert(listener.type == type);
+        assert(listener.port == bound);
+        const auto executor = connection->executor();
+        NativeLoopPtr owner;
+        for (const auto& worker : workers) {
+            if (executor.get() == worker.get()) owner = worker;
+        }
+        // Checking both identity and thread rejects merely posting the handler
+        // to a worker while leaving the connection/TLS session on the listener.
+        assert_on_owner(*connection, owner);
+        std::shared_ptr<AcceptPromise> accepted;
+        {
+            std::lock_guard<std::mutex> lock(accept_mutex);
+            accepted = std::move(pending_accept);
+        }
+        assert(accepted);
+        accepted->set_value(std::move(connection));
+    });
+
+    std::vector<std::size_t> owner_indices;
+    std::vector<std::size_t> accepts_per_worker(worker_count, 0);
+    for (std::size_t index = 0; index < connection_count; ++index) {
+        auto accepted = std::make_shared<AcceptPromise>();
+        auto accepted_outcome = accepted->get_future();
+        {
+            std::lock_guard<std::mutex> lock(accept_mutex);
+            assert(!pending_accept);
+            pending_accept = accepted;
+        }
+        auto client = client_runtime.make_client_transport();
+        assert(client->executor().get() == client_owner.get());
+        std::promise<void> connected;
+        auto connected_outcome = connected.get_future();
+        client_owner->post([&, client] {
+            assert_on_owner(*client, client_owner);
+            client->async_connect("127.0.0.1", bound, [&, client](const std::error_code& error) {
+                assert_on_owner(*client, client_owner);
+                assert(!error);
+                connected.set_value();
+            });
+        });
+        assert(ready_within(connected_outcome, std::chrono::seconds(5)));
+        connected_outcome.get();
+        assert(ready_within(accepted_outcome, std::chrono::seconds(5)));
+        auto connection = accepted_outcome.get();
+        assert(connection);
+        const auto original_executor = connection->executor();
+        std::size_t owner_index = worker_count;
+        for (std::size_t worker = 0; worker < worker_count; ++worker) {
+            if (original_executor.get() == workers[worker].get()) owner_index = worker;
+        }
+        assert(owner_index < worker_count);
+        owner_indices.push_back(owner_index);
+        ++accepts_per_worker[owner_index];
+        // Listener construction may consume a cursor slot; the first accepted
+        // connection establishes the offset, then two full RR cycles must follow.
+        assert(owner_index == (owner_indices.front() + index) % worker_count);
+        const auto owner = workers[owner_index];
+
+        if (type == ListenerType::TCP) {
+            // Exercise the actual plain stream before consuming it for STARTTLS.
+            worker_echo(*connection, owner, *client, client_owner);
+        }
+
+        auto holder = std::make_shared<std::unique_ptr<IConnection>>(std::move(connection));
+        std::promise<SharedConnection> handshaken;
+        auto handshaken_outcome = handshaken.get_future();
+        owner->post([&, holder, owner, original_executor] {
+            assert_on_owner(**holder, owner);
+            if (type == ListenerType::TCP) {
+                *holder = transport->upgrade_tls(std::move(*holder));
+                assert(*holder);
+            }
+            assert((*holder)->executor().get() == original_executor.get());
+            SharedConnection server(std::move(*holder));
+            server->async_handshake(
+                HandshakeRole::server,
+                [&, server, owner, original_executor](const std::error_code& error) {
+                    assert_on_owner(*server, owner);
+                    assert(server->executor().get() == original_executor.get());
+                    assert(!error);
+                    handshaken.set_value(server);
+                });
+        });
+        std::promise<void> started;
+        auto started_outcome = started.get_future();
+        client_owner->post([&, client] {
+            assert_on_owner(*client, client_owner);
+            client->async_start_tls(client_config("localhost", tmp.file("server.pem")),
+                                    [&, client](const std::error_code& error) {
+                                        assert_on_owner(*client, client_owner);
+                                        assert(!error);
+                                        started.set_value();
+                                    });
+        });
+        assert(ready_within(started_outcome, std::chrono::seconds(5)));
+        started_outcome.get();
+        assert(ready_within(handshaken_outcome, std::chrono::seconds(5)));
+        auto server = handshaken_outcome.get();
+        assert(server);
+        assert(server->executor().get() == original_executor.get());
+        worker_echo(*server, owner, *client, client_owner);
+
+        std::promise<void> server_closed;
+        std::promise<void> client_closed;
+        auto server_closed_outcome = server_closed.get_future();
+        auto client_closed_outcome = client_closed.get_future();
+        owner->post([&, server, owner] {
+            assert_on_owner(*server, owner);
+            server->close();
+            server_closed.set_value();
+        });
+        client_owner->post([&, client] {
+            assert_on_owner(*client, client_owner);
+            client->close();
+            client_closed.set_value();
+        });
+        assert(ready_within(server_closed_outcome, std::chrono::seconds(5)));
+        server_closed_outcome.get();
+        assert(ready_within(client_closed_outcome, std::chrono::seconds(5)));
+        client_closed_outcome.get();
+        // No second connection is opened until this one's handshake, both IO
+        // directions and close jobs have completed. No sleeps or loop-to-loop waits.
+    }
+    for (const auto count : accepts_per_worker) assert(count == 2);
+
+    transport->stop();
+    client_runtime.stop(true);
+    runtime.stop(true);
+    assert(client_runtime.exceptions_total() == 0);
+    assert(runtime.exceptions_total() == 0);
+}
+
 // ---- scenario: mandatory verification failures ----
 
 void verification_failures(PollerBackend backend, uint16_t hint, const TmpDir& tmp) {
@@ -874,6 +1103,8 @@ int main() {
     for (const PollerBackend backend : backends) {
         starttls_roundtrip(backend, hint, tmp);
         ssl_listener_roundtrip(backend, hint, tmp);
+        multi_worker_tls_roundtrip(backend, hint, tmp, ListenerType::TCP);
+        multi_worker_tls_roundtrip(backend, hint, tmp, ListenerType::SSL);
         verification_failures(backend, hint, tmp);
         close_notify_vs_truncation(backend, hint, tmp);
         cancel_and_backpressure(backend, hint, tmp);

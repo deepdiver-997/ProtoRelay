@@ -22,8 +22,6 @@
 #include <memory>
 #include <signal.h>
 #include <string>
-#include <thread>
-#include <chrono>
 #include <cstdlib>
 
 using namespace mail_system;
@@ -73,19 +71,9 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 
 } // anonymous namespace
 
-// ====================================================================
-// 全局共享资源
-// ====================================================================
-struct SharedServerResources {
-    std::shared_ptr<pr::ThreadPoolBase> io_pool;
-    std::shared_ptr<pr::ThreadPoolBase> work_pool;
-    std::shared_ptr<DBPool> db_pool;
-};
-
 // 全局服务器实例（信号处理用）
 std::shared_ptr<SmtpsServer> g_smtp_server = nullptr;
 std::shared_ptr<ImapsServer> g_imap_server = nullptr;
-SharedServerResources g_resources;
 
 sigset_t g_sigset;
 
@@ -126,6 +114,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "ProtoRelay Combined Mail Server starting..." << std::endl;
 
+    bootstrap::ShutdownScope shutdown;
+    shutdown.add_server(g_smtp_server);
+    shutdown.add_server(g_imap_server);
     try {
         // ================================================================
         // 1. 加载 SMTP 配置（作为主配置，用于初始化日志和线程池）
@@ -168,9 +159,9 @@ int main(int argc, char* argv[]) {
         if (smtp_config.io_backend != imap_config.io_backend)
             throw std::runtime_error("Combined server requires matching io_backend values");
         auto smtp_res = mail_system::bootstrap::assemble(smtp_config);
+        shutdown.add_resources(smtp_res);
         auto io_pool = smtp_res.io_pool;
         auto work_pool = smtp_res.worker_pool;
-        g_resources = {io_pool, work_pool, nullptr};
 
         // ================================================================
         // 5. 创建 SMTP 服务器
@@ -180,6 +171,9 @@ int main(int argc, char* argv[]) {
         mail_system::bootstrap::Options shared_pools;
         shared_pools.io_pool = io_pool;
         shared_pools.worker_pool = work_pool;
+        // Explicit composition-root sharing; differing storage.local runtime
+        // settings in the IMAP config are rejected by assemble, never guessed.
+        shared_pools.local_storage_runtime = smtp_res.local_storage_runtime;
         g_smtp_server = std::make_shared<SmtpsServer>(
             smtp_config, smtp_res.io_pool, smtp_res.worker_pool, smtp_res.shard_router);
         g_smtp_server->m_configFilePath = options.smtp_config_path;
@@ -187,6 +181,7 @@ int main(int argc, char* argv[]) {
 
         LOG_SERVER_INFO("Creating IMAP server...");
         auto imap_res = mail_system::bootstrap::assemble(imap_config, shared_pools);
+        shutdown.add_resources(imap_res);
         g_imap_server = std::make_shared<ImapsServer>(
             imap_config, imap_res.io_pool, imap_res.worker_pool, imap_res.shard_router);
         g_imap_server->m_configFilePath = options.imap_config_path;
@@ -225,27 +220,10 @@ int main(int argc, char* argv[]) {
         }
 
         LOG_SERVER_INFO("Shutting down...");
-        if (g_smtp_server) g_smtp_server->request_stop();
-        if (g_imap_server) g_imap_server->request_stop();
-        g_smtp_server.reset();
-        g_imap_server.reset();
-
-        LOG_SERVER_INFO("");
-        LOG_SERVER_INFO("All servers stopped. Cleaning up...");
-
-        // ================================================================
-        // 9. 清理
-        // ================================================================
-        g_smtp_server.reset();
-        g_imap_server.reset();
-
-        // 停止共享线程池
-        io_pool->stop();
-        work_pool->stop();
-        LOG_SERVER_INFO("Shared thread pools stopped");
-
-        // 等待后台线程完全退出
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // One owner closes admission, drains commits AND their connection-executor
+        // completions, then tears down servers/pools. No arbitrary sleep barrier.
+        shutdown.shutdown();
+        LOG_SERVER_INFO("All servers and shared runtimes stopped");
 
         // 关闭日志
         Logger::get_instance().shutdown();
@@ -253,17 +231,10 @@ int main(int argc, char* argv[]) {
 
     } catch (const std::exception& e) {
         std::cerr << "Fatal exception: " << e.what() << std::endl;
-        // 尽力清理
-        g_smtp_server.reset();
-        g_imap_server.reset();
-        if (g_resources.io_pool) g_resources.io_pool->stop();
-        if (g_resources.work_pool) g_resources.work_pool->stop();
-        try { Logger::get_instance().shutdown(); } catch (...) {}
+        // ShutdownScope keeps the same server/storage/worker/IO ordering on failure.
         return 1;
     } catch (...) {
         std::cerr << "Fatal unknown exception" << std::endl;
-        g_smtp_server.reset();
-        g_imap_server.reset();
         return 1;
     }
 

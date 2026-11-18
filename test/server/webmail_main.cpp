@@ -17,8 +17,6 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
-#include <thread>
-#include <chrono>
 #include <nlohmann/json.hpp>
 
 using namespace mail_system;
@@ -42,6 +40,8 @@ int main(int argc, char* argv[]) {
     sigaddset(&g_sigset, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &g_sigset, nullptr);
 
+    bootstrap::ShutdownScope shutdown;
+    shutdown.add_server(g_server);
     try {
         ServerConfig config;
         uint16_t submission_node_id = 1;
@@ -78,6 +78,7 @@ int main(int argc, char* argv[]) {
                   << "  doc_root=" << doc_root << "\n";
 
         auto res = bootstrap::assemble(config);
+        shutdown.add_resources(res);
 
         g_server = std::make_unique<webmail::WebmailServer>(
             config, doc_root, res.io_pool, res.worker_pool, res.shard_router,
@@ -93,9 +94,7 @@ int main(int argc, char* argv[]) {
         }
 
         LOG_SERVER_INFO("Shutting down webmail server...");
-        g_server->request_stop();
-        g_server.reset();
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        shutdown.shutdown();
         pr::Logger::get_instance().shutdown();
     } catch (const std::exception& e) {
         std::cerr << "Fatal: " << e.what() << "\n";

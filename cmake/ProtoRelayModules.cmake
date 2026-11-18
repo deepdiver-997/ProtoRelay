@@ -137,7 +137,8 @@ endif()
 protorelay_module(protorelay_storage
     src/framework/storage/distributed_file_storage_provider.cpp
     src/framework/storage/local_file_storage_provider.cpp
-    src/framework/storage/local_file_write_stream.cpp)
+    src/framework/storage/local_file_write_stream.cpp
+    src/framework/storage/local_storage_runtime.cpp)
 if(ENABLE_HDFS_WEB_STORAGE)
     target_sources(protorelay_storage PRIVATE src/framework/storage/hdfs_web_storage_provider.cpp)
 endif()

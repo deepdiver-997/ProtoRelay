@@ -17,9 +17,9 @@
 // stop() returns. stop(false) discards the queues instead.
 //
 // Objects whose destruction must happen on the loop thread (connections) hand
-// a disposer to defer_destroy(); it runs inline when the caller is already on
-// the loop thread, is queued otherwise, and pending disposers are flushed when
-// the loop thread exits or the loop is destroyed.
+// a disposer to defer_destroy(); it is queued while a loop thread is live,
+// otherwise runs inline. Pending disposers are flushed before the loop thread
+// exits or the loop is destroyed, and execute without holding the queue lock.
 #include "framework/net/executor.h"
 #include "framework/net/native/poller.h"
 #include "framework/net/server_transport.h"
@@ -101,6 +101,9 @@ public:
     bool invoke_when_live(std::function<void()> task);
 
     bool is_loop_thread() const;
+    // Includes loops belonging to other runtimes: teardown must not block one
+    // event loop waiting for another event loop's callback to return.
+    static bool is_any_loop_thread();
     void assert_loop_thread(const char* what) const;
 
     // ---- lifecycle ----
@@ -122,7 +125,6 @@ private:
     void drain_wake_pipe();
     void drain_tasks(bool everything);
     void drain_graves();
-    void drain_graves_locked(); // graves_mutex_ held
     void shutdown_drain();
     void fire_due_timers();
     void loop_post_due(ITimer::Handler handler);
@@ -186,8 +188,8 @@ private:
 using NativeLoopPtr = std::shared_ptr<NativeLoop>;
 
 // The full native runtime: N loops + threads, executors and transport
-// factories. Drop-in for the IOThreadPool provider surface — production
-// binaries keep using the Asio pool; this module exists in parallel.
+// factories. Drop-in for the IOThreadPool provider surface; applications can
+// select this backend instead of the default Asio pool.
 // A stopped runtime cannot restart; construct a fresh one instead.
 class NativeRuntime final : public ThreadPoolBase,
                             public IExecutorProvider,
@@ -226,7 +228,8 @@ private:
     std::string backend_;
     std::vector<NativeLoopPtr> loops_;
     std::vector<std::thread> threads_;
-    std::atomic<size_t> next_loop_{0};
+    // Server transports share selection without retaining a raw runtime pointer.
+    std::shared_ptr<std::atomic<size_t>> next_loop_ = std::make_shared<std::atomic<size_t>>(0);
     std::atomic<bool> running_{false};
     bool started_once_ = false;
     mutable std::mutex lifecycle_;

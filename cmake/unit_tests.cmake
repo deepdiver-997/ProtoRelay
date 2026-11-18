@@ -58,6 +58,16 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     pr_add_unit_test(mail_body_writer_test SRCS test/unit/mail_body_writer_test.cpp
         LIBS protorelay_mail_storage)
 
+    pr_add_unit_test(local_storage_runtime_test SRCS test/unit/local_storage_runtime_test.cpp
+        LIBS protorelay_storage)
+    pr_add_unit_test(local_file_write_runtime_test SRCS test/unit/local_file_write_runtime_test.cpp
+        LIBS protorelay_mail_storage)
+    pr_add_unit_test(local_storage_bootstrap_test LIBS protorelay_mail_protocols)
+    pr_add_unit_test(smtp_local_commit_test
+        SRCS test/unit/smtp_local_commit_test.cpp
+             src/mail_system/back/mailServer/smtps/smtps_server.cpp
+        LIBS protorelay_mail_protocols)
+
     pr_add_unit_test(buffered_upload_stream_test SRCS test/unit/buffered_upload_stream_test.cpp)
 
     # web_server 纯函数层单测：MessageProcessor / h2_framer / h2_hpack / h2_codec
@@ -80,7 +90,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # 纯逻辑 / 文件 IO / 线程池：只依赖 framework 头 + 对应 .cpp
     pr_add_unit_test(intrusion_detector_test SRCS test/unit/intrusion_detector_test.cpp)
 
-    pr_add_unit_test(server_config_test SRCS test/unit/server_config_test.cpp)
+    pr_add_unit_test(server_config_test SRCS test/unit/server_config_test.cpp
+        LIBS protorelay_storage)
 
     pr_add_unit_test(mapped_file_test SRCS test/unit/mapped_file_test.cpp)
 

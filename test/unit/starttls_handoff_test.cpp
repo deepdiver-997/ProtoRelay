@@ -29,12 +29,18 @@ void expect_true(bool c, const char* what) {
 
 // 最小 TcpSession 桩：补齐模板实例化（start/accept 路径）所需的成员
 struct FakeTcpSession {
+    std::unique_ptr<pr::TcpConnection> connection;
+    pr::TcpConnection& get_connection() { return *connection; }
+    void close() { if (connection) connection->close(); }
     void set_tracks_connection_count(bool) {}
     static void start(std::shared_ptr<FakeTcpSession>) {}
 };
 
 // 记录 make_ssl_session 收到的 ListenerConfig
 struct RecordingSslSession {
+    std::unique_ptr<pr::SslConnection> connection;
+    pr::SslConnection& get_connection() { return *connection; }
+    void close() { if (connection) connection->close(); }
     void set_tracks_connection_count(bool) {}
     void set_trace_buffer(std::string) {}
     static void start(std::shared_ptr<RecordingSslSession>) {}
@@ -55,10 +61,12 @@ struct HandoffTestServer : pr::TcpServerBase<FakeTcpSession, RecordingSslSession
         return nullptr;
     }
     std::shared_ptr<RecordingSslSession> make_ssl_session(
-        std::unique_ptr<pr::SslConnection>, const ListenerConfig& lc) override {
+        std::unique_ptr<pr::SslConnection> connection, const ListenerConfig& lc) override {
         ssl_session_created = true;
         received_lc = lc;
-        return std::make_shared<RecordingSslSession>();
+        auto session = std::make_shared<RecordingSslSession>();
+        session->connection = std::move(connection);
+        return session;
     }
 };
 
