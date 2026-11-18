@@ -18,8 +18,9 @@
 namespace pr {
 namespace storage {
 
-LocalFileStorageProvider::LocalFileStorageProvider(std::vector<std::string> directories)
-    : directories_(std::move(directories)) {}
+LocalFileStorageProvider::LocalFileStorageProvider(std::vector<std::string> directories,
+                                                   std::shared_ptr<pr::LocalStorageRuntime> runtime)
+    : directories_(std::move(directories)), runtime_(std::move(runtime)) {}
 
 bool LocalFileStorageProvider::ensure_ready(IoError& error) {
     try {
@@ -71,7 +72,7 @@ bool LocalFileStorageProvider::append_binary(const std::string& storage_key,
 
 std::unique_ptr<IWriteStream> LocalFileStorageProvider::open_write(const std::string& storage_key,
                                                                    IoError& error) {
-    return LocalFileWriteStream::open(storage_key, error);
+    return LocalFileWriteStream::open(storage_key, error, runtime_);
 }
 
 bool LocalFileStorageProvider::read_all(const std::string& storage_key,

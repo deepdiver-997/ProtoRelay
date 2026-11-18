@@ -4,47 +4,43 @@
 #include "framework/storage/i_write_stream.h"
 
 #include <memory>
+#include <string>
 
 namespace pr {
 
+class LocalStorageRuntime;
 
-// 本地文件写入句柄：整个对象生命周期只 open 一次 fd，落盘走 pwrite。
-//
-// 相比按 key 反复 append 的老路径，每块数据省掉一次父目录 stat + open + close；
-// 而且写入位置由 offset 显式给出，不依赖内核维护的文件游标，
-// 因此即便调用方将来把写入挪到别的线程，也不会再出现字节错位。
+// 常开 fd + 显式 pwrite。异步 commit 独占提交阶段，abort 不会跨线程关闭
+// 正在 pwrite/fsync 的 fd；已入队任务持有独立状态，不依赖外层流的生命周期。
 class LocalFileWriteStream : public IWriteStream {
 public:
-    // 打开（必要时创建父目录并截断已有文件）。失败返回 nullptr 并填充 error。
-    static std::unique_ptr<LocalFileWriteStream> open(const std::string& path,
-                                                      IoError& error);
+    // Instance-local syscall seams for deterministic failure/concurrency tests.
+    // Production providers leave both empty and always use real pwrite/fsync.
+    struct Operations {
+        std::function<std::ptrdiff_t(int, const char*, std::size_t, std::uint64_t)> pwrite;
+        std::function<int(int)> fsync;
+    };
+
+    static std::unique_ptr<LocalFileWriteStream> open(
+        const std::string& path, IoError& error,
+        std::shared_ptr<LocalStorageRuntime> runtime = {}, Operations operations = {});
 
     ~LocalFileWriteStream() override;
-
     LocalFileWriteStream(const LocalFileWriteStream&) = delete;
     LocalFileWriteStream& operator=(const LocalFileWriteStream&) = delete;
 
-    bool write_at(std::uint64_t offset,
-                  const char* data,
-                  std::size_t size,
+    bool write_at(std::uint64_t offset, const char* data, std::size_t size,
                   IoError& error) override;
-
-    // flush + fsync，返回 true 表示数据已真正落到稳定存储。
     bool commit(IoError& error) override;
-
-    // 关闭 fd 并删除半成品文件。
+    void commit_async(CommitCallback cb) override;
+    void commit_async_on(CompletionDispatcher dispatcher, CommitCallback cb) override;
     void abort() noexcept override;
 
 private:
-    LocalFileWriteStream(int fd, std::string path) : fd_(fd), path_(std::move(path)) {}
-
-    void close_fd() noexcept;
-
-    int fd_;
-    std::string path_;
-    bool committed_ = false;
+    struct State;
+    explicit LocalFileWriteStream(std::shared_ptr<State> state) : state_(std::move(state)) {}
+    std::shared_ptr<State> state_;
 };
-
 
 } // namespace pr
 

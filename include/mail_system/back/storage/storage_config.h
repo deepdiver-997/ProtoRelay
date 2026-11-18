@@ -1,7 +1,10 @@
 #ifndef MAIL_SYSTEM_STORAGE_CONFIG_H
 #define MAIL_SYSTEM_STORAGE_CONFIG_H
 
+#include "framework/storage/local_storage_runtime.h"
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -14,6 +17,8 @@ namespace storage {
 struct LocalStorageConfig {
     std::string mail_path;
     std::string attachment_path;
+    // Startup-only, shared by the main local provider and all local shards.
+    pr::LocalStorageRuntimeConfig runtime_config;
 };
 
 struct S3StorageConfig {
@@ -75,6 +80,35 @@ struct StorageConfig {
             auto& l = j["local"];
             cfg.local.mail_path       = resolve(l.value("mail_path", ""));
             cfg.local.attachment_path = resolve(l.value("attachment_path", ""));
+            auto& runtime = cfg.local.runtime_config;
+            const auto mode = l.value("commit_mode", std::string("offload"));
+            if (mode == "offload") runtime.commit_mode = pr::LocalCommitMode::Offload;
+            else if (mode == "inline") runtime.commit_mode = pr::LocalCommitMode::Inline;
+            else throw std::invalid_argument("storage.local.commit_mode must be 'inline' or 'offload'");
+
+            // json::get<unsigned>() silently wraps negative integers. Validate the
+            // JSON type and range before conversion, including size_t on 32-bit.
+            auto positive_limit = [&](const char* field, uint64_t fallback, uint64_t maximum) {
+                if (!l.contains(field)) return fallback;
+                const auto& value = l.at(field);
+                if (!value.is_number_integer() ||
+                    (!value.is_number_unsigned() && value.get<int64_t>() <= 0))
+                    throw std::invalid_argument(std::string("storage.local.") + field +
+                                                " must be a positive integer");
+                const auto number = value.get<uint64_t>();
+                if (number == 0 || number > maximum)
+                    throw std::invalid_argument(std::string("storage.local.") + field +
+                                                " is out of range");
+                return number;
+            };
+            runtime.commit_threads = static_cast<size_t>(positive_limit(
+                "commit_threads", runtime.commit_threads, std::numeric_limits<size_t>::max()));
+            runtime.max_pending_commits = static_cast<size_t>(positive_limit(
+                "max_pending_commits", runtime.max_pending_commits, std::numeric_limits<size_t>::max()));
+            runtime.max_pending_commit_bytes = positive_limit(
+                "max_pending_commit_bytes", runtime.max_pending_commit_bytes,
+                std::numeric_limits<uint64_t>::max());
+            runtime.validate();
         }
 
         if (j.contains("s3")) {

@@ -6,8 +6,6 @@
 #include <memory>
 #include <signal.h>
 #include <string>
-#include <thread>
-#include <chrono>
 #include <cstdlib>
 
 #if ENABLE_DATABASE_QUERY_DEBUG_LOG
@@ -113,6 +111,8 @@ int main(int argc, char* argv[]) {
 
     std::cout << "ProtoRelay IMAP Server starting..." << std::endl;
 
+    bootstrap::ShutdownScope shutdown;
+    shutdown.add_server(g_server);
     try {
         std::string config_path = options.config_path;
 
@@ -141,6 +141,7 @@ int main(int argc, char* argv[]) {
                            inbound_auth_policy_to_string(l.auth_policy));
 
         auto res = mail_system::bootstrap::assemble(config);
+        shutdown.add_resources(res);
         g_server = std::make_unique<ImapsServer>(config, res.io_pool, res.worker_pool, res.shard_router);
         g_server->m_configFilePath = config_path;
         g_server->start();
@@ -161,14 +162,8 @@ int main(int argc, char* argv[]) {
         }
 
         LOG_SERVER_INFO("Shutting down...");
-        g_server->request_stop();
+        shutdown.shutdown();
         LOG_SERVER_INFO("IMAPS Server stopped");
-
-        // request_stop + reset 触发 pr::ServerBase 析构 → RAII 释放所有资源
-        g_server.reset();
-
-        // 等待后台线程退出
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
         // 关闭日志系统
         Logger::get_instance().shutdown();

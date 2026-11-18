@@ -6,8 +6,6 @@
 #include <memory>
 #include <signal.h>
 #include <string>
-#include <thread>
-#include <chrono>
 #if ENABLE_DATABASE_QUERY_DEBUG_LOG
 #define ENABLE_DATABASE_QUERY_DEBUG_LOG 0
 #endif
@@ -114,6 +112,8 @@ int main(int argc, char* argv[]) {
 
     std::cout << "ProtoRelay starting..." << std::endl;
 
+    bootstrap::ShutdownScope shutdown;
+    shutdown.add_server(g_server);
     try {
         std::string config_path = options.config_path;
 
@@ -140,6 +140,7 @@ int main(int argc, char* argv[]) {
 
         // 创建服务器
         auto res = mail_system::bootstrap::assemble(config);
+        shutdown.add_resources(res);
         g_server = std::make_unique<SmtpsServer>(config, res.io_pool, res.worker_pool, res.shard_router);
         g_server->m_configFilePath = config_path;
 
@@ -162,13 +163,9 @@ int main(int argc, char* argv[]) {
         }
 
         LOG_SERVER_INFO("Shutting down...");
-        g_server->request_stop();
-
-        // request_stop + reset 触发 pr::ServerBase 析构 → RAII 释放所有资源
-        g_server.reset();
-        
-        // 等待所有后台线程完全退出（PersistentQueue worker、worker_pool 任务等）
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Shared storage completions run while server/IO/workers are still alive.
+        // The same guard performs this sequence if startup or the signal loop throws.
+        shutdown.shutdown();
 
         // 现在可以安全关闭日志系统了
         Logger::get_instance().shutdown();

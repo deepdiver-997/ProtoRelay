@@ -3,6 +3,7 @@
 
 #include "mail_system/back/storage/i_storage_provider.h"
 
+#include <atomic>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -18,8 +19,8 @@ namespace storage {
 // async_flush_buffer_to_disk / wait_for_async_writes / flush_body_and_wait 五件套。
 // 三条关键设计：
 //   1. offset_ 是文件位置的唯一真相，且只在 emit() 一处推进 —— 写错位在结构上无法表达。
-//   2. 不做异步。给 page cache 写 64KB 是十几微秒量级，而为此拷一份缓冲区再派发到
-//      线程池，开销比它想省掉的那次写还大，顺带把顺序也丢了。
+//   2. 写入保持同步和单写者顺序，只有 commit 可以异步卸载；page cache 写入
+//      也可能阻塞，不能将它当成无成本的纯内存操作。
 //   3. 未 commit 就析构 = abort，半成品文件不会留在盘上被当成正常邮件解析。
 //
 // 非线程安全：刻意如此。单个会话的正文只允许一个写者。
@@ -47,6 +48,10 @@ public:
     std::uint64_t bytes_total() const { return offset_ + buffer_used_; }
 
     bool write(const char* data, std::size_t size, IoError& error) {
+        if (commit_pending_) {
+            error = IoError::retryable("mail body commit is in progress", EBUSY);
+            return false;
+        }
         if (failed_) {
             error = IoError::permanent("mail body writer already failed");
             return false;
@@ -75,6 +80,10 @@ public:
 
     // 冲刷剩余缓冲并持久化。返回 true 后才可以回 250。
     bool commit(IoError& error) {
+        if (commit_pending_) {
+            error = IoError::retryable("mail body commit is in progress", EBUSY);
+            return false;
+        }
         if (committed_) {
             return true;
         }
@@ -97,14 +106,15 @@ public:
         return true;
     }
 
-    // 异步形状的 commit。前置状态检查与 flush 都是本线程内存操作（内联完成），
-    // 只有底层流的持久化交给 IWriteStream::commit_async——其默认实现内联执行，
-    // 远程后端覆写真异步时回调可能来自 provider 线程（见 IWriteStream 契约）。
-    //
-    // 结果回调里同步更新 committed_/failed_：成功后析构不再走 abort，
-    // 失败则标 failed 并在析构时经 stream_->abort() 清理远端半成品。
-    // 约束：回调触发时本对象必须仍存活（调用方在回调返回之后才 reset 它）。
-    void commit_async(IWriteStream::CommitCallback cb) {
+    // flush 仍可能执行同步 pwrite；持久化可由底层流卸载。指定 dispatcher
+    // 时，在该 executor 上更新结果并续跑业务。调用方必须持有 writer 到回调
+    // 返回，不能只保活内层流；abort 可以请求取消，但不保证中断在途 syscall。
+    void commit_async(IWriteStream::CommitCallback cb,
+                      IWriteStream::CompletionDispatcher dispatcher = {}) {
+        if (commit_pending_) {
+            if (cb) cb(false, IoError::retryable("mail body commit is in progress", EBUSY));
+            return;
+        }
         if (committed_) {
             if (cb) cb(true, IoError{});
             return;
@@ -123,19 +133,30 @@ public:
             if (cb) cb(false, std::move(error));
             return;
         }
-        stream_->commit_async(
-            [this, cb = std::move(cb)](bool ok, const IoError& err) mutable {
-                if (ok) {
-                    committed_ = true;
-                } else {
-                    failed_ = true;
-                }
-                if (cb) cb(ok, err);
-            });
+        commit_pending_ = true;
+        try {
+            stream_->commit_async_on(std::move(dispatcher),
+                [this, cb = std::move(cb)](bool ok, const IoError& err) mutable {
+                    auto result = err;
+                    if (aborted_) {
+                        ok = false;
+                        result = IoError::retryable("mail body commit cancelled", ECANCELED);
+                    }
+                    committed_ = ok;
+                    failed_ = !ok;
+                    commit_pending_ = false;
+                    if (cb) cb(ok, result);
+                });
+        } catch (...) {
+            commit_pending_ = false;
+            failed_ = true;
+            throw;
+        }
     }
 
     // 幂等：重复调用、以及 commit 之后再调用都安全。
     void abort() noexcept {
+        aborted_ = true;
         if (!stream_) {
             return;
         }
@@ -170,9 +191,11 @@ private:
     std::unique_ptr<IWriteStream> stream_;
     std::vector<char> buffer_;
     std::size_t buffer_used_ = 0;
-    std::uint64_t offset_ = 0;   // 已落盘字节数 —— 文件位置的唯一真相
-    bool committed_ = false;
-    bool failed_ = false;
+    std::uint64_t offset_ = 0;   // 已写入流的字节数，不代表已持久化
+    std::atomic<bool> committed_{false};
+    std::atomic<bool> failed_{false};
+    std::atomic<bool> commit_pending_{false};
+    std::atomic<bool> aborted_{false};
 };
 
 } // namespace storage

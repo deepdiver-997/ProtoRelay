@@ -6,8 +6,6 @@
 #include <memory>
 #include <signal.h>
 #include <string>
-#include <thread>
-#include <chrono>
 #include <cstdlib>
 
 using namespace mail_system;
@@ -73,6 +71,8 @@ int main(int argc, char* argv[]) {
 
     std::cout << "ProtoRelay POP3 Server starting..." << std::endl;
 
+    bootstrap::ShutdownScope shutdown;
+    shutdown.add_server(g_server);
     try {
         std::string config_path = options.config_path;
 
@@ -98,6 +98,7 @@ int main(int argc, char* argv[]) {
                            inbound_auth_policy_to_string(l.auth_policy));
 
         auto res = mail_system::bootstrap::assemble(config);
+        shutdown.add_resources(res);
         g_server = std::make_unique<Pop3Server>(config, res.io_pool, res.worker_pool, res.shard_router);
         g_server->m_configFilePath = config_path;
         g_server->start();
@@ -117,11 +118,8 @@ int main(int argc, char* argv[]) {
         }
 
         LOG_SERVER_INFO("Shutting down...");
-        g_server->request_stop();
+        shutdown.shutdown();
         LOG_SERVER_INFO("POP3 Server stopped");
-
-        g_server.reset();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
         Logger::get_instance().shutdown();
     } catch (const std::exception& e) {
         LOG_SERVER_ERROR("Error: {}", e.what());

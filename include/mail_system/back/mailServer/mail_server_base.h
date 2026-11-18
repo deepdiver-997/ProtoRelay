@@ -4,6 +4,8 @@
 #include "framework/net/dns_resolver.h"
 #include "mail_system/back/server_config.h"
 #include "mail_system/back/router/i_shard_router.h"
+#include <mutex>
+#include <unordered_map>
 
 namespace mail_system {
 class IMailboxCache;
@@ -22,6 +24,10 @@ public:
     }
     bool reload_config(const std::string& filename) override;
     void refresh_metrics() override;
+    // Composition-root phase two, after quiesce_sessions and storage drain.
+    // Virtual dispatch reaches SMTP/webmail queue/outbound teardown, without
+    // granting an individual server ownership of any shared storage runtime.
+    void stop_after_local_storage() { stop(); }
     void increment_mails_accepted();
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = std::move(cache); }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
@@ -36,5 +42,13 @@ public:
     std::shared_ptr<pr::IDnsResolver> m_dnsResolver;
     std::string m_domain;
     std::atomic<size_t> mails_accepted_total_{0};
+
+private:
+    // Baselines belong to each exporter, never to a runtime-wide metrics weak_ptr.
+    // Serialize concurrent scrapes and reset when a new metrics registry replaces it.
+    std::mutex local_storage_metrics_mutex_;
+    std::weak_ptr<pr::MetricsServer> local_storage_metrics_registry_;
+    std::unordered_map<const pr::LocalStorageRuntime*, pr::LocalStorageRuntimeSnapshot>
+        local_storage_metrics_last_;
 };
 } // namespace mail_system

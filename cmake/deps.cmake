@@ -290,6 +290,7 @@ set(COMMON_SRCS
     src/framework/storage/distributed_file_storage_provider.cpp
     src/framework/storage/local_file_storage_provider.cpp
     src/framework/storage/local_file_write_stream.cpp
+    src/framework/storage/local_storage_runtime.cpp
     src/mail_system/back/mailServer/outbound/outbox_repository.cpp
     src/mail_system/back/mailServer/outbound/outbound_utils.cpp
     src/mail_system/back/mailServer/outbound/mx_routing_utils.cpp

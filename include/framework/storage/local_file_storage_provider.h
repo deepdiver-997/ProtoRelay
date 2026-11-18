@@ -4,6 +4,7 @@
 #include "framework/storage/i_storage_provider.h"
 #include "framework/storage/local_file_download_stream.h"
 #include "framework/storage/local_file_metadata_cache.h"
+#include "framework/storage/local_storage_runtime.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +17,10 @@ namespace storage {
 
 class LocalFileStorageProvider : public IStorageProvider, public LocalFileMetadataCache {
 public:
-    explicit LocalFileStorageProvider(std::vector<std::string> directories = {});
+    explicit LocalFileStorageProvider(std::vector<std::string> directories = {},
+                                      std::shared_ptr<pr::LocalStorageRuntime> runtime = {});
+
+    std::shared_ptr<pr::LocalStorageRuntime> local_storage_runtime() const { return runtime_; }
 
     bool ensure_ready(IoError& error) override;
 
@@ -52,6 +56,7 @@ public:
 
 private:
     std::vector<std::string> directories_;
+    std::shared_ptr<pr::LocalStorageRuntime> runtime_;
 };
 
 } // namespace storage

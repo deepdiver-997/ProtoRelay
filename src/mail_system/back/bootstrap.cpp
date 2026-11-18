@@ -32,16 +32,81 @@
 #endif
 #include <functional>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace mail_system {
 namespace bootstrap {
 
 // 前置声明（实现见下）：主 DB 池工厂，从原 pr::ServerBase 构造函数原样搬来
 static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config, const std::shared_ptr<pr::ThreadPoolBase>& io);
-static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config);
+static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(
+    const ServerConfig& config, const std::shared_ptr<pr::LocalStorageRuntime>& local_storage_runtime);
+
+void Assembled::shutdown_local_storage() const {
+    if (!local_storage_runtime) return;
+    local_storage_runtime->close_admission();
+    local_storage_runtime->drain();
+    local_storage_runtime->shutdown();
+}
+
+ShutdownScope::~ShutdownScope() {
+    try { shutdown(); }
+    catch (const std::exception& error) {
+        LOG_SERVER_ERROR("Composition-root shutdown failed: {}", error.what());
+    } catch (...) {
+        LOG_SERVER_ERROR("Composition-root shutdown failed with an unknown exception");
+    }
+}
+
+void ShutdownScope::add_resources(const Assembled& resources) {
+    if (stopped_) throw std::logic_error("cannot add resources after shutdown");
+    resources_.push_back(resources);
+}
+
+void ShutdownScope::shutdown() {
+    if (stopped_) return;
+    if (std::this_thread::get_id() != owner_thread_)
+        throw std::logic_error("composition-root shutdown must run on its creating non-executor thread");
+
+    // First stop accept/session activity, without tearing down PQ/outbound or
+    // shared runtimes needed by an already accepted commit's completion.
+    for (auto& server : servers_) server.request_stop();
+    for (auto& server : servers_) server.quiesce();
+    std::unordered_set<pr::LocalStorageRuntime*> storage_seen;
+    for (const auto& resources : resources_)
+        if (resources.local_storage_runtime)
+            resources.local_storage_runtime->close_admission();
+    for (const auto& resources : resources_)
+        if (resources.local_storage_runtime &&
+            storage_seen.insert(resources.local_storage_runtime.get()).second)
+            resources.shutdown_local_storage();
+
+    for (auto& server : servers_) server.stop();
+    // Workers may post final callbacks to IO. Join workers first, then let IO
+    // naturally drain canceled sessions/timers/completions, never stop(false).
+    std::unordered_set<pr::ThreadPoolBase*> workers_seen, io_seen;
+    for (const auto& resources : resources_)
+        if (resources.worker_pool && workers_seen.insert(resources.worker_pool.get()).second)
+            resources.worker_pool->stop(true);
+    for (const auto& resources : resources_)
+        if (resources.io_pool && io_seen.insert(resources.io_pool.get()).second)
+            resources.io_pool->stop(true);
+    // SessionBase and delayed callbacks can refer to the server by raw pointer.
+    // Keep every server alive until its executor has finished, even on failure.
+    for (auto& server : servers_) server.reset();
+    resources_.clear();
+    stopped_ = true;
+}
 
 Assembled assemble(const ServerConfig& config, const Options& opts) {
     Assembled out;
+    config.storage.local.runtime_config.validate();
+    if (opts.local_storage_runtime &&
+        opts.local_storage_runtime->config() != config.storage.local.runtime_config)
+        throw std::invalid_argument("bootstrap: injected local_storage_runtime conflicts with storage.local configuration");
+    out.local_storage_runtime = opts.local_storage_runtime;
+    if (!out.local_storage_runtime)
+        out.local_storage_runtime = std::make_shared<pr::LocalStorageRuntime>(config.storage.local.runtime_config);
 
     if (config.io_backend != "asio" && config.io_backend != "native")
         throw std::runtime_error("bootstrap: io_backend must be 'asio' or 'native'");
@@ -103,7 +168,7 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     }
 
     // ---- 3. 主存储 ----
-    auto main_storage = build_main_storage(config);
+    auto main_storage = build_main_storage(config, out.local_storage_runtime);
     {
         pr::storage::IoError err;
         if (!main_storage->ensure_ready(err))
@@ -113,7 +178,8 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
     // ---- 3b. 远程后端套真异步装饰器 ----
     // S3/WebHDFS 的 PUT/GET 是毫秒~百毫秒级阻塞网络操作：commit_async 与三个 async
     // 读投递到 worker 线程池执行，io 线程不再被卡（调用点已按 pause 独占约定改造）。
-    // 本地后端保持内联——stat/mmap/进 page cache 的写都是 µs 级，多一次线程跳转纯属浪费。
+    // 本地流的 write/read 仍同步；只有 commit_async 按独立 local runtime 配置
+    // offload/inline，不使用通用 worker 池，也不在队列满额时回退到内联 I/O。
     // 纯 DI 红利：装配此刻 worker 池已就绪，直接捕获 shared_ptr，
     // 不再需要原 pr::ServerBase 版本的"惰性取池"间接层。
     const auto& sc = config.storage;
@@ -163,7 +229,8 @@ Assembled assemble(const ServerConfig& config, const Options& opts) {
                     std::filesystem::create_directories(mail_dir);
                 if (!std::filesystem::exists(att_dir))
                     std::filesystem::create_directories(att_dir);
-                sst = std::make_shared<storage::LocalFileStorageProvider>(mail_dir, att_dir);
+                sst = std::make_shared<storage::LocalFileStorageProvider>(
+                    mail_dir, att_dir, out.local_storage_runtime);
             }
             shard_storages.push_back(sst ? sst : main_storage);
         }
@@ -234,7 +301,8 @@ static std::shared_ptr<pr::DBPool> build_main_db_pool(const ServerConfig& config
     return nullptr;
 }
 
-static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const ServerConfig& config) {
+static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(
+    const ServerConfig& config, const std::shared_ptr<pr::LocalStorageRuntime>& local_storage_runtime) {
     const auto& sc = config.storage;
     switch (storage::provider_type_from_string(sc.provider)) {
     case storage::StorageProviderType::Distributed:
@@ -268,7 +336,7 @@ static std::shared_ptr<pr::storage::IStorageProvider> build_main_storage(const S
         if (!std::filesystem::exists(sc.local.attachment_path))
             std::filesystem::create_directories(sc.local.attachment_path);
         return std::make_shared<storage::LocalFileStorageProvider>(
-            sc.local.mail_path, sc.local.attachment_path);
+            sc.local.mail_path, sc.local.attachment_path, local_storage_runtime);
     }
 }
 
